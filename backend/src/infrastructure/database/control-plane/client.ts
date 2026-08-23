@@ -9,3 +9,5 @@ export const controlPlanePool = new Pool({
 });
 
 export const controlPlaneDb = drizzle(controlPlanePool, { schema });
+
+export type ControlPlaneDatabase = typeof controlPlaneDb;
