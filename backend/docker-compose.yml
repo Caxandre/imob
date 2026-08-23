@@ -1,3 +1,7 @@
+# Pinned so the Compose project name does not depend on the directory this file lives in
+# (it would otherwise default to "backend" and orphan the existing named volumes).
+name: imob
+
 services:
   postgres-control:
     image: postgres:17-alpine

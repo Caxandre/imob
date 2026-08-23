@@ -1,22 +1,37 @@
+# Single .gitignore for the whole repository (backend/ and frontend/).
+
 # Dependencies
 node_modules/
 
 # Build output
 dist/
+build/
+.next/
+out/
 *.tsbuildinfo
 
-# Environment
+# Environment — ignore every .env variant, but keep the committed examples
 .env
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Testing / coverage
 coverage/
+*.lcov
 
 # Logs
 logs/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+yarn-debug.log*
+
+# Caches / temporary files
+.cache/
+.turbo/
+*.tmp
+*.temp
 
 # IDE
 .vscode/*

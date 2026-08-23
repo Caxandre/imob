@@ -1,0 +1,66 @@
+name: Backend CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  build:
+    name: typecheck / lint / test / build
+    runs-on: ubuntu-latest
+
+    services:
+      # Stands in for the local `postgres-control` service. The test global setup creates
+      # and drops its own database on this server, so no POSTGRES_DB is needed here.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Only variable CI must provide: vitest.config.ts derives CONTROL_PLANE_DATABASE_URL
+      # from it and injects REDIS_URL itself. Throwaway CI credentials.
+      CONTROL_PLANE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/imob_control_test
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Must run before setup-node so that `cache: pnpm` can find pnpm.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: backend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: backend/.nvmrc
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+
+      - run: pnpm lint
+
+      - run: pnpm test
+
+      - run: pnpm build

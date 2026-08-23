@@ -7,9 +7,13 @@ para orientar decisões futuras, não para descrever o estado atual do código.
 ## Visão geral
 
 ```text
-frontend   (projeto separado, sem monorepo)
-backend    (este repositório)
+imob/
+├── backend/    (este projeto)
+└── frontend/   (aplicação independente, ainda não inicializada)
 ```
+
+Backend e frontend são aplicações independentes — dependências, build e testes próprios,
+sem workspace e sem packages compartilhados — versionadas em um único repositório Git.
 
 O backend é um **monólito modular**, não um conjunto de microserviços. API HTTP e workers
 compartilham o mesmo código-base, mas possuem entrypoints e responsabilidades independentes.
