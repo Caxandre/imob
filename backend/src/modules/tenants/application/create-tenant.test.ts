@@ -5,7 +5,7 @@ import { TenantSlugAlreadyExistsError, type Tenant } from "../domain/tenant.js";
 
 function fakeRepository(overrides: Partial<TenantRepository> = {}): TenantRepository {
   return {
-    create: async (input: CreateTenantInput): Promise<Tenant> => ({
+    createWithProvisioningIntent: async (input: CreateTenantInput): Promise<Tenant> => ({
       id: "11111111-1111-4111-8111-111111111111",
       name: input.name,
       slug: input.slug,
@@ -34,9 +34,9 @@ describe("createTenant", () => {
   it("passes the input through to the repository unchanged", async () => {
     const received: CreateTenantInput[] = [];
     const repository = fakeRepository({
-      create: async (input) => {
+      createWithProvisioningIntent: async (input) => {
         received.push(input);
-        return fakeRepository().create(input);
+        return fakeRepository().createWithProvisioningIntent(input);
       },
     });
 
@@ -47,7 +47,7 @@ describe("createTenant", () => {
 
   it("propagates a duplicate slug error from the repository", async () => {
     const repository = fakeRepository({
-      create: async (input) => {
+      createWithProvisioningIntent: async (input) => {
         throw new TenantSlugAlreadyExistsError(input.slug);
       },
     });
