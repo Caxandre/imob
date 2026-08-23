@@ -64,9 +64,22 @@ provisionamento — não é uma fila e não será substituída pelo BullMQ como 
 o BullMQ (quando implementado) apenas dispara execução a partir do que já está registrado
 aqui.
 
-**PLANNED** — BullMQ dispatcher/worker que consome `provisioning_jobs` pendentes,
-`DatabaseProvisioner` (execução real de `CREATE DATABASE`), criação de registros em
-`tenant_databases`.
+**IMPLEMENTED (documentation)** — a arquitetura de entrega confiável entre o Control Plane e
+o BullMQ está decidida em [ADR-002](adr/ADR-002-provisioning-dispatcher.md):
+
+```text
+provisioning_jobs (PostgreSQL, fonte de verdade)
+        ↓
+dispatcher persistente (polling, idempotente, sem estado em memória)
+        ↓
+BullMQ (jobId = provisioning_jobs.id)
+        ↓
+worker
+```
+
+**PLANNED** — código do dispatcher, worker, `DatabaseProvisioner` (execução real de
+`CREATE DATABASE`) e criação de registros em `tenant_databases`. Nenhum desses existe ainda;
+apenas a decisão arquitetural que os orienta está registrada.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
