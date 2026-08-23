@@ -1,0 +1,56 @@
+services:
+  postgres-control:
+    image: postgres:17-alpine
+    container_name: imob-postgres-control
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: imob_control
+    ports:
+      - "5434:5432"
+    volumes:
+      - imob_postgres_control_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Cluster where tenant-owned databases will be provisioned later, one per tenant.
+  # No dynamic provisioning happens yet — this only makes the server available locally.
+  postgres-tenants:
+    image: postgres:17-alpine
+    container_name: imob-postgres-tenants
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - imob_postgres_tenants_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: imob-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - imob_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  imob_postgres_control_data:
+  imob_postgres_tenants_data:
+  imob_redis_data:
