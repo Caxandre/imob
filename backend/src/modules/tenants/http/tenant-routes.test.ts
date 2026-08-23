@@ -90,6 +90,9 @@ describe("POST /api/v1/tenants", () => {
       errorMessage: null,
       startedAt: null,
       finishedAt: null,
+      dispatchClaimedAt: null,
+      dispatchLeaseUntil: null,
+      dispatchedAt: null,
     });
   });
 

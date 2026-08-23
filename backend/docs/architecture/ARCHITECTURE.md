@@ -77,9 +77,15 @@ BullMQ (jobId = provisioning_jobs.id)
 worker
 ```
 
+**IMPLEMENTED** — schema do protocolo de dispatch em `provisioning_jobs`: as colunas
+`dispatch_claimed_at`, `dispatch_lease_until` e `dispatched_at` (todas nullable, sem
+default), a constraint que impede um lease sem claim, e um índice parcial sobre jobs
+`PENDING` ainda não confirmados como despachados. Nenhum código lê ou escreve essas colunas
+ainda — apenas o suporte de persistência existe.
+
 **PLANNED** — código do dispatcher, worker, `DatabaseProvisioner` (execução real de
 `CREATE DATABASE`) e criação de registros em `tenant_databases`. Nenhum desses existe ainda;
-apenas a decisão arquitetural que os orienta está registrada.
+apenas a decisão arquitetural e o schema que os suportam estão registrados.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou

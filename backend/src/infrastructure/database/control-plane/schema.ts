@@ -100,6 +100,12 @@ export const provisioningJobs = pgTable(
     errorMessage: text("error_message"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    // Dispatch protocol (ADR-002) — owned exclusively by the future dispatcher, never by the
+    // worker. dispatchClaimedAt/dispatchLeaseUntil track a claim attempt; dispatchedAt is
+    // written once, only after queue.add() actually confirms success.
+    dispatchClaimedAt: timestamp("dispatch_claimed_at", { withTimezone: true }),
+    dispatchLeaseUntil: timestamp("dispatch_lease_until", { withTimezone: true }),
+    dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -107,5 +113,21 @@ export const provisioningJobs = pgTable(
     // Jobs are expected to be listed per tenant; the FK column is not indexed automatically.
     index("provisioning_jobs_tenant_id_idx").on(t.tenantId),
     check("provisioning_jobs_attempts_non_negative", sql`${t.attempts} >= 0`),
+    // A lease is only ever set together with (or after) a claim timestamp — see ADR-002
+    // Step 2. The reverse is not required: Step 5 clears the lease on a failed dispatch
+    // attempt while deliberately keeping dispatchClaimedAt for observability.
+    check(
+      "provisioning_jobs_dispatch_lease_requires_claim",
+      sql`${t.dispatchLeaseUntil} IS NULL OR ${t.dispatchClaimedAt} IS NOT NULL`,
+    ),
+    // Partial index over exactly the dispatcher's eligibility predicate (ADR-002): jobs
+    // still PENDING and never confirmed dispatched. Ordered by createdAt to serve the
+    // dispatcher's FIFO scan directly from the index, without a separate sort step.
+    // dispatchLeaseUntil is deliberately not part of the index — within this already-narrow
+    // partial set it's a cheap residual filter, and including it would break the
+    // createdAt-ordered scan for any row with a non-null lease.
+    index("provisioning_jobs_pending_dispatch_idx")
+      .on(t.createdAt)
+      .where(sql`${t.status} = 'PENDING' AND ${t.dispatchedAt} IS NULL`),
   ],
 );
