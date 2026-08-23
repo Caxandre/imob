@@ -43,8 +43,14 @@ assinaturas, billing, clusters de database, databases de tenants, jobs de provis
 Migrations são aplicadas por um comando explícito (`pnpm db:migrate`), nunca na
 inicialização da API.
 
-**PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. Nenhuma leitura ou
-escrita dessas tabelas existe no código: não há repositories, services nem endpoints.
+**IMPLEMENTED** — criação de tenant (`src/modules/tenants/`): `POST /api/v1/tenants`
+persiste um tenant com status `PROVISIONING`. É a única escrita existente no Control Plane.
+O endpoint termina na persistência: não cria database, não enfileira job e não grava em
+`provisioning_jobs`.
+
+**PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
+`tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
+escreve nelas: não há repositories, services nem endpoints para essas tabelas.
 
 ## Tenant Data Plane
 

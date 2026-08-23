@@ -2,7 +2,10 @@ import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import fastify, { type FastifyError, type FastifyInstance } from "fastify";
 
+import { controlPlaneDb } from "../infrastructure/database/control-plane/client.js";
 import { createLoggerOptions } from "../infrastructure/logger/logger.js";
+import { createDrizzleTenantRepository } from "../modules/tenants/infrastructure/drizzle-tenant-repository.js";
+import { tenantRoutes } from "../modules/tenants/http/tenant-routes.js";
 import { healthRoute } from "./routes/health.route.js";
 
 export function buildApp(): FastifyInstance {
@@ -45,6 +48,9 @@ export function buildApp(): FastifyInstance {
   });
 
   void app.register(healthRoute);
+
+  const tenantRepository = createDrizzleTenantRepository(controlPlaneDb);
+  void app.register(tenantRoutes(tenantRepository), { prefix: "/api/v1" });
 
   return app;
 }
