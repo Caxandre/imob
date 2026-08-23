@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../../../app/build-app.js";
 import { controlPlaneDb, controlPlanePool } from "../../../infrastructure/database/control-plane/client.js";
@@ -58,14 +58,39 @@ describe("POST /api/v1/tenants", () => {
     expect(rows[0]).toMatchObject({ id, name: "Acme", slug: "acme", status: "PROVISIONING" });
   });
 
-  it("does not create any provisioning job", async () => {
+  it("atomically persists exactly one provisioning job and no tenant database", async () => {
     await createTenantRequest({ name: "Acme", slug: "acme" });
 
     const jobs = await controlPlaneDb.select().from(provisioningJobs);
     const databases = await controlPlaneDb.select().from(tenantDatabases);
 
-    expect(jobs).toHaveLength(0);
+    expect(jobs).toHaveLength(1);
     expect(databases).toHaveLength(0);
+  });
+
+  it("associates the provisioning job with the created tenant", async () => {
+    const response = await createTenantRequest({ name: "Acme", slug: "acme" });
+    const { id: tenantId } = response.json();
+
+    const [job] = await controlPlaneDb.select().from(provisioningJobs);
+
+    expect(job?.tenantId).toBe(tenantId);
+  });
+
+  it("creates the provisioning job with the expected defaults", async () => {
+    await createTenantRequest({ name: "Acme", slug: "acme" });
+
+    const [job] = await controlPlaneDb.select().from(provisioningJobs);
+
+    expect(job).toMatchObject({
+      type: "CREATE_DATABASE",
+      status: "PENDING",
+      attempts: 0,
+      currentStep: null,
+      errorMessage: null,
+      startedAt: null,
+      finishedAt: null,
+    });
   });
 
   it("trims the name and trims/lowercases the slug", async () => {
@@ -113,7 +138,7 @@ describe("POST /api/v1/tenants", () => {
     expect(response.statusCode).toBe(400);
   });
 
-  it("returns 409 when the slug already exists", async () => {
+  it("returns 409 when the slug already exists, without a leftover provisioning job", async () => {
     const first = await createTenantRequest({ name: "Primeira", slug: "duplicada" });
     expect(first.statusCode).toBe(201);
 
@@ -122,8 +147,10 @@ describe("POST /api/v1/tenants", () => {
     expect(second.statusCode).toBe(409);
     expect(second.json()).toMatchObject({ statusCode: 409, error: "Conflict" });
 
-    const rows = await controlPlaneDb.select().from(tenants);
-    expect(rows).toHaveLength(1);
+    const tenantRows = await controlPlaneDb.select().from(tenants);
+    const jobRows = await controlPlaneDb.select().from(provisioningJobs);
+    expect(tenantRows).toHaveLength(1);
+    expect(jobRows).toHaveLength(1);
   });
 
   it("treats slugs differing only by case as duplicates", async () => {
@@ -132,5 +159,47 @@ describe("POST /api/v1/tenants", () => {
     const second = await createTenantRequest({ name: "Segunda", slug: "DUPLICADA" });
 
     expect(second.statusCode).toBe(409);
+  });
+});
+
+describe("POST /api/v1/tenants — transactional rollback", () => {
+  const TRIGGER_NAME = "force_provisioning_job_failure";
+  const FUNCTION_NAME = "force_provisioning_job_failure";
+
+  afterEach(async () => {
+    await controlPlaneDb.execute(
+      sql.raw(`DROP TRIGGER IF EXISTS ${TRIGGER_NAME} ON provisioning_jobs`),
+    );
+    await controlPlaneDb.execute(sql.raw(`DROP FUNCTION IF EXISTS ${FUNCTION_NAME}()`));
+  });
+
+  it("leaves no tenant or provisioning job behind when the job insert fails", async () => {
+    // A real PostgreSQL trigger forces the second insert of the transaction to fail,
+    // proving rollback against the actual database rather than a mocked Drizzle call.
+    await controlPlaneDb.execute(sql.raw(`
+      CREATE FUNCTION ${FUNCTION_NAME}() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'forced failure for rollback test';
+      END;
+      $$ LANGUAGE plpgsql
+    `));
+    await controlPlaneDb.execute(sql.raw(`
+      CREATE TRIGGER ${TRIGGER_NAME}
+      BEFORE INSERT ON provisioning_jobs
+      FOR EACH ROW EXECUTE FUNCTION ${FUNCTION_NAME}()
+    `));
+
+    const response = await createTenantRequest({ name: "Rollback Test", slug: "rollback-test" });
+
+    expect(response.statusCode).toBe(500);
+
+    const tenantRows = await controlPlaneDb
+      .select()
+      .from(tenants)
+      .where(eq(tenants.slug, "rollback-test"));
+    const jobRows = await controlPlaneDb.select().from(provisioningJobs);
+
+    expect(tenantRows).toHaveLength(0);
+    expect(jobRows).toHaveLength(0);
   });
 });

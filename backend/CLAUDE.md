@@ -50,6 +50,33 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   ter infraestrutura dedicada. Não assuma que todos os tenants estão no mesmo servidor ou
   cluster.
 
+## Git, Pull Requests e CI
+
+A partir desta tarefa, esta política é permanente para todo trabalho funcional.
+
+> Um prompt funcional corresponde a uma branch e a um Pull Request.
+>
+> Nenhum novo PR funcional deve ser iniciado antes do PR anterior deste fluxo estar
+> aprovado e mergeado na `main`.
+
+Nunca trabalhar diretamente na `main`. Nunca manter dois PRs funcionais deste fluxo abertos
+simultaneamente sem autorização explícita.
+
+Fluxo:
+
+```text
+main → branch da tarefa → implementação → validação local (finalização, abaixo) → commit
+→ push → PR automático → CI → aprovação humana → merge → main atualizada → próxima tarefa
+```
+
+Antes de criar a branch de uma nova tarefa: confirmar `git status` limpo, branch atual =
+`main`, `git pull --ff-only` aplicado, e `gh pr list --state open` sem PR funcional pendente
+deste fluxo. Se houver PR pendente, não iniciar a tarefa — reportar e aguardar.
+
+O PR é criado via `gh pr create` ao final da implementação, não pelo usuário. O CI deve
+ficar verde na mesma branch antes de qualquer pedido de aprovação. O merge só ocorre após
+aprovação humana explícita — nunca auto-aprovado.
+
 ## Finalização
 
 Antes de considerar qualquer tarefa concluída, execute, nesta ordem:

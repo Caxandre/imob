@@ -43,10 +43,30 @@ assinaturas, billing, clusters de database, databases de tenants, jobs de provis
 Migrations são aplicadas por um comando explícito (`pnpm db:migrate`), nunca na
 inicialização da API.
 
-**IMPLEMENTED** — criação de tenant (`src/modules/tenants/`): `POST /api/v1/tenants`
-persiste um tenant com status `PROVISIONING`. É a única escrita existente no Control Plane.
-O endpoint termina na persistência: não cria database, não enfileira job e não grava em
-`provisioning_jobs`.
+**IMPLEMENTED** — criação de tenant + intenção de provisionamento (`src/modules/tenants/`):
+
+```text
+POST /api/v1/tenants
+    ↓
+transaction (Control Plane)
+    ├── insert tenants           (status PROVISIONING)
+    └── insert provisioning_jobs (type CREATE_DATABASE, status PENDING)
+```
+
+As duas escritas ocorrem na mesma transação PostgreSQL: nunca existe um tenant sem a
+intenção de provisionamento persistida junto, e uma falha em qualquer uma delas desfaz as
+duas (`rollback`). A transação contém somente essas duas operações — nenhuma chamada a
+Redis, BullMQ ou serviço externo ocorre dentro dela. O endpoint termina na persistência:
+nenhum database é criado e nenhum job é efetivamente executado ou publicado em fila.
+
+`provisioning_jobs` é o estado persistente e a fonte de auditoria do workflow de
+provisionamento — não é uma fila e não será substituída pelo BullMQ como fonte de verdade;
+o BullMQ (quando implementado) apenas dispara execução a partir do que já está registrado
+aqui.
+
+**PLANNED** — BullMQ dispatcher/worker que consome `provisioning_jobs` pendentes,
+`DatabaseProvisioner` (execução real de `CREATE DATABASE`), criação de registros em
+`tenant_databases`.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
