@@ -32,6 +32,10 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
 - Logging estruturado via Pino. Nunca `console.log` como mecanismo normal de logging. Nunca
   logar senhas, tokens, connection strings completas, secrets ou dados pessoais
   desnecessários.
+- Nunca manter uma transação PostgreSQL aberta durante uma operação externa (Redis, BullMQ,
+  HTTP, filesystem, Secrets Manager). Transações devem conter somente operações PostgreSQL
+  necessárias; ver ADR-002 para o raciocínio completo aplicado ao dispatcher de
+  provisionamento.
 
 ## Multi-tenancy — regra crítica
 
