@@ -144,8 +144,9 @@ Resumo:
   compartilhados, versionadas no mesmo repositório Git.
 - **Monólito modular**: API HTTP e workers vivem no mesmo projeto, com entrypoints
   independentes (apenas a API está implementada nesta fase).
-- **Control Plane**: banco PostgreSQL central com dados globais do SaaS (tenants, planos,
-  billing, provisioning) — ainda sem tabelas implementadas.
+- **Control Plane**: banco PostgreSQL central com dados globais do SaaS. O schema inicial já
+  existe, com as tabelas `tenants`, `database_clusters`, `tenant_databases` e
+  `provisioning_jobs`. Planos e billing ainda não possuem tabelas.
 - **Tenant Data Plane**: cada tenant terá seu próprio database PostgreSQL exclusivo — a
   criação dinâmica desses databases é trabalho futuro, fora do escopo desta fase.
 - O código de domínio nunca assume que todos os tenants compartilham o mesmo database.
