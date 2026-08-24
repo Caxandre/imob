@@ -11,6 +11,11 @@ const envSchema = z.object({
     .string()
     .url("CONTROL_PLANE_DATABASE_URL must be a valid PostgreSQL connection string"),
   REDIS_URL: z.string().url("REDIS_URL must be a valid Redis connection string"),
+
+  // Provisioning dispatcher (ADR-002) — see src/workers/provisioning-dispatcher.ts.
+  PROVISIONING_DISPATCH_BATCH_SIZE: z.coerce.number().int().positive().default(10),
+  PROVISIONING_DISPATCH_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
+  PROVISIONING_DISPATCH_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
 });
 
 function loadEnv() {

@@ -32,6 +32,17 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # Same image/version as docker-compose.yml. No auth locally, so none here either.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
       # Only variable CI must provide: vitest.config.ts derives CONTROL_PLANE_DATABASE_URL
       # from it and injects REDIS_URL itself. Throwaway CI credentials.
