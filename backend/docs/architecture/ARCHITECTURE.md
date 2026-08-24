@@ -19,10 +19,11 @@ O backend é um **monólito modular**, não um conjunto de microserviços. API H
 compartilham o mesmo código-base, mas possuem entrypoints e responsabilidades independentes.
 
 - API HTTP: implementada (`src/main/server.ts`).
-- Workers: implementado o primeiro entrypoint não-HTTP, o dispatcher de provisionamento
-  (`src/workers/provisioning-dispatcher.ts`), com scripts próprios (`pnpm dev:dispatcher`,
-  `pnpm start:dispatcher`) e nunca iniciado automaticamente pela API. Um worker que consome
-  a fila BullMQ **(futuro)** ainda não existe.
+- Workers: dois entrypoints não-HTTP implementados, cada um com scripts próprios e nenhum
+  iniciado automaticamente pela API ou entre si — `src/workers/provisioning-dispatcher.ts`
+  (`pnpm dev:dispatcher` / `pnpm start:dispatcher`) e `src/workers/provisioning-worker.ts`
+  (`pnpm dev:provisioning-worker` / `pnpm start:provisioning-worker`, hoje recusando-se a
+  iniciar — ver seção Control Plane).
 
 ## Control Plane
 
@@ -104,9 +105,41 @@ iniciado automaticamente pelo processo HTTP. O dispatcher só escreve as três c
 dispatch — nunca `status`, `attempts` ou `current_step`, que continuam sendo
 responsabilidade exclusiva do worker.
 
-**PLANNED** — worker que efetivamente consome a fila (nenhum `Worker` do BullMQ foi criado;
-jobs se acumulam na fila sem processamento), `DatabaseProvisioner` (execução real de
-`CREATE DATABASE`) e criação de registros em `tenant_databases`.
+**IMPLEMENTED** — worker de provisionamento e máquina de estado
+(`src/workers/provisioning-worker.ts`, `src/modules/provisioning/`):
+
+```text
+BullMQ job (provision-tenant)
+    ↓
+processProvisioningJob (use case)
+    ↓
+findById — PostgreSQL é sempre consultado antes de agir, nunca o estado do BullMQ
+    ↓
+PENDING → RUNNING (UPDATE ... WHERE status='PENDING' — a escrita é a própria arbitragem)
+    attempts += 1, started_at = now(), current_step = PROVISION_DATABASE
+    ↓
+DatabaseProvisioner.provision() (porta, sem implementação real)
+    ↓
+sucesso → SUCCEEDED, finished_at        falha → FAILED, finished_at, error_message
+```
+
+Idempotente diante de redelivery do BullMQ: job já `SUCCEEDED`/`FAILED` não é reprocessado;
+job já `RUNNING` não é reexecutado concorrentemente (recovery de `RUNNING` abandonado é
+lacuna conhecida, não resolvida). `FAILED` é estado terminal nesta fase — sem retry
+automático, nem do workflow nem do BullMQ (`attempts: 1` explícito na publicação).
+
+**Segurança de runtime**: `DatabaseProvisioner` (porta em
+`process-provisioning-job.ts`) não possui implementação real — criar o database físico do
+tenant está fora do escopo desta fase. O entrypoint de produção
+(`src/workers/provisioning-worker.ts`) **recusa-se a iniciar**, com log e saída explícitos,
+em vez de rodar com uma implementação fake/no-op — isso impediria que jobs reais fossem
+marcados `SUCCEEDED` sem nenhum database ter sido criado. Toda a infraestrutura ao redor
+(BullMQ `Worker`, repository, use case) está implementada e testada com um
+`DatabaseProvisioner` fake apenas em testes.
+
+**PLANNED** — `DatabaseProvisioner` real (execução de `CREATE DATABASE`), criação de
+registros em `tenant_databases`, ativação do tenant (`tenants.status = READY`), recovery de
+jobs `RUNNING` abandonados, política de retry para jobs `FAILED`.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
@@ -170,8 +203,11 @@ Nenhuma parte desse fluxo existe ainda. Em particular:
 
 Redis está disponível localmente (Docker Compose) e no CI. **IMPLEMENTED**: a fila
 `tenant-provisioning` (`src/infrastructure/queue/`), alimentada pelo dispatcher de
-provisionamento. **PLANNED**: nenhum `Worker` do BullMQ consome essa fila ainda — os jobs
-publicados se acumulam sem processamento até o worker de provisionamento ser implementado.
+provisionamento e consumida por um `Worker` BullMQ real
+(`src/modules/provisioning/infrastructure/bullmq-provisioning-worker.ts`). Publicação sem
+retry automático (`attempts: 1` explícito) — o workflow de provisionamento não reinventa
+sua política de retry no BullMQ. **PLANNED**: o entrypoint de produção do worker ainda se
+recusa a iniciar, porque não existe `DatabaseProvisioner` real (ver seção Control Plane).
 
 ## Transactional Outbox **(futuro)**
 
