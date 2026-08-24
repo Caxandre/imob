@@ -510,17 +510,24 @@ de entrega.
 
 ## Future implementation notes
 
+**Atualização**: as três colunas e o suporte de persistência descritos nesta ADR já foram
+implementados (migration `drizzle/control-plane/0001_perfect_impossible_man.sql`). Nomes
+definitivos:
+
+- `provisioning_jobs_dispatch_lease_requires_claim` — CHECK que implementa a invariante
+  "lease implica claim" descrita acima (`dispatch_lease_until IS NULL OR
+  dispatch_claimed_at IS NOT NULL`). Deliberadamente unidirecional: o biconditional
+  simétrico foi avaliado e rejeitado por proibir o estado transitório legítimo do Passo 5
+  (`dispatch_claimed_at` definido, `dispatch_lease_until` liberado).
+- `provisioning_jobs_pending_dispatch_idx` — índice parcial `btree (created_at) WHERE status
+  = 'PENDING' AND dispatched_at IS NULL`, servindo diretamente o `ORDER BY created_at` da
+  query de elegibilidade do Passo 1 sem exigir um sort separado.
+
+Nenhum código de dispatcher, BullMQ ou worker foi implementado junto — apenas o suporte de
+persistência.
+
 Registrado para a tarefa que implementar o dispatcher/worker, sem comprometer detalhes de
 implementação nesta ADR:
-
-- Migration futura:
-  ```sql
-  ALTER TABLE provisioning_jobs
-    ADD COLUMN dispatch_claimed_at  timestamptz NULL,
-    ADD COLUMN dispatch_lease_until timestamptz NULL,
-    ADD COLUMN dispatched_at        timestamptz NULL;
-  ```
-  Aditiva, sem quebra de compatibilidade.
 - Intervalo de polling e tamanho de lote (`LIMIT N`) devem ser configuráveis via variável de
   ambiente validada em `config/env.ts`, não hardcoded.
 - Nenhum scheduler externo (cron, Kafka) — o próprio dispatcher com polling interno é

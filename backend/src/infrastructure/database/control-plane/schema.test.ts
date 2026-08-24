@@ -106,6 +106,17 @@ describe("control plane migrations", () => {
     );
   });
 
+  it("creates the dispatch protocol columns on provisioning_jobs", async () => {
+    const result = await controlPlaneDb.execute<{ column_name: string }>(
+      sql`SELECT column_name FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'provisioning_jobs'`,
+    );
+
+    expect(result.rows.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(["dispatch_claimed_at", "dispatch_lease_until", "dispatched_at"]),
+    );
+  });
+
   it("creates every enum type", async () => {
     const result = await controlPlaneDb.execute<{ typname: string }>(
       sql`SELECT typname FROM pg_type WHERE typtype = 'e'`,
@@ -293,6 +304,9 @@ describe("provisioning_jobs", () => {
     expect(job?.errorMessage).toBeNull();
     expect(job?.startedAt).toBeNull();
     expect(job?.finishedAt).toBeNull();
+    expect(job?.dispatchClaimedAt).toBeNull();
+    expect(job?.dispatchLeaseUntil).toBeNull();
+    expect(job?.dispatchedAt).toBeNull();
   });
 
   it("rejects a job pointing at a non-existent tenant", async () => {
@@ -320,6 +334,66 @@ describe("provisioning_jobs", () => {
 
     expect(error.code).toBe(CHECK_VIOLATION);
     expect(error.constraint).toBe("provisioning_jobs_attempts_non_negative");
+  });
+
+  describe("dispatch_lease_requires_claim constraint", () => {
+    it("accepts a job with no claim and no lease", async () => {
+      const tenant = await insertTenant("dispatch-none");
+
+      await expect(
+        controlPlaneDb.insert(provisioningJobs).values({
+          tenantId: tenant.id,
+          type: "CREATE_DATABASE",
+          dispatchClaimedAt: null,
+          dispatchLeaseUntil: null,
+        }),
+      ).resolves.not.toThrow();
+    });
+
+    it("accepts a job with both claim and lease set (ADR-002 Step 2)", async () => {
+      const tenant = await insertTenant("dispatch-claimed");
+      const now = new Date();
+
+      await expect(
+        controlPlaneDb.insert(provisioningJobs).values({
+          tenantId: tenant.id,
+          type: "CREATE_DATABASE",
+          dispatchClaimedAt: now,
+          dispatchLeaseUntil: new Date(now.getTime() + 60_000),
+        }),
+      ).resolves.not.toThrow();
+    });
+
+    it("accepts a claimed job whose lease was released after a failed dispatch (ADR-002 Step 5)", async () => {
+      const tenant = await insertTenant("dispatch-released");
+
+      // dispatchClaimedAt kept for observability, dispatchLeaseUntil cleared — the exact
+      // transient state Step 5 produces, and the reason the constraint is one-directional.
+      await expect(
+        controlPlaneDb.insert(provisioningJobs).values({
+          tenantId: tenant.id,
+          type: "CREATE_DATABASE",
+          dispatchClaimedAt: new Date(),
+          dispatchLeaseUntil: null,
+        }),
+      ).resolves.not.toThrow();
+    });
+
+    it("rejects a lease without a claim timestamp", async () => {
+      const tenant = await insertTenant("dispatch-invalid");
+
+      const error = await expectViolation(() =>
+        controlPlaneDb.insert(provisioningJobs).values({
+          tenantId: tenant.id,
+          type: "CREATE_DATABASE",
+          dispatchClaimedAt: null,
+          dispatchLeaseUntil: new Date(),
+        }),
+      );
+
+      expect(error.code).toBe(CHECK_VIOLATION);
+      expect(error.constraint).toBe("provisioning_jobs_dispatch_lease_requires_claim");
+    });
   });
 });
 
