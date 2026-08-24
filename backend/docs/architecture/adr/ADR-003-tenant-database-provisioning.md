@@ -204,23 +204,40 @@ por tenant é introduzida:
 
 **Como a role do tenant recebe privilégio sobre objetos criados por migration**: como as
 migrations do Tenant Data Plane rodam como a credencial administrativa (não como a role do
-tenant — ver abaixo), cada tabela/sequence nasce pertencendo ao admin. O mecanismo primário
-para que a role do tenant consiga usá-las é `ALTER DEFAULT PRIVILEGES`, configurado **uma
-vez** logo após a criação do database (antes ou como parte do primeiro passo de
-`RUN_MIGRATIONS`):
+tenant — ver abaixo), cada tabela/sequence nasce pertencendo ao admin. Dois mecanismos
+distintos são necessários, com escopos que **não se sobrepõem**:
 
-```sql
-ALTER DEFAULT PRIVILEGES FOR ROLE <admin_role> IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO <tenant_role>;
-ALTER DEFAULT PRIVILEGES FOR ROLE <admin_role> IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO <tenant_role>;
-```
+- **`GRANT` explícito — objetos já existentes.** `ALTER DEFAULT PRIVILEGES` **não é
+  retroativo**: não concede privilégio sobre nenhum objeto que já existisse no momento em
+  que foi configurado, mesmo que criado um instante antes. Se migrations já tiverem criado
+  tabelas/sequences antes de `ALTER DEFAULT PRIVILEGES` estar configurado — por exemplo, um
+  tenant provisionado sob uma versão anterior deste fluxo, antes dessa etapa existir — a
+  única forma de cobri-las é um `GRANT` explícito sobre os objetos já existentes:
 
-Com isso, toda tabela/sequence que uma migration futura criar (sempre executada como o
-mesmo `admin_role`) já nasce com o privilégio correto para a role do tenant, sem exigir um
-`GRANT` manual repetido a cada migration. Um `GRANT` explícito por objeto continua sendo o
-mecanismo de fallback para objetos criados antes de `ALTER DEFAULT PRIVILEGES` existir, ou
-para privilégios que fujam do padrão default (não esperado na v1).
+  ```sql
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO <tenant_role>;
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO <tenant_role>;
+  ```
+
+- **`ALTER DEFAULT PRIVILEGES` — objetos criados por migrations futuras.** Configurado
+  **uma única vez**, como o primeiro statement executado no database recém-criado — **antes
+  de qualquer migration do Tenant Data Plane rodar**, nunca depois:
+
+  ```sql
+  ALTER DEFAULT PRIVILEGES FOR ROLE <admin_role> IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO <tenant_role>;
+  ALTER DEFAULT PRIVILEGES FOR ROLE <admin_role> IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO <tenant_role>;
+  ```
+
+  Nessa ordem — configurado antes da primeira migration — toda tabela/sequence que
+  qualquer migration criar dali em diante, incluindo a própria primeira, já nasce com o
+  privilégio correto para a role do tenant, sem exigir `GRANT` manual repetido a cada
+  migration subsequente.
+
+Na v1, com essa ordem garantida (default privileges antes de qualquer migration), o `GRANT`
+explícito acima não é necessário no caminho feliz — mas permanece documentado como o
+mecanismo de recuperação para qualquer database cujo histórico não garanta essa ordem.
 
 **Execução de migrations**: confirmado — o **admin do cluster** executa provisioning e
 migrations do tenant (evita gerenciar uma segunda role de "migration" por tenant); a
@@ -593,7 +610,8 @@ detalhes de implementação nesta ADR:
   `databaseName`, `secretReference`, `schemaVersion`) em vez de `void`. A camada de
   aplicação — não o provisionador — é quem grava esse resultado em `tenant_databases`,
   ativa o tenant e finaliza o `provisioning_job`.
-- As migrations do Tenant Data Plane devem incluir, na primeira execução por database, os
-  comandos `ALTER DEFAULT PRIVILEGES` (ver "Credentials and secrets") que dão à role do
-  tenant os privilégios de aplicação sobre objetos futuros — não apenas os objetos da
-  primeira migration.
+- O provisionamento de cada database deve executar os comandos `ALTER DEFAULT PRIVILEGES`
+  (ver "Credentials and secrets") **antes** de rodar a primeira migration do Tenant Data
+  Plane — nessa ordem, nenhum `GRANT` explícito é necessário no caminho feliz. O `GRANT`
+  explícito documentado na mesma seção existe apenas como mecanismo de recuperação, caso
+  essa ordem não possa ser garantida para algum database.
