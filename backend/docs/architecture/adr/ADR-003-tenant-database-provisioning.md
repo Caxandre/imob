@@ -605,13 +605,50 @@ esboço conceitual acima — refinamentos, não mudanças de decisão:
 - **`SecretStore`**: o valor armazenado é `TenantDatabaseSecret { username, password }`, não
   a `string` opaca do esboço original — evita que um valor solto (`password`) fique ambíguo
   sobre a qual credencial pertence. `host`/`database` continuam de fora, pois já pertencem ao
-  registry (`database_clusters`/`tenant_databases`).
+  registry (`database_clusters`/`tenant_databases`). **Superado pelo Prompt 012** — ver
+  abaixo.
 - Nova variável de ambiente `TENANT_DATABASE_DEFAULT_CLUSTER` (obrigatória, sem default)
   alimenta a implementação real do `DatabaseClusterSelector` — o nome default mencionado em
   "Cluster selection" acima.
 - Confirmado: nenhuma migration foi necessária; nenhuma dependência nova foi adicionada.
   `SecretStore` de produção, `DatabaseProvisioner` real e as demais lacunas continuam como
   descrito em "Consequences".
+
+## Prompt 012 — credenciais de cluster e de tenant implementadas
+
+Refina o `SecretStore` do Prompt 011 e implementa a resolução/geração de credencial descritas
+em "Credentials and secrets" acima. Sem nenhum efeito externo (nenhum `CREATE ROLE`/`ALTER
+ROLE`/`CREATE DATABASE`).
+
+- **`SecretStore` — mudança de tipagem (supera o Prompt 011)**: o valor armazenado deixou de
+  ser `TenantDatabaseSecret` tipado e passou a ser `unknown`. Motivo: um provider real (AWS
+  Secrets Manager, Vault, ...) devolve JSON arbitrário sem nenhuma garantia de compile-time —
+  afirmar um tipo concreto no próprio `SecretStore` seria uma falsa segurança. A validação
+  passou para o ponto de recuperação: `ClusterAdminCredentialResolver` (novo) valida o
+  payload com Zod antes de devolver um `ClusterAdminCredential` tipado. Regra registrada
+  também em `CLAUDE.md`: nunca confiar no tipo de um secret recuperado de provider externo.
+- **Tipos de credencial**: `DatabaseCredential { username, password }` como shape estrutural
+  único, com `ClusterAdminCredential`/`TenantDatabaseCredential` como aliases semânticos —
+  não uma hierarquia de classes, já que as duas são estruturalmente idênticas hoje. Cada uma
+  tem seu próprio schema Zod `.strict()` (`clusterAdminCredentialSchema`/
+  `tenantDatabaseCredentialSchema`) para poderem divergir de forma independente no futuro sem
+  exigir uma migração de tipo conjunta.
+- **`ClusterAdminCredentialResolver`**: `resolve(secretReference)` — busca no `SecretStore`,
+  valida com `clusterAdminCredentialSchema`, retorna `ClusterAdminCredential`. Dois erros:
+  `ClusterAdminSecretNotFoundError` (reference sem valor) e `InvalidClusterAdminSecretError`
+  (valor presente, mas falha a validação — inclui os *paths* dos campos inválidos, nunca o
+  valor). `DatabaseClusterSelector` continua sem resolver credencial nenhuma — só devolve
+  `DatabaseCluster` com o `secretReference` opaco, exatamente como já decidido no Prompt 011.
+- **Geração de senha do tenant** (`createTenantDatabaseCredential(roleName)`): `username` é
+  sempre o `roleName` determinístico (nunca aleatório); `password` é
+  `randomBytes(32)` (256 bits) de `node:crypto`, codificado em `base64url` — alfabeto
+  `[A-Za-z0-9_-]`, sem padding, evita problemas de escaping em bibliotecas de conexão e
+  contextos de shell/env. Função pura, sem I/O — não decide sozinha se uma nova senha é
+  necessária; essa decisão (role existe? secret existe?) pertence ao futuro
+  `DatabaseProvisioner`, seguindo a regra já registrada em "Idempotency"/"Por que essa ordem".
+  Não é chamada por nenhum fluxo ainda (nem `POST /tenants`, nem dispatcher, nem worker).
+- Confirmado: nenhuma migration foi necessária; nenhuma dependência nova foi adicionada
+  (`node:crypto` e Zod já disponíveis).
 
 ## Future implementation notes
 

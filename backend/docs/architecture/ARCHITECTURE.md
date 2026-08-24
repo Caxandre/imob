@@ -184,11 +184,35 @@ migration nova foi necessária — o schema atual já acomoda a decisão.
   `DatabaseClusterNotAvailableError`, que nomeia o cluster procurado mas nunca expõe
   credenciais. Nova variável de ambiente obrigatória: `TENANT_DATABASE_DEFAULT_CLUSTER` (sem
   valor default).
-- `SecretStore` (`secret-store.ts`) — porta `put`/`get`/`delete` sobre
-  `TenantDatabaseSecret` (`{username, password}`, sem host/database, que já pertencem ao
-  registry do cluster). Sem implementação de produção ainda. `createInMemorySecretStore`
-  (`test-support/in-memory-secret-store.ts`) é um fake apenas para testes — não persiste em
-  disco e nunca deve ser promovido a produção.
+- `SecretStore` (`secret-store.ts`) — porta `put`/`get`/`delete` sobre `unknown`: o boundary
+  não afirma nenhuma tipagem que um provider externo real (AWS Secrets Manager, Vault, ...)
+  não possa garantir. Validação do payload acontece no ponto de recuperação, não no
+  armazenamento (ver `cluster-admin-credential-resolver.ts`). Sem implementação de produção
+  ainda.
+
+**IMPLEMENTED** — gestão de credenciais de database, distinta da fundação sem efeito externo
+do Prompt 011 (`src/modules/provisioning/application/`, `src/modules/provisioning/test-support/`):
+
+- `DatabaseCredential` (`database-credential.ts`) — shape estrutural comum (`{username,
+  password}`), com `ClusterAdminCredential` e `TenantDatabaseCredential` como aliases
+  semânticos (mesma forma hoje; não uma hierarquia artificial). Validados por schemas Zod
+  **separados** (`clusterAdminCredentialSchema`/`tenantDatabaseCredentialSchema`, ambos
+  `.strict()`) para poderem divergir de forma independente no futuro sem afetar o outro.
+- `ClusterAdminCredentialResolver` (`cluster-admin-credential-resolver.ts`) —
+  `resolve(secretReference)`: busca no `SecretStore`, valida com Zod, retorna
+  `ClusterAdminCredential` tipado. Nunca faz cast não validado. Dois erros específicos:
+  `ClusterAdminSecretNotFoundError` (nada no reference) e `InvalidClusterAdminSecretError`
+  (payload existe mas falha a validação) — nenhum dos dois inclui o payload/senha, só a
+  referência e, no segundo caso, os campos que falharam.
+- `createTenantDatabaseCredential(roleName)` (`tenant-database-credential-generator.ts`) —
+  função pura, sem I/O: `username` é sempre o `roleName` determinístico do Prompt 011 (nunca
+  aleatório); `password` é gerado via `node:crypto` `randomBytes(32)` (256 bits) codificado
+  em `base64url`. Chamada não persiste nada e não é acionada por nenhum fluxo ainda (não
+  chamada por `POST /tenants`, dispatcher ou worker) — a geração pertence ao futuro
+  `DatabaseProvisioner`.
+- `createInMemorySecretStore` (`test-support/in-memory-secret-store.ts`) — fake de
+  teste/desenvolvimento local; recusa-se a construir sob `NODE_ENV=production`, para que não
+  possa ser conectado por acidente.
 
 **PLANNED** — `DatabaseProvisioner` real, `SecretStore` de produção, migrations do Tenant
 Data Plane, criação de registros em `tenant_databases`, ativação do tenant
