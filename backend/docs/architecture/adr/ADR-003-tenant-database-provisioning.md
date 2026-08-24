@@ -650,6 +650,46 @@ ROLE`/`CREATE DATABASE`).
 - Confirmado: nenhuma migration foi necessária; nenhuma dependência nova foi adicionada
   (`node:crypto` e Zod já disponíveis).
 
+## Prompt 013 — `TenantRoleProvisioner` (CREATE ROLE/ALTER ROLE) implementado
+
+Implementa apenas `CREATE_ROLE`/`SAVE_CREDENTIALS` dos "Provisioning steps" acima —
+`CREATE_DATABASE`, `RUN_MIGRATIONS`, `HEALTH_CHECK` continuam não implementados, e este
+componente ainda não está ligado ao `DatabaseProvisioner`/worker.
+
+- **Quarto caso formalizado — role ausente, secret existente**: "Por que essa ordem" acima
+  documentava apenas três dos quatro estados possíveis (role nova; role+secret consistentes;
+  role existe/secret ausente). O quarto — **secret existe, role ausente** — não estava
+  explícito e precisa ser registrado aqui: **reutilizar a senha já salva para o `CREATE
+  ROLE`, nunca gerar uma senha nova sem necessidade.** Pode acontecer após um `SecretStore.put()`
+  bem-sucedido seguido de uma `CREATE ROLE` que nunca chegou a rodar ou foi desfeita, ou por
+  intervenção manual. Gerar uma senha nova nesse caso romperia, sem motivo, credenciais que
+  algum consumidor futuro já possa ter obtido do `SecretStore`.
+- **Metadata de conexão do cluster (achado de implementação, não previsto neste ADR)**:
+  `DatabaseCluster` não carregava `host`/`port` — nada com que abrir uma conexão
+  administrativa real. Adicionadas duas colunas a `database_clusters`
+  (`host text NOT NULL`, `port integer NOT NULL DEFAULT 5432`, com
+  `CHECK (port BETWEEN 1 AND 65535)`), nunca uma connection string completa. Única migration
+  desta tarefa.
+- **Maintenance database**: `CREATE ROLE`/`ALTER ROLE` são operações de nível de cluster, não
+  de um database específico — a conexão administrativa usa `"postgres"` (convenção padrão do
+  PostgreSQL) só para ter algo a que se conectar, nunca o database do tenant (que ainda não
+  existe nesta fase).
+- **Password em DDL, não em bind parameter**: PostgreSQL não aceita parâmetro `$1` no lugar
+  do literal de `PASSWORD` em `CREATE ROLE`/`ALTER ROLE` (statements de utilidade, ao
+  contrário de `SELECT`/`INSERT`/`UPDATE`/`DELETE`). A senha é embutida no texto do SQL via
+  `pg.escapeLiteral`/`pg.escapeIdentifier` (utilitário de escaping já embutido no driver `pg`
+  já usado pelo projeto — nenhuma dependência nova). Erros do driver nessas duas operações
+  são encapsulados em `TenantRoleProvisioningError`, cuja `.message` nunca inclui o texto cru
+  do driver (que, em tese, poderia ecoar um fragmento do SQL com a senha em caso de erro de
+  sintaxe) — o erro original só existe em `.cause`, nunca em `.message`.
+- Verificação de credencial em teste: como o database do tenant ainda não existe, os testes
+  autenticam a role recém-criada contra o database `"postgres"` do próprio cluster
+  administrativo. Seguro porque PostgreSQL concede `CONNECT` a `PUBLIC` em todo database por
+  padrão — abrir essa conexão não concede nenhum privilégio além do que a role já teria de
+  qualquer forma.
+- Confirmado: nenhum `CREATE DATABASE`, nenhum `GRANT`, nenhuma migration de tenant, nenhum
+  health check, nenhuma alteração no worker/máquina de estado.
+
 ## Future implementation notes
 
 Registrado para a tarefa que implementar o `DatabaseProvisioner` real, sem comprometer

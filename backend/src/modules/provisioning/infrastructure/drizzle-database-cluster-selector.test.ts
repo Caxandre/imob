@@ -19,6 +19,8 @@ async function insertCluster(overrides: {
       status: overrides.status ?? "ACTIVE",
       provider: "aws-rds",
       region: "us-east-1",
+      host: "cluster.internal.example.com",
+      port: 5432,
       secretReference: `clusters/${overrides.name}`,
     })
     .returning();
@@ -50,6 +52,8 @@ describe("createDrizzleDatabaseClusterSelector", () => {
       name: "primary",
       provider: "aws-rds",
       region: "us-east-1",
+      host: "cluster.internal.example.com",
+      port: 5432,
       secretReference: "clusters/primary",
     });
   });

@@ -44,18 +44,27 @@ export const tenants = pgTable("tenants", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const databaseClusters = pgTable("database_clusters", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
-  // Free-form string rather than an enum: new providers must not require a migration.
-  provider: text("provider").notNull(),
-  region: text("region").notNull(),
-  status: databaseClusterStatus("status").notNull().default("ACTIVE"),
-  // Pointer to where credentials are stored, never the credentials themselves.
-  secretReference: text("secret_reference").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const databaseClusters = pgTable(
+  "database_clusters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull().unique(),
+    // Free-form string rather than an enum: new providers must not require a migration.
+    provider: text("provider").notNull(),
+    region: text("region").notNull(),
+    status: databaseClusterStatus("status").notNull().default("ACTIVE"),
+    // Where to physically connect to run administrative statements (CREATE ROLE/ALTER ROLE)
+    // against this cluster. Never a full connection string — host/port only, so nothing here
+    // ever embeds a credential.
+    host: text("host").notNull(),
+    port: integer("port").notNull().default(5432),
+    // Pointer to where credentials are stored, never the credentials themselves.
+    secretReference: text("secret_reference").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("database_clusters_port_valid", sql`${t.port} > 0 AND ${t.port} <= 65535`)],
+);
 
 export const tenantDatabases = pgTable(
   "tenant_databases",

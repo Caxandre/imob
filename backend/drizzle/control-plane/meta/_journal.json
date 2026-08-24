@@ -15,6 +15,13 @@
       "when": 1787529212560,
       "tag": "0001_perfect_impossible_man",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787546155468,
+      "tag": "0002_narrow_maria_hill",
+      "breakpoints": true
     }
   ]
 }

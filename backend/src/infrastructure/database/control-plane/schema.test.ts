@@ -66,6 +66,7 @@ async function insertCluster(name: string) {
       name,
       provider: "local",
       region: "local",
+      host: "localhost",
       secretReference: `database-clusters/${name}`,
     })
     .returning();
@@ -161,6 +162,30 @@ describe("tenants", () => {
 
     expect(error.code).toBe(UNIQUE_VIOLATION);
     expect(error.constraint).toBe("tenants_slug_unique");
+  });
+});
+
+describe("database_clusters", () => {
+  it("defaults port to 5432 when not given", async () => {
+    const cluster = await insertCluster("default-port");
+
+    expect(cluster.port).toBe(5432);
+  });
+
+  it("rejects a port outside the valid TCP range", async () => {
+    const error = await expectViolation(() =>
+      controlPlaneDb.insert(databaseClusters).values({
+        name: "invalid-port",
+        provider: "local",
+        region: "local",
+        host: "localhost",
+        port: 70_000,
+        secretReference: "database-clusters/invalid-port",
+      }),
+    );
+
+    expect(error.code).toBe(CHECK_VIOLATION);
+    expect(error.constraint).toBe("database_clusters_port_valid");
   });
 });
 

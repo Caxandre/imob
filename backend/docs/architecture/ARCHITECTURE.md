@@ -35,8 +35,9 @@ assinaturas, billing, clusters de database, databases de tenants, jobs de provis
 `drizzle/control-plane/`):
 
 - `tenants` — identidade do tenant (`slug` único, `status`).
-- `database_clusters` — clusters PostgreSQL disponíveis, com `provider`/`region` e uma
-  `secret_reference` (ponteiro para a credencial, nunca a credencial em si).
+- `database_clusters` — clusters PostgreSQL disponíveis, com `provider`/`region`,
+  `host`/`port` (metadata de conexão administrativa — nunca uma connection string completa)
+  e uma `secret_reference` (ponteiro para a credencial, nunca a credencial em si).
 - `tenant_databases` — qual database de qual cluster pertence a cada tenant. Um tenant
   possui no máximo um database (unicidade em `tenant_id`); `database_name` é único apenas
   dentro do mesmo cluster.
@@ -214,8 +215,34 @@ do Prompt 011 (`src/modules/provisioning/application/`, `src/modules/provisionin
   teste/desenvolvimento local; recusa-se a construir sob `NODE_ENV=production`, para que não
   possa ser conectado por acidente.
 
-**PLANNED** — `DatabaseProvisioner` real, `SecretStore` de produção, migrations do Tenant
-Data Plane, criação de registros em `tenant_databases`, ativação do tenant
+**IMPLEMENTED** — provisionamento idempotente da PostgreSQL application role do tenant
+(`src/modules/provisioning/application/tenant-role-provisioner.ts`,
+`src/modules/provisioning/infrastructure/postgres-tenant-role-provisioner.ts`), isolado e
+testado, ainda **não** ligado ao `DatabaseProvisioner`/worker:
+
+```text
+tenantId + DatabaseCluster
+    ↓
+buildProvisioningResourceNames() — roleName, secretReference
+    ↓
+ClusterAdminCredentialResolver.resolve(cluster.secretReference)
+    ↓
+conexão administrativa (pg.Client, aberta e fechada por chamada — nunca um pool por tenant)
+    ↓
+reconcilia os 4 estados possíveis de (role, secret) — ver ADR-003, Prompt 013
+    ↓
+CREATE ROLE / ALTER ROLE (LOGIN, sem SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS)
+    ↓
+SecretStore.put() — só depois que a role já reflete a senha
+```
+
+`CREATE DATABASE`, `GRANT`, `ALTER DEFAULT PRIVILEGES`, migrations de tenant e health check
+continuam fora do escopo deste componente. `database_clusters` ganhou `host`/`port` (única
+migration desta tarefa) — sem eles não havia como abrir a conexão administrativa real.
+
+**PLANNED** — `DatabaseProvisioner` real (orquestrando este componente com `CREATE_DATABASE`
+→ `RUN_MIGRATIONS` → `HEALTH_CHECK`), `SecretStore` de produção, migrations do Tenant Data
+Plane, `GRANT`s de aplicação, criação de registros em `tenant_databases`, ativação do tenant
 (`tenants.status = READY`), recovery de jobs `RUNNING` abandonados, política de retry para
 jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está registrada.
 
