@@ -54,6 +54,21 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   ter infraestrutura dedicada. Não assuma que todos os tenants estão no mesmo servidor ou
   cluster.
 
+## Provisionamento de database de tenant — regras permanentes
+
+Ver ADR-003 para o raciocínio completo.
+
+- Nunca derivar o nome físico do database (ou da role) do `tenant.slug` — é comercial e
+  pode mudar. Derivar sempre do `tenant.id`.
+- Nunca persistir ou logar uma credencial real (senha, connection string completa,
+  `DATABASE_URL`). `secret_reference` é sempre um ponteiro para um `SecretStore`, nunca o
+  valor.
+- Todo provisionamento de recurso externo (database, role, secret) deve ser idempotente por
+  descoberta: verificar se o recurso já existe antes de criá-lo, nunca assumir execução do
+  zero.
+- Evitar compensação destrutiva automática (`DROP DATABASE`/`DROP ROLE`) em falha parcial de
+  provisionamento. Preferir preservar o recurso e deixar o retry idempotente reconhecê-lo.
+
 ## Git, Pull Requests e CI
 
 A partir desta tarefa, esta política é permanente para todo trabalho funcional.

@@ -137,9 +137,31 @@ marcados `SUCCEEDED` sem nenhum database ter sido criado. Toda a infraestrutura 
 (BullMQ `Worker`, repository, use case) está implementada e testada com um
 `DatabaseProvisioner` fake apenas em testes.
 
-**PLANNED** — `DatabaseProvisioner` real (execução de `CREATE DATABASE`), criação de
-registros em `tenant_databases`, ativação do tenant (`tenants.status = READY`), recovery de
-jobs `RUNNING` abandonados, política de retry para jobs `FAILED`.
+**IMPLEMENTED (documentation)** — a arquitetura de provisionamento do database físico do
+tenant está decidida em [ADR-003](adr/ADR-003-tenant-database-provisioning.md):
+
+```text
+worker
+    ↓
+DatabaseProvisioner (real, futuro)
+    ↓
+DatabaseClusterSelector → cluster
+    ↓
+CREATE_ROLE → SAVE_CREDENTIALS → CREATE_DATABASE → RUN_MIGRATIONS → HEALTH_CHECK
+    ↓
+REGISTER_DATABASE — transação única: tenant_databases + tenant READY + provisioning_job SUCCEEDED
+```
+
+Identidade técnica de database/role/secret derivada de `tenant.id` (nunca do `slug`);
+cada etapa é idempotente por descoberta (reconhece recurso já criado em vez de recriar);
+sem compensação destrutiva automática em falha parcial. Nenhuma migration nova foi
+necessária — o schema atual já acomoda a decisão.
+
+**PLANNED** — `DatabaseProvisioner` real, `DatabaseClusterSelector`, `SecretStore`,
+migrations do Tenant Data Plane, criação de registros em `tenant_databases`, ativação do
+tenant (`tenants.status = READY`), recovery de jobs `RUNNING` abandonados, política de
+retry para jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está
+registrada.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
