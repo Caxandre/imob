@@ -32,6 +32,24 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # Stands in for the local `postgres-tenants` service (docker-compose.yml) — the cluster
+      # where tenant application roles/databases are provisioned. Distinct server from the
+      # Control Plane above: role provisioning tests must never reuse the Control Plane
+      # server as a stand-in for a tenant cluster. Same port (5433) as docker-compose.yml so
+      # tests behave identically locally and in CI.
+      postgres-tenants:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
       # Same image/version as docker-compose.yml. No auth locally, so none here either.
       redis:
         image: redis:7-alpine

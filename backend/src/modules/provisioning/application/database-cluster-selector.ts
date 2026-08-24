@@ -8,6 +8,10 @@ export interface DatabaseCluster {
   name: string;
   provider: string;
   region: string;
+  // Where to physically connect to run administrative statements — never a full connection
+  // string, so nothing here ever embeds a credential.
+  host: string;
+  port: number;
   secretReference: string;
 }
 

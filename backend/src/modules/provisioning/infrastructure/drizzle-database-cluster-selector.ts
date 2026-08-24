@@ -35,6 +35,8 @@ export function createDrizzleDatabaseClusterSelector(
         name: row.name,
         provider: row.provider,
         region: row.region,
+        host: row.host,
+        port: row.port,
         secretReference: row.secretReference,
       };
     },
