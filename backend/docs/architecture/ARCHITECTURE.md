@@ -141,21 +141,27 @@ marcados `SUCCEEDED` sem nenhum database ter sido criado. Toda a infraestrutura 
 tenant está decidida em [ADR-003](adr/ADR-003-tenant-database-provisioning.md):
 
 ```text
-worker
+worker (application layer)
     ↓
-DatabaseProvisioner (real, futuro)
+DatabaseProvisioner.provision() (real, futuro) — infraestrutura externa, nunca escreve no Control Plane
     ↓
 DatabaseClusterSelector → cluster
     ↓
 CREATE_ROLE → SAVE_CREDENTIALS → CREATE_DATABASE → RUN_MIGRATIONS → HEALTH_CHECK
     ↓
-REGISTER_DATABASE — transação única: tenant_databases + tenant READY + provisioning_job SUCCEEDED
+retorna ProvisioningResult (clusterId, databaseName, secretReference, schemaVersion)
+    ↓
+worker persiste REGISTER_DATABASE — transação única: tenant_databases + tenant READY + provisioning_job SUCCEEDED
 ```
 
 Identidade técnica de database/role/secret derivada de `tenant.id` (nunca do `slug`);
 cada etapa é idempotente por descoberta (reconhece recurso já criado em vez de recriar);
-sem compensação destrutiva automática em falha parcial. Nenhuma migration nova foi
-necessária — o schema atual já acomoda a decisão.
+sem compensação destrutiva automática em falha parcial. `DatabaseProvisioner` executa e
+descobre infraestrutura externa e retorna um resultado — quem persiste esse resultado no
+Control Plane é a camada de aplicação (mesma dona da máquina de estado desde o Prompt 009),
+nunca o provisionador. Database e objetos de migration pertencem à credencial
+administrativa do cluster, não à role de aplicação do tenant (privilégio mínimo). Nenhuma
+migration nova foi necessária — o schema atual já acomoda a decisão.
 
 **PLANNED** — `DatabaseProvisioner` real, `DatabaseClusterSelector`, `SecretStore`,
 migrations do Tenant Data Plane, criação de registros em `tenant_databases`, ativação do

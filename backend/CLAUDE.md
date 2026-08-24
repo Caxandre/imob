@@ -68,6 +68,14 @@ Ver ADR-003 para o raciocínio completo.
   zero.
 - Evitar compensação destrutiva automática (`DROP DATABASE`/`DROP ROLE`) em falha parcial de
   provisionamento. Preferir preservar o recurso e deixar o retry idempotente reconhecê-lo.
+- `DatabaseProvisioner` nunca escreve em `tenants`, `provisioning_jobs` ou
+  `tenant_databases` — ele só executa/descobre infraestrutura externa e retorna um
+  resultado. Persistir esse resultado no Control Plane (e ativar o tenant) é sempre
+  responsabilidade da camada de aplicação, dona da máquina de estado desde o Prompt 009.
+- A role de aplicação do tenant nunca é dona (`OWNER`) do seu próprio database nem de
+  objetos de migration — só recebe os privilégios operacionais mínimos (`CONNECT`,
+  `USAGE`, DML). O database e seus objetos pertencem à credencial administrativa do
+  cluster.
 
 ## Git, Pull Requests e CI
 

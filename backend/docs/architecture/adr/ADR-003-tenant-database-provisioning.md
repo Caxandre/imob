@@ -53,6 +53,16 @@ Falhas parciais **não** disparam compensação destrutiva automática (sem `DRO
 ROLE` automático). O padrão é preservar o recurso parcial e deixar o retry idempotente
 reconhecê-lo e continuar.
 
+**Fronteira de responsabilidade (revisão pós-aprovação inicial)**: o `DatabaseProvisioner`
+executa e descobre infraestrutura externa (cluster, role, secret, database, migrations,
+health check) e **retorna um resultado** — ele não escreve em `tenants`, `provisioning_jobs`
+nem `tenant_databases`. Quem persiste esse resultado é a camada de aplicação
+(`processProvisioningJob`/worker), a mesma camada que o Prompt 009 já estabeleceu como dona
+da máquina de estado (`PENDING → RUNNING → SUCCEEDED/FAILED`). A transação final
+(`tenant_databases` + `tenant READY` + `provisioning_job SUCCEEDED`) é, portanto, uma
+extensão dessa mesma responsabilidade já existente — não uma responsabilidade nova do
+provisionador. Ver "Provisioning steps" e "Finalization" para o detalhamento.
+
 ## Resource identity
 
 ### Nome físico do database
@@ -165,36 +175,109 @@ domínio ou de provisionamento pode depender de detalhes do backend local.
 Node — nunca `Math.random()`). Detalhe de implementação, não decidido nesta ADR além de
 excluir explicitamente geradores não criptográficos.
 
-**Privilégios**: a role do tenant nunca recebe `SUPERUSER` nem qualquer privilégio
-administrativo de cluster. `CREATE DATABASE ... OWNER = tenant_role` faz a role dona apenas
-do seu próprio database — controle total dentro dele, nenhum privilégio fora dele. Como a
-role de um tenant só se conecta ao seu próprio database, "ser dona" do seu database não é
-uma escalação de privilégio em relação a outros tenants.
+**Privilégios e ownership (revisado)**: a proposta original ("`CREATE DATABASE ... OWNER =
+tenant_role`") foi reavaliada e trocada — dar ao tenant a posse do próprio database concede
+mais privilégio do que a operação normal da aplicação precisa (posse de database inclui
+poder alterar/derrubar o próprio database, alterar seus próprios privilégios, etc., mesmo
+sem `SUPERUSER`). Separação adotada, com exatamente **duas** roles — nenhuma terceira role
+por tenant é introduzida:
 
-**Ownership / execução de migrations**: preferência confirmada pela análise —
-o **admin do cluster** executa provisioning e migrations do tenant (evita ter que gerenciar
-uma segunda role de migration por tenant); a **role do tenant** só tem os privilégios de
-aplicação sobre seu próprio database. Não criar uma role adicional de "migration/admin" por
-tenant nesta fase — complexidade desnecessária para a primeira versão.
+- **Credencial administrativa/provisioning do cluster** (já existente,
+  `database_clusters.secret_reference`): cria database e role, é **dona** do database e de
+  todos os objetos criados por migration (tabelas, sequences, etc.), e executa as
+  migrations do Tenant Data Plane. Administra a estrutura; nunca é usada pela aplicação.
+- **Role de aplicação do tenant** (`tenant_<uuid>_app`): apenas os privilégios necessários
+  para a aplicação operar naquele database —
+
+  ```text
+  CONNECT no database
+  USAGE nos schemas de aplicação (schema public por padrão — ver ADR-001; sem
+    namespacing adicional por tenant dentro do próprio database, pois o isolamento já é
+    no nível do database inteiro)
+  SELECT, INSERT, UPDATE, DELETE nas tabelas de aplicação
+  USAGE, SELECT nas sequences necessárias (colunas serial/identity)
+  ```
+
+  Sem `SUPERUSER`, sem `CREATEDB`, sem `CREATEROLE`, sem qualquer privilégio administrativo
+  do cluster ou do database. A role do tenant nunca é dona de nada — apenas opera sobre
+  objetos que pertencem à credencial administrativa.
+
+**Como a role do tenant recebe privilégio sobre objetos criados por migration**: como as
+migrations do Tenant Data Plane rodam como a credencial administrativa (não como a role do
+tenant — ver abaixo), cada tabela/sequence nasce pertencendo ao admin. O mecanismo primário
+para que a role do tenant consiga usá-las é `ALTER DEFAULT PRIVILEGES`, configurado **uma
+vez** logo após a criação do database (antes ou como parte do primeiro passo de
+`RUN_MIGRATIONS`):
+
+```sql
+ALTER DEFAULT PRIVILEGES FOR ROLE <admin_role> IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO <tenant_role>;
+ALTER DEFAULT PRIVILEGES FOR ROLE <admin_role> IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO <tenant_role>;
+```
+
+Com isso, toda tabela/sequence que uma migration futura criar (sempre executada como o
+mesmo `admin_role`) já nasce com o privilégio correto para a role do tenant, sem exigir um
+`GRANT` manual repetido a cada migration. Um `GRANT` explícito por objeto continua sendo o
+mecanismo de fallback para objetos criados antes de `ALTER DEFAULT PRIVILEGES` existir, ou
+para privilégios que fujam do padrão default (não esperado na v1).
+
+**Execução de migrations**: confirmado — o **admin do cluster** executa provisioning e
+migrations do tenant (evita gerenciar uma segunda role de "migration" por tenant); a
+**role do tenant** nunca executa migrations, só a aplicação em operação normal. Nenhuma
+role adicional é introduzida nesta fase.
 
 ## Provisioning steps
 
 Sequência final (revista a partir do rascunho conceitual do prompt — ver justificativa na
-próxima seção):
+próxima seção), agora dividida explicitamente entre as duas responsabilidades:
 
 ```text
+DatabaseProvisioner.provision() — infraestrutura externa, retorna um resultado, nunca escreve
+no Control Plane:
+
 1. SELECT_CLUSTER      — DatabaseClusterSelector.selectClusterFor(tenantId)
-2. CREATE_ROLE         — cria ou reconhece a role tenant_<uuid>_app
+2. CREATE_ROLE         — cria ou reconhece a role tenant_<uuid>_app (sem ownership de database)
 3. SAVE_CREDENTIALS    — persiste a senha no SecretStore (somente após a role já refletir essa senha)
-4. CREATE_DATABASE     — cria (ou reconhece) o database, OWNER = tenant role
-5. RUN_MIGRATIONS      — aplica as migrations do Tenant Data Plane
+4. CREATE_DATABASE     — cria (ou reconhece) o database, OWNER = credencial administrativa do cluster
+5. RUN_MIGRATIONS      — aplica as migrations do Tenant Data Plane como a credencial administrativa
 6. HEALTH_CHECK        — conecta com a credencial do tenant, executa uma query mínima
-7. REGISTER_DATABASE   — transação única do Control Plane: tenant_databases + tenant READY + provisioning_job SUCCEEDED
+
+Application layer (processProvisioningJob / worker) — persiste o resultado no Control Plane:
+
+7. REGISTER_DATABASE   — transação única: tenant_databases + tenant READY + provisioning_job RUNNING → SUCCEEDED
 ```
 
 `database_name`/`role_name` não aparecem como um passo próprio: são derivados de forma pura
 (sem I/O) a partir do `tenant.id`, sem nada que possa falhar parcialmente — calculados
 inline no início da execução, não observados como etapa separada.
+
+### Contrato conceitual: `ProvisioningResult`
+
+Ao concluir os passos 1–6 com sucesso, `DatabaseProvisioner.provision()` retorna (em vez de
+`void`) tudo o que a camada de aplicação precisa para a transação final — nada além disso:
+
+```ts
+interface ProvisioningResult {
+  clusterId: string;
+  databaseName: string;
+  secretReference: string;
+  schemaVersion: number;
+}
+
+interface DatabaseProvisioner {
+  provision(input: { provisioningJobId: string; tenantId: string }): Promise<ProvisioningResult>;
+}
+```
+
+Isso é uma mudança conceitual **futura** em relação à interface hoje existente em
+`src/modules/provisioning/application/process-provisioning-job.ts`
+(`provision(): Promise<void>`) — **não implementada nesta tarefa**. Quando o
+`DatabaseProvisioner` real for escrito, essa é a forma que seu retorno deve assumir; o
+`ProcessProvisioningJobRepository` também precisará, no futuro, de uma operação de
+finalização que aceite esse resultado (por exemplo, uma versão estendida de
+`markSucceeded` que também registre `tenant_databases` e ative o tenant) — o nome e a forma
+exata dessa operação ficam para a tarefa de implementação, não para esta ADR.
 
 ### Por que essa ordem, e não a ordem conceitual do prompt
 
@@ -319,26 +402,58 @@ migrations de tenant for definido.
 
 ## Finalization
 
-Dentro de uma única transação do Control Plane, executada somente após os passos 1–6 (seleção
-de cluster até health check) terem sido confirmados com sucesso:
+Responsabilidade da **camada de aplicação** (`processProvisioningJob`/worker), não do
+`DatabaseProvisioner` — ver "Fronteira de responsabilidade" na Decisão. O worker recebe o
+`ProvisioningResult` do provisionador e executa, dentro de uma única transação do Control
+Plane, somente depois que os passos 1–6 (seleção de cluster até health check) já foram
+confirmados com sucesso:
 
 ```sql
-INSERT INTO tenant_databases (...)   -- database_name, cluster_id, secret_reference, schema_version
+INSERT INTO tenant_databases (cluster_id, database_name, secret_reference, schema_version)
+  VALUES (result.clusterId, result.databaseName, result.secretReference, result.schemaVersion)
 UPDATE tenants SET status = 'READY' WHERE id = ?
-UPDATE provisioning_jobs SET status = 'SUCCEEDED', finished_at = now() WHERE id = ?
+UPDATE provisioning_jobs SET status = 'SUCCEEDED', finished_at = now()
+  WHERE id = ? AND status = 'RUNNING'
 ```
 
 **Sim, atômicas as três** — a mesma garantia de "nunca existe um sem o outro" já aplicada à
-criação de `tenants` + `provisioning_jobs` (ver ARCHITECTURE.md). Se essa transação falhar
-depois que toda a infraestrutura externa já está pronta (cenário do prompt, seção 28), o
-retry não recria nada externo — reconhece que role/database/migrations/health check já
-estão satisfeitos e tenta novamente **apenas** esta transação final.
+criação de `tenants` + `provisioning_jobs` (ver ARCHITECTURE.md). O guard `AND status =
+'RUNNING'` no `UPDATE` de `provisioning_jobs` é o mesmo padrão já usado por
+`markSucceeded`/`markFailed` (Prompt 009) — a escrita continua sendo a própria arbitragem,
+não um `SELECT` seguido de `UPDATE`.
+
+### Crash antes da finalização
+
+Cenário explícito (seção 28 do prompt original):
+
+```text
+infraestrutura externa concluída (DatabaseProvisioner já retornou um ProvisioningResult)
+    ↓
+processo morre antes da transação final (REGISTER_DATABASE)
+    ↓
+provisioning_job permanece RUNNING; tenant_databases não existe; tenant permanece PROVISIONING
+```
+
+No retry (manual ou automático, quando existir):
+
+1. `DatabaseProvisioner.provision()` roda de novo. Pelos passos 1–6 serem idempotentes por
+   descoberta, ele reconhece cluster, role, secret, database, migrations e health check já
+   existentes/satisfeitos — nenhum recurso externo é recriado.
+2. Retorna um `ProvisioningResult` **logicamente idêntico** ao da tentativa anterior (mesmo
+   `clusterId`, `databaseName`, `secretReference`, `schemaVersion` — todos deriváveis de
+   forma determinística a partir do `tenant.id` e do que já está persistido).
+3. A camada de aplicação tenta a transação final novamente, agora com sucesso.
+
+Se essa transação falhar depois que toda a infraestrutura externa já está pronta, o retry
+não recria nada externo — reconhece que role/database/migrations/health check já estão
+satisfeitos e tenta novamente **apenas** esta transação final.
 
 ## Tenant activation
 
-`tenants.status = READY` só é definido dentro dessa mesma transação final, nunca antes.
-Precondições, todas satisfeitas: database criado, credencial criada e salva, migrations
-aplicadas, health check aprovado, `tenant_databases` registrado — as cinco, não um subconjunto.
+`tenants.status = READY` só é definido dentro dessa mesma transação final da camada de
+aplicação, nunca antes e nunca pelo `DatabaseProvisioner`. Precondições, todas satisfeitas:
+database criado, credencial criada e salva, migrations aplicadas, health check aprovado,
+`tenant_databases` registrado — as cinco, não um subconjunto.
 Antes disso, `tenant.status` permanece `PROVISIONING` mesmo que `provisioning_job` já esteja
 `SUCCEEDED` momentaneamente dentro da mesma transação (a atualização é atômica, então esse
 estado intermediário nunca é observável de fora).
@@ -376,7 +491,9 @@ Erros são específicos por etapa (ver lista acima), permitindo diagnóstico sem
 sensível. `FAILED` continua terminal nesta fase (ADR-002) — nenhuma política de retry
 automático é definida aqui. A idempotência de cada etapa desta ADR é precisamente o que
 tornará um futuro retry manual (ou automático, quando existir) seguro de executar: ele só
-precisa rodar o mesmo `DatabaseProvisioner.provision()` de novo.
+precisa rodar de novo o mesmo fluxo da camada de aplicação — `DatabaseProvisioner.provision()`
+seguido da transação final — sem se preocupar em distinguir o quanto da tentativa anterior
+já havia avançado (ver "Crash antes da finalização").
 
 ## Recovery
 
@@ -413,6 +530,19 @@ implementada agora.
   `database_clusters.secret_reference` desde o schema inicial (Prompt 002) — nenhuma
   credencial real é persistida no Control Plane, só o ponteiro.
 - **Seleção de cluster A/B/C**: **C envolvendo B** escolhida (ver "Cluster selection").
+- **G — `DatabaseProvisioner` persiste a finalização** vs. **H — `DatabaseProvisioner`
+  retorna um resultado, a camada de aplicação persiste**: **H escolhida** (revisão desta
+  ADR). G foi a formulação original, corrigida após revisão: ela faria o provisionador
+  escrever em `tenants`/`provisioning_jobs`/`tenant_databases`, duplicando/contornando a
+  responsabilidade que o Prompt 009 já atribuiu explicitamente à camada de aplicação
+  (`processProvisioningJob`) como dona da máquina de estado. H preserva essa fronteira já
+  estabelecida: o provisionador só sabe executar/descobrir infraestrutura externa.
+- **Ownership do database: role do tenant** vs. **role administrativa**: **role
+  administrativa escolhida** (revisão desta ADR). A formulação original ("`OWNER =
+  tenant_role`") concedia à role do tenant mais controle do que a operação normal da
+  aplicação exige. A role administrativa permanece dona do database e de todos os objetos
+  de migration; a role do tenant recebe apenas os privilégios de aplicação necessários
+  (`CONNECT`, `USAGE`, DML) via `ALTER DEFAULT PRIVILEGES` — ver "Credentials and secrets".
 
 ## Consequences
 
@@ -430,7 +560,15 @@ implementada agora.
   sete steps listados em "Provisioning steps" quando o `DatabaseProvisioner` real for
   implementado — nenhuma mudança de código acontece nesta tarefa.
 - `tenants.status = READY` continua não implementado; quando implementado, só pode
-  acontecer dentro da transação final atômica descrita aqui.
+  acontecer dentro da transação final atômica descrita aqui, executada pela camada de
+  aplicação — nunca pelo `DatabaseProvisioner`.
+- A interface `DatabaseProvisioner.provision()` precisará mudar seu retorno de `void` para
+  `ProvisioningResult` quando a implementação real for escrita — mudança futura, não feita
+  nesta tarefa. `ProcessProvisioningJobRepository` também precisará de uma operação de
+  finalização estendida que aceite esse resultado — forma exata não decidida aqui.
+- O database e todos os objetos de migration do Tenant Data Plane são de propriedade da
+  credencial administrativa do cluster, não da role do tenant — decisão revisada em relação
+  à formulação inicial desta ADR (ver "Alternatives considered", G/H e ownership).
 - Recovery de `RUNNING` abandonado permanece uma lacuna conhecida e não resolvida — a
   direção está registrada, a implementação não.
 
@@ -451,3 +589,11 @@ detalhes de implementação nesta ADR:
 - A implementação de migrations do Tenant Data Plane (`drizzle/tenant/`) é uma tarefa
   própria, separada da implementação do `DatabaseProvisioner` em si, mas ambas precisam
   existir antes do passo `RUN_MIGRATIONS` funcionar de verdade.
+- `DatabaseProvisioner.provision()` deve retornar `ProvisioningResult` (`clusterId`,
+  `databaseName`, `secretReference`, `schemaVersion`) em vez de `void`. A camada de
+  aplicação — não o provisionador — é quem grava esse resultado em `tenant_databases`,
+  ativa o tenant e finaliza o `provisioning_job`.
+- As migrations do Tenant Data Plane devem incluir, na primeira execução por database, os
+  comandos `ALTER DEFAULT PRIVILEGES` (ver "Credentials and secrets") que dão à role do
+  tenant os privilégios de aplicação sobre objetos futuros — não apenas os objetos da
+  primeira migration.
