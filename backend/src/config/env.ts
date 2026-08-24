@@ -16,6 +16,13 @@ const envSchema = z.object({
   PROVISIONING_DISPATCH_BATCH_SIZE: z.coerce.number().int().positive().default(10),
   PROVISIONING_DISPATCH_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
   PROVISIONING_DISPATCH_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+
+  // Tenant database cluster selection (ADR-003) — the ACTIVE database_clusters.name the
+  // initial DatabaseClusterSelector implementation targets. No default: which cluster
+  // tenants get provisioned into must always be an explicit choice, never an accident.
+  TENANT_DATABASE_DEFAULT_CLUSTER: z
+    .string()
+    .min(1, "TENANT_DATABASE_DEFAULT_CLUSTER must name an ACTIVE database_clusters row"),
 });
 
 function loadEnv() {

@@ -589,6 +589,30 @@ implementada agora.
 - Recovery de `RUNNING` abandonado permanece uma lacuna conhecida e não resolvida — a
   direção está registrada, a implementação não.
 
+## Prompt 011 — fundação determinística implementada
+
+As peças sem efeito externo desta ADR (identidade de recursos, seleção de cluster, porta de
+secret) foram implementadas. Dois detalhes de assinatura ficaram mais concretos do que o
+esboço conceitual acima — refinamentos, não mudanças de decisão:
+
+- **`DatabaseClusterSelector`**: a assinatura implementada é
+  `selectClusterFor(tenantId: string): Promise<DatabaseCluster>`, com
+  `DatabaseCluster = { id, name, provider, region, secretReference }`, em vez do esboço
+  `Promise<{ clusterId: string }>`. Motivo: o `DatabaseProvisioner` (futuro) precisa de
+  `provider`/`region`/`secretReference` para agir sobre o cluster escolhido — devolver
+  só o `id` obrigaria uma segunda consulta imediatamente após. Nenhuma credencial
+  administrativa é incluída no tipo.
+- **`SecretStore`**: o valor armazenado é `TenantDatabaseSecret { username, password }`, não
+  a `string` opaca do esboço original — evita que um valor solto (`password`) fique ambíguo
+  sobre a qual credencial pertence. `host`/`database` continuam de fora, pois já pertencem ao
+  registry (`database_clusters`/`tenant_databases`).
+- Nova variável de ambiente `TENANT_DATABASE_DEFAULT_CLUSTER` (obrigatória, sem default)
+  alimenta a implementação real do `DatabaseClusterSelector` — o nome default mencionado em
+  "Cluster selection" acima.
+- Confirmado: nenhuma migration foi necessária; nenhuma dependência nova foi adicionada.
+  `SecretStore` de produção, `DatabaseProvisioner` real e as demais lacunas continuam como
+  descrito em "Consequences".
+
 ## Future implementation notes
 
 Registrado para a tarefa que implementar o `DatabaseProvisioner` real, sem comprometer

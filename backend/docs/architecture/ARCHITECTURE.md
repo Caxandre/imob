@@ -163,11 +163,37 @@ nunca o provisionador. Database e objetos de migration pertencem à credencial
 administrativa do cluster, não à role de aplicação do tenant (privilégio mínimo). Nenhuma
 migration nova foi necessária — o schema atual já acomoda a decisão.
 
-**PLANNED** — `DatabaseProvisioner` real, `DatabaseClusterSelector`, `SecretStore`,
-migrations do Tenant Data Plane, criação de registros em `tenant_databases`, ativação do
-tenant (`tenants.status = READY`), recovery de jobs `RUNNING` abandonados, política de
-retry para jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está
-registrada.
+**IMPLEMENTED** — peças determinísticas e sem efeito externo da fundação de provisionamento
+(`src/modules/provisioning/application/`, `src/modules/provisioning/infrastructure/`):
+
+- `ProvisioningResult` (`provisioning-result.ts`) — tipo autônomo (`clusterId`,
+  `databaseName`, `secretReference`, `schemaVersion`); ainda não usado por nenhum código,
+  pois `DatabaseProvisioner.provision()` continua retornando `Promise<void>` (ver
+  `process-provisioning-job.ts`) — mudar essa assinatura exige alterar a máquina de estado
+  do worker, fora do escopo desta fundação.
+- `buildProvisioningResourceNames(tenantId)` (`provisioning-resource-names.ts`) — função
+  pura que deriva `databaseName` (`tenant_<uuid sem hífens>`), `roleName`
+  (`tenant_<uuid sem hífens>_app`) e `secretReference` (`tenant-databases/<uuid canônico>`)
+  exclusivamente de `tenant.id`; rejeita qualquer tenantId que não seja um UUID real
+  (`InvalidTenantIdError`).
+- `DatabaseClusterSelector` (`database-cluster-selector.ts`) — porta
+  `selectClusterFor(tenantId)`; implementação real
+  `createDrizzleDatabaseClusterSelector` (`infrastructure/drizzle-database-cluster-selector.ts`)
+  busca por `database_clusters.name = TENANT_DATABASE_DEFAULT_CLUSTER AND status = 'ACTIVE'`
+  — nunca seleciona automaticamente o primeiro cluster `ACTIVE` disponível. Ausência lança
+  `DatabaseClusterNotAvailableError`, que nomeia o cluster procurado mas nunca expõe
+  credenciais. Nova variável de ambiente obrigatória: `TENANT_DATABASE_DEFAULT_CLUSTER` (sem
+  valor default).
+- `SecretStore` (`secret-store.ts`) — porta `put`/`get`/`delete` sobre
+  `TenantDatabaseSecret` (`{username, password}`, sem host/database, que já pertencem ao
+  registry do cluster). Sem implementação de produção ainda. `createInMemorySecretStore`
+  (`test-support/in-memory-secret-store.ts`) é um fake apenas para testes — não persiste em
+  disco e nunca deve ser promovido a produção.
+
+**PLANNED** — `DatabaseProvisioner` real, `SecretStore` de produção, migrations do Tenant
+Data Plane, criação de registros em `tenant_databases`, ativação do tenant
+(`tenants.status = READY`), recovery de jobs `RUNNING` abandonados, política de retry para
+jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está registrada.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou

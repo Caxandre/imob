@@ -14,6 +14,7 @@ export default defineConfig({
       LOG_LEVEL: "silent",
       CONTROL_PLANE_DATABASE_URL: CONTROL_PLANE_TEST_DATABASE_URL,
       REDIS_URL: "redis://localhost:6379",
+      TENANT_DATABASE_DEFAULT_CLUSTER: "test-cluster",
     },
   },
 });
