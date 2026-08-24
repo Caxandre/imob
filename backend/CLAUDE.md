@@ -76,6 +76,10 @@ Ver ADR-003 para o raciocínio completo.
   objetos de migration — só recebe os privilégios operacionais mínimos (`CONNECT`,
   `USAGE`, DML). O database e seus objetos pertencem à credencial administrativa do
   cluster.
+- Nunca confiar no tipo de um secret recuperado de provider externo; validar o payload
+  (Zod) antes de utilizá-lo. `SecretStore` é um boundary não confiável por definição — ele
+  não afirma nenhuma tipagem que um provider real (AWS Secrets Manager, Vault, ...) não
+  possa garantir.
 
 ## Git, Pull Requests e CI
 
