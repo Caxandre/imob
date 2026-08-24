@@ -526,12 +526,23 @@ definitivos:
 Nenhum código de dispatcher, BullMQ ou worker foi implementado junto — apenas o suporte de
 persistência.
 
-Registrado para a tarefa que implementar o dispatcher/worker, sem comprometer detalhes de
+**Atualização 2**: o dispatcher em si foi implementado
+(`src/workers/provisioning-dispatcher.ts`, `src/modules/provisioning/`,
+`src/infrastructure/queue/`), seguindo o protocolo dos 7 passos exatamente como descrito
+acima. Detalhes operacionais que a implementação fixou:
+
+- Valores escolhidos para as variáveis de ambiente antes deixadas em aberto:
+  `PROVISIONING_DISPATCH_BATCH_SIZE=10`, `PROVISIONING_DISPATCH_LEASE_SECONDS=30`,
+  `PROVISIONING_DISPATCH_POLL_INTERVAL_MS=5000` (todas com default e sobrescrevíveis).
+- Desempate `ORDER BY created_at, id` — `id ASC` adicionado à ordenação do Passo 1 para
+  determinismo quando `created_at` empata.
+- **Comportamento real observado do `jobId` do BullMQ (v6.2.0)**, confirmado com Redis real
+  em teste de integração, fechando a ressalva de idempotência registrada acima: publicar o
+  mesmo `jobId` duas vezes enquanto o job ainda existe na fila (não concluído/removido) não
+  cria um segundo job lógico — a segunda chamada resolve para o job já existente. É
+  exatamente a garantia da qual o protocolo depende para tolerar a incerteza do Passo 6.
+
+Registrado para a tarefa que implementar o worker, sem comprometer detalhes de
 implementação nesta ADR:
-- Intervalo de polling e tamanho de lote (`LIMIT N`) devem ser configuráveis via variável de
-  ambiente validada em `config/env.ts`, não hardcoded.
 - Nenhum scheduler externo (cron, Kafka) — o próprio dispatcher com polling interno é
   suficiente para a escala atual.
-- `lease_duration` (usado no Passo 2 para calcular `dispatch_lease_until`) precisa de um
-  valor inicial razoável, maior que o tempo esperado no pior caso para os Passos 2 a 4
-  completarem — a ser definido na implementação, não nesta decisão.

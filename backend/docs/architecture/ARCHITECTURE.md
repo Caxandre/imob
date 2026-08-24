@@ -19,8 +19,10 @@ O backend é um **monólito modular**, não um conjunto de microserviços. API H
 compartilham o mesmo código-base, mas possuem entrypoints e responsabilidades independentes.
 
 - API HTTP: implementada (`src/main/server.ts`).
-- Workers: **(futuro)** — serão adicionados quando a primeira fila de negócio (BullMQ) for
-  necessária, com seu próprio entrypoint, sem abrir porta HTTP.
+- Workers: implementado o primeiro entrypoint não-HTTP, o dispatcher de provisionamento
+  (`src/workers/provisioning-dispatcher.ts`), com scripts próprios (`pnpm dev:dispatcher`,
+  `pnpm start:dispatcher`) e nunca iniciado automaticamente pela API. Um worker que consome
+  a fila BullMQ **(futuro)** ainda não existe.
 
 ## Control Plane
 
@@ -80,12 +82,31 @@ worker
 **IMPLEMENTED** — schema do protocolo de dispatch em `provisioning_jobs`: as colunas
 `dispatch_claimed_at`, `dispatch_lease_until` e `dispatched_at` (todas nullable, sem
 default), a constraint que impede um lease sem claim, e um índice parcial sobre jobs
-`PENDING` ainda não confirmados como despachados. Nenhum código lê ou escreve essas colunas
-ainda — apenas o suporte de persistência existe.
+`PENDING` ainda não confirmados como despachados.
 
-**PLANNED** — código do dispatcher, worker, `DatabaseProvisioner` (execução real de
-`CREATE DATABASE`) e criação de registros em `tenant_databases`. Nenhum desses existe ainda;
-apenas a decisão arquitetural e o schema que os suportam estão registrados.
+**IMPLEMENTED** — dispatcher (`src/workers/provisioning-dispatcher.ts`,
+`src/modules/provisioning/`) e queue BullMQ (`src/infrastructure/queue/`):
+
+```text
+poll PostgreSQL (loop próprio, sem scheduler externo)
+    ↓
+claim + lease (transação curta, FOR UPDATE SKIP LOCKED)
+    ↓
+COMMIT
+    ↓
+queue.add() — fila "tenant-provisioning", jobId = provisioning_jobs.id
+    ↓
+sucesso → dispatched_at        falha → libera o lease
+```
+
+Entrypoint independente da API (`pnpm dev:dispatcher` / `pnpm start:dispatcher`), nunca
+iniciado automaticamente pelo processo HTTP. O dispatcher só escreve as três colunas de
+dispatch — nunca `status`, `attempts` ou `current_step`, que continuam sendo
+responsabilidade exclusiva do worker.
+
+**PLANNED** — worker que efetivamente consome a fila (nenhum `Worker` do BullMQ foi criado;
+jobs se acumulam na fila sem processamento), `DatabaseProvisioner` (execução real de
+`CREATE DATABASE`) e criação de registros em `tenant_databases`.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
@@ -147,9 +168,10 @@ Nenhuma parte desse fluxo existe ainda. Em particular:
 
 ## Redis / BullMQ
 
-Redis está disponível localmente (Docker Compose) e as bibliotecas `ioredis`/`bullmq` estão
-instaladas. Nenhuma fila de negócio foi criada ainda — serão adicionadas conforme
-funcionalidades específicas exigirem processamento assíncrono.
+Redis está disponível localmente (Docker Compose) e no CI. **IMPLEMENTED**: a fila
+`tenant-provisioning` (`src/infrastructure/queue/`), alimentada pelo dispatcher de
+provisionamento. **PLANNED**: nenhum `Worker` do BullMQ consome essa fila ainda — os jobs
+publicados se acumulam sem processamento até o worker de provisionamento ser implementado.
 
 ## Transactional Outbox **(futuro)**
 
