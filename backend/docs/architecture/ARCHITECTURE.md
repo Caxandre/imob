@@ -240,11 +240,51 @@ SecretStore.put() — só depois que a role já reflete a senha
 continuam fora do escopo deste componente. `database_clusters` ganhou `host`/`port` (única
 migration desta tarefa) — sem eles não havia como abrir a conexão administrativa real.
 
-**PLANNED** — `DatabaseProvisioner` real (orquestrando este componente com `CREATE_DATABASE`
-→ `RUN_MIGRATIONS` → `HEALTH_CHECK`), `SecretStore` de produção, migrations do Tenant Data
-Plane, `GRANT`s de aplicação, criação de registros em `tenant_databases`, ativação do tenant
-(`tenants.status = READY`), recovery de jobs `RUNNING` abandonados, política de retry para
-jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está registrada.
+**IMPLEMENTED** — provisionamento idempotente do database PostgreSQL do tenant e isolamento
+inicial de CONNECT (`src/modules/provisioning/application/tenant-database-provisioner.ts`,
+`src/modules/provisioning/infrastructure/postgres-tenant-database-provisioner.ts`), isolado e
+testado, ainda **não** ligado ao `DatabaseProvisioner`/worker:
+
+```text
+tenantId + DatabaseCluster
+    ↓
+buildProvisioningResourceNames() — databaseName, roleName
+    ↓
+ClusterAdminCredentialResolver.resolve(cluster.secretReference)
+    ↓
+conexão administrativa (pg.Client, aberta e fechada por chamada — nunca um pool por tenant)
+    ↓
+pg_advisory_lock(hashtext(databaseName)) — serializa chamadas concorrentes para o mesmo tenant
+    ↓
+role de aplicação do tenant existe? não → TenantApplicationRoleNotFoundError, nada é criado
+    ↓
+database existe?
+    ├── não → CREATE DATABASE (tolera duplicate_database/unique_violation real de uma corrida)
+    └── sim → reutiliza
+    ↓
+REVOKE CONNECT ON DATABASE ... FROM PUBLIC
+    ↓
+GRANT CONNECT ON DATABASE ... TO <tenant_role>
+    ↓
+pg_advisory_unlock(hashtext(databaseName))
+```
+
+Precondição obrigatória: a application role do tenant (Prompt 013) precisa existir antes —
+este componente nunca a cria por conta própria. Ownership do database permanece o padrão do
+PostgreSQL (a credencial administrativa que executa o `CREATE DATABASE`), nunca a role do
+tenant — nenhuma cláusula `OWNER` é adicionada. `REVOKE CONNECT FROM PUBLIC` seguido de
+`GRANT CONNECT` para a role do tenant é reaplicado em toda chamada, mesmo com o database já
+existente — reconcilia infraestrutura provisionada parcialmente ou por fora deste fluxo, sem
+nunca reabrir `PUBLIC` como compensação (fail-closed). `GRANT USAGE`/DML em tabelas/schemas,
+`ALTER DEFAULT PRIVILEGES`, migrations de tenant e health check continuam fora do escopo
+deste componente.
+
+**PLANNED** — `DatabaseProvisioner` real (orquestrando os dois componentes acima com
+`RUN_MIGRATIONS` → `HEALTH_CHECK`), `SecretStore` de produção, migrations do Tenant Data
+Plane, `GRANT`s de aplicação (tabelas/sequences), `ALTER DEFAULT PRIVILEGES`, criação de
+registros em `tenant_databases`, ativação do tenant (`tenants.status = READY`), recovery de
+jobs `RUNNING` abandonados, política de retry para jobs `FAILED`. Nenhum desses existe ainda;
+apenas a decisão arquitetural está registrada.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
