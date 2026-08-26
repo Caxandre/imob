@@ -690,6 +690,71 @@ componente ainda não está ligado ao `DatabaseProvisioner`/worker.
 - Confirmado: nenhum `CREATE DATABASE`, nenhum `GRANT`, nenhuma migration de tenant, nenhum
   health check, nenhuma alteração no worker/máquina de estado.
 
+## Prompt 014 — `TenantDatabaseProvisioner` (CREATE DATABASE + isolamento de CONNECT) implementado
+
+Implementa apenas `CREATE_DATABASE` dos "Provisioning steps" acima, mais uma decisão de
+segurança que a formulação original desta ADR não detalhava — `RUN_MIGRATIONS` e
+`HEALTH_CHECK` continuam não implementados, e este componente ainda não está ligado ao
+`DatabaseProvisioner`/worker.
+
+- **Decisão de segurança explícita — isolamento de CONNECT é obrigatório, não opcional.**
+  PostgreSQL concede `CONNECT` a `PUBLIC` em todo database por padrão — um database exclusivo
+  por tenant (ADR-001) não é, por si só, isolamento no nível de conexão, já que qualquer role
+  autenticada no cluster (todas são implicitamente membros de `PUBLIC`) poderia se conectar a
+  qualquer database. Toda criação/reconciliação de database de tenant em cluster compartilhado
+  agora inclui, obrigatoriamente:
+
+  ```sql
+  REVOKE CONNECT ON DATABASE <tenant_database> FROM PUBLIC;
+  GRANT CONNECT ON DATABASE <tenant_database> TO <tenant_application_role>;
+  ```
+
+  Ambos os comandos são reaplicados em **toda** chamada de `ensureDatabase()`, mesmo com o
+  database já existente — reconcilia infraestrutura provisionada parcialmente ou por fora
+  deste fluxo, nunca assume que "database existe" implica "política de CONNECT correta".
+- **Ordem fail-closed.** `REVOKE` sempre roda antes do `GRANT`. Uma falha entre os dois deixa o
+  database temporariamente inacessível à role do tenant — preferível a deixá-lo acessível a
+  `PUBLIC`. Nenhuma compensação automática reabre `PUBLIC`; um retry apenas reaplica
+  `REVOKE`/`GRANT` até convergir.
+- **Pré-condição: a role de aplicação do tenant precisa existir.** Este componente nunca cria a
+  role por conta própria — reconhece sua ausência e lança `TenantApplicationRoleNotFoundError`
+  antes de criar/reconciliar qualquer database, tanto para um database novo quanto para um já
+  existente. Mantém a ordem explícita já estabelecida em "Provisioning steps":
+  `CREATE_ROLE` (Prompt 013) sempre antes de `CREATE_DATABASE` (esta tarefa).
+- **Ownership**: mantido como o padrão do PostgreSQL — a credencial administrativa que executa
+  `CREATE DATABASE` é a dona do database (nenhuma cláusula `OWNER` é adicionada), exatamente a
+  decisão já registrada em "Credentials and secrets" acima. Nenhum owner adicional é
+  inventado.
+- **Concorrência real — duas corridas distintas identificadas empiricamente contra
+  `postgres-tenants` real**, além da ADR original só mencionar `duplicate_database` (SQLSTATE
+  `42P04`):
+  1. Duas `CREATE DATABASE` genuinamente concorrentes para o mesmo nome podem, dependendo do
+     timing, colidir diretamente no índice único do catálogo (`pg_database_datname_index`),
+     manifestando como `unique_violation` (SQLSTATE `23505`) em vez de `42P04`. Ambos os casos
+     são tratados como equivalentes: "o database já existe, criado por outra chamada" — nenhum
+     outro erro do driver é silenciado como se fosse duplicidade.
+  2. `REVOKE`/`GRANT` concorrentes contra a mesma linha de ACL do catálogo (`pg_database`)
+     podem colidir com `"tuple concurrently updated"` (SQLSTATE `XX000`, genérico e sem
+     `constraint` nomeada — não seguro de reconhecer por padrão de erro).
+  - **Decisão**: em vez de tentar reconhecer e tolerar cada erro de corrida individualmente
+    (especialmente o segundo, sem um SQLSTATE específico e estável), `ensureDatabase()`
+    serializa chamadas concorrentes para o mesmo `databaseName` com um advisory lock de sessão
+    do PostgreSQL (`pg_advisory_lock(hashtext(databaseName))`, liberado explicitamente em
+    `finally` e, por segurança adicional, automaticamente ao fim da sessão caso o processo
+    morra antes). A tolerância a `duplicate_database`/`unique_violation` no `CREATE DATABASE`
+    é mantida como defesa em profundidade, não como o mecanismo primário de convergência.
+- **Maintenance database**: reafirma a mesma escolha do Prompt 013 (`"postgres"`) —
+  `CREATE DATABASE`, `REVOKE`/`GRANT ON DATABASE` e o advisory lock são todos operações de
+  nível de cluster/catálogo, nenhuma delas exige conectar ao database do tenant (que, no
+  início da chamada, pode nem existir ainda).
+- **Identificadores seguros**: `databaseName`/`roleName` só chegam a este componente via
+  `buildProvisioningResourceNames(tenantId)`; `pg.escapeIdentifier` (mesmo utilitário do
+  Prompt 013) faz o quoting seguro ao interpolar os dois na DDL, e uma checagem de defesa em
+  profundidade (`^[a-z0-9_]+$`) recusa prosseguir se essa garantia for violada.
+- Confirmado: nenhuma migration, nenhum `GRANT` de tabelas/schema, nenhum
+  `ALTER DEFAULT PRIVILEGES`, nenhuma migration de tenant, nenhum health check, nenhuma
+  alteração no worker/máquina de estado, nenhum registro em `tenant_databases`.
+
 ## Future implementation notes
 
 Registrado para a tarefa que implementar o `DatabaseProvisioner` real, sem comprometer
