@@ -3,9 +3,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { resolveTenantContext } from "../../../app/tenant-context.js";
 import type { TenantDatabaseConnectionManager } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
 import type { TenantDatabaseResolver } from "../../tenant-runtime/application/tenant-database-resolver.js";
+import { archiveProperty } from "../application/archive-property.js";
 import { createProperty } from "../application/create-property.js";
 import { getProperty } from "../application/get-property.js";
 import { listProperties } from "../application/list-properties.js";
+import { updateProperty } from "../application/update-property.js";
+import type { UpdatePropertyInput } from "../application/property-repository.js";
 import type { Property } from "../domain/property.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
 import { mapPropertyRouteError } from "./property-error-mapper.js";
@@ -14,6 +17,7 @@ import {
   createPropertyBodySchema,
   listPropertiesQuerySchema,
   propertyIdParamsSchema,
+  updatePropertyBodySchema,
 } from "./property-request.schema.js";
 
 function toPropertyResponse(property: Property) {
@@ -243,6 +247,135 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
         });
 
         return reply.send(toPropertyResponse(property));
+      }),
+    );
+
+    app.patch(
+      "/properties/:id",
+      {
+        schema: {
+          operationId: "updateProperty",
+          summary: "Update property",
+          description:
+            "Partially updates a property in the tenant's own database. Any subset of the " +
+            "editable fields may be sent; fields omitted from the body are left unchanged. " +
+            "id/created_at/updated_at are immutable and rejected if present in the body.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          params: {
+            type: "object",
+            properties: { id: { type: "string", format: "uuid" } },
+            required: ["id"],
+          },
+          body: { $ref: "UpdatePropertyRequest#" },
+          response: {
+            200: { description: "Property updated", $ref: "Property#" },
+            400: { description: "Invalid payload, empty body, or missing/invalid X-Tenant-Id", $ref: "ErrorResponse#" },
+            404: { description: "Property not found", $ref: "ErrorResponse#" },
+            409: { description: "Tenant is not READY", $ref: "ErrorResponse#" },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id", parsedParams.error.issues);
+        }
+
+        const parsedBody = updatePropertyBodySchema.safeParse(request.body);
+        if (!parsedBody.success) {
+          return badRequest(reply, "Invalid request payload", parsedBody.error.issues);
+        }
+
+        // Only keys actually present in the parsed body are copied — an omitted key must
+        // never be confused with an explicit `null` (sections 43/44). Zod never backfills an
+        // omitted optional key, so `"x" in parsedBody.data` is exactly "was it sent".
+        const input: UpdatePropertyInput = {};
+        const body = parsedBody.data;
+        if ("title" in body) input.title = body.title;
+        if ("description" in body) input.description = body.description;
+        if ("property_type" in body) input.propertyType = body.property_type;
+        if ("transaction_type" in body) input.transactionType = body.transaction_type;
+        if ("status" in body) input.status = body.status;
+        if ("price" in body) input.price = body.price;
+        if ("bedrooms" in body) input.bedrooms = body.bedrooms;
+        if ("bathrooms" in body) input.bathrooms = body.bathrooms;
+        if ("parking_spaces" in body) input.parkingSpaces = body.parking_spaces;
+        if ("area_m2" in body) input.areaM2 = body.area_m2;
+        if ("street" in body) input.street = body.street;
+        if ("number" in body) input.number = body.number;
+        if ("complement" in body) input.complement = body.complement;
+        if ("neighborhood" in body) input.neighborhood = body.neighborhood;
+        if ("city" in body) input.city = body.city;
+        if ("state" in body) input.state = body.state;
+        if ("postal_code" in body) input.postalCode = body.postal_code;
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const property = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const repository = createDrizzlePropertyRepository(db);
+          return updateProperty(repository, parsedParams.data.id, input);
+        });
+
+        request.log.info(
+          { operation: "property.update", tenantId: tenantContext.tenantId, propertyId: property.id },
+          "property updated",
+        );
+
+        return reply.send(toPropertyResponse(property));
+      }),
+    );
+
+    app.delete(
+      "/properties/:id",
+      {
+        schema: {
+          operationId: "archiveProperty",
+          summary: "Archive property",
+          description:
+            "Archives a property (status = INACTIVE) in the tenant's own database. Never a " +
+            "physical delete — the row and its history are preserved. Idempotent: archiving " +
+            "an already-INACTIVE property still succeeds.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          params: {
+            type: "object",
+            properties: { id: { type: "string", format: "uuid" } },
+            required: ["id"],
+          },
+          response: {
+            204: { description: "Property archived (or already was)" },
+            400: { description: "Invalid id or missing/invalid X-Tenant-Id", $ref: "ErrorResponse#" },
+            404: { description: "Property not found", $ref: "ErrorResponse#" },
+            409: { description: "Tenant is not READY", $ref: "ErrorResponse#" },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id", parsedParams.error.issues);
+        }
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const property = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const repository = createDrizzlePropertyRepository(db);
+          return archiveProperty(repository, parsedParams.data.id);
+        });
+
+        request.log.info(
+          { operation: "property.archive", tenantId: tenantContext.tenantId, propertyId: property.id },
+          "property archived",
+        );
+
+        return reply.status(204).send();
       }),
     );
   };

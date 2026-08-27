@@ -8,6 +8,7 @@ import type {
   ListPropertiesInput,
   ListPropertiesResult,
   PropertyRepository,
+  UpdatePropertyInput,
 } from "../application/property-repository.js";
 
 function toProperty(row: typeof properties.$inferSelect): Property {
@@ -70,6 +71,29 @@ export function createDrizzlePropertyRepository(db: TenantDatabase): PropertyRep
 
     async findById(id: string): Promise<Property | undefined> {
       const [row] = await db.select().from(properties).where(eq(properties.id, id));
+      return row ? toProperty(row) : undefined;
+    },
+
+    async update(id: string, input: UpdatePropertyInput): Promise<Property | undefined> {
+      // Only ever called with at least one field — the HTTP boundary's Zod schema already
+      // rejects an empty PATCH body before this repository is reached.
+      const [row] = await db
+        .update(properties)
+        .set({ ...input, updatedAt: sql`now()` })
+        .where(eq(properties.id, id))
+        .returning();
+      return row ? toProperty(row) : undefined;
+    },
+
+    async archive(id: string): Promise<Property | undefined> {
+      // Always runs the same UPDATE regardless of current status — idempotent by convergence
+      // (the same pattern already used for provisioning idempotency in this codebase), not by
+      // a read-before-write short circuit.
+      const [row] = await db
+        .update(properties)
+        .set({ status: "INACTIVE", updatedAt: sql`now()` })
+        .where(eq(properties.id, id))
+        .returning();
       return row ? toProperty(row) : undefined;
     },
   };

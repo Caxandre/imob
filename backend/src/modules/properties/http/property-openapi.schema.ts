@@ -120,6 +120,52 @@ export const createPropertyRequestSchema = {
   ],
 } as const;
 
+/**
+ * Deliberately NOT `createPropertyRequestSchema` reused/relaxed — same reasoning as
+ * `updatePropertyBodySchema` (Zod): every field here is genuinely optional (a PATCH may send
+ * any subset), and this JSON Schema stays loose for the same AJV-runs-before-Zod reason
+ * documented on `CreatePropertyRequest` above — no `required`, no `enum`/`minimum`/`maxLength`
+ * enforced here either. `id`/`created_at`/`updated_at` are never listed — they are immutable
+ * and Zod's `.strict()` already rejects them if sent.
+ */
+export const updatePropertyRequestSchema = {
+  $id: "UpdatePropertyRequest",
+  title: "UpdatePropertyRequest",
+  type: "object",
+  description: "Any subset of the editable property fields. At least one must be present.",
+  properties: {
+    title: { type: "string", description: `Trimmed; at most ${TITLE_MAX_LENGTH} characters.` },
+    description: { type: "string", nullable: true, description: "Send null to clear it." },
+    property_type: { type: "string", description: `One of: ${PROPERTY_TYPES.join(", ")}.` },
+    transaction_type: { type: "string", description: `One of: ${TRANSACTION_TYPES.join(", ")}.` },
+    status: { type: "string", description: `One of: ${PROPERTY_STATUSES.join(", ")}.` },
+    price: {
+      type: "string",
+      description: "Decimal string with up to 2 decimal places, greater than 0 (e.g. \"475000.00\").",
+    },
+    bedrooms: { type: "integer", nullable: true, description: "Must be >= 0 when present. Send null to clear it." },
+    bathrooms: { type: "integer", nullable: true, description: "Must be >= 0 when present. Send null to clear it." },
+    parking_spaces: {
+      type: "integer",
+      nullable: true,
+      description: "Must be >= 0 when present. Send null to clear it.",
+    },
+    area_m2: {
+      type: "string",
+      nullable: true,
+      description: "Decimal string with up to 2 decimal places, greater than 0. Send null to clear it.",
+    },
+    street: { type: "string", nullable: true, description: "Send null to clear it." },
+    number: { type: "string", nullable: true, description: "Send null to clear it." },
+    complement: { type: "string", nullable: true, description: "Send null to clear it." },
+    neighborhood: { type: "string", nullable: true, description: "Send null to clear it." },
+    city: { type: "string", nullable: true, description: "Send null to clear it." },
+    state: { type: "string", nullable: true, description: "Brazilian UF, 2 letters. Send null to clear it." },
+    postal_code: { type: "string", nullable: true, description: "Send null to clear it." },
+  },
+  examples: [{ price: "475000.00", status: "ACTIVE" }],
+} as const;
+
 export const propertySchema = {
   $id: "Property",
   title: "Property",

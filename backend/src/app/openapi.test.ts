@@ -108,6 +108,21 @@ describe("OpenAPI specification", () => {
     expect(Object.keys(getById?.responses ?? {})).toEqual(
       expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
     );
+
+    const update = spec.paths["/api/v1/properties/{id}"]?.patch;
+    expect(update?.operationId).toBe("updateProperty");
+    expect(update?.tags).toEqual(["Properties"]);
+    expect(update?.requestBody).toBeDefined();
+    expect(Object.keys(update?.responses ?? {})).toEqual(
+      expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
+    );
+
+    const archive = spec.paths["/api/v1/properties/{id}"]?.delete;
+    expect(archive?.operationId).toBe("archiveProperty");
+    expect(archive?.tags).toEqual(["Properties"]);
+    expect(Object.keys(archive?.responses ?? {})).toEqual(
+      expect.arrayContaining(["204", "400", "404", "409", "503", "500"]),
+    );
   });
 
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
@@ -120,6 +135,7 @@ describe("OpenAPI specification", () => {
         "CreateTenantRequest",
         "Tenant",
         "CreatePropertyRequest",
+        "UpdatePropertyRequest",
         "Property",
         "PropertyList",
       ]),

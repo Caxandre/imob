@@ -182,6 +182,12 @@ Swagger UI (com pnpm dev:full em execução)
     → preencher X-Tenant-Id com o mesmo id → Execute → conferir a listagem paginada
   → Properties → GET /api/v1/properties/{id} → Try it out
     → preencher X-Tenant-Id e o id retornado pelo POST → Execute → conferir 200
+  → Properties → PATCH /api/v1/properties/{id} → Try it out
+    → preencher X-Tenant-Id e o id → body {"price": "475000.00", "status": "ACTIVE"}
+    → Execute → conferir 200, só os campos enviados mudaram
+  → Properties → DELETE /api/v1/properties/{id} → Try it out
+    → preencher X-Tenant-Id e o id → Execute → conferir 204 (arquivamento, nunca exclusão
+      física — GET no mesmo id continua retornando 200 com status "INACTIVE")
 ```
 
 `X-Tenant-Id` é **temporário** — um mecanismo de desenvolvimento/integração enquanto
@@ -194,9 +200,10 @@ tenant provisionado pelo worker separado falha ao resolver a credencial do tenan
 seção "Local development runtime" em `ARCHITECTURE.md`.
 
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST /api/v1/tenants` (tag
-**Tenants**), e `POST/GET /api/v1/properties`, `GET /api/v1/properties/{id}` (tag
-**Properties**). Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o
-Swagger descreve apenas a interface HTTP pública.
+**Tenants**), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`
+(tag **Properties**) — `DELETE` arquiva (`status = INACTIVE`), nunca exclui fisicamente.
+Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o Swagger descreve
+apenas a interface HTTP pública.
 
 ## Build e produção
 

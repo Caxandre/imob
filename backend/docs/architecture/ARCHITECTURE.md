@@ -574,15 +574,18 @@ exposição pública enquanto autenticação real não existir; e o fail-fast de
 
 ## Properties (primeiro módulo de domínio)
 
-**IMPLEMENTED** (Prompt 021) — primeiro módulo funcional do domínio imobiliário
+**IMPLEMENTED** (Prompts 021-022) — primeiro módulo funcional do domínio imobiliário
 (`src/modules/properties/`), provando de ponta a ponta a regra final desta fase: uma rota
 HTTP de domínio opera exclusivamente no Tenant Data Plane correto, sem `tenant_id` nas
-tabelas e sem credencial administrativa.
+tabelas e sem credencial administrativa. Ciclo completo create/read/list/update/archive —
+**sem exclusão física**.
 
 ```text
 POST   /api/v1/properties
 GET    /api/v1/properties
 GET    /api/v1/properties/:id
+PATCH  /api/v1/properties/:id   (Prompt 022 — atualização parcial)
+DELETE /api/v1/properties/:id   (Prompt 022 — arquivamento, nunca DELETE físico)
 ```
 
 ```text
@@ -647,6 +650,46 @@ solto — sem `enum`/`minimum`/`required` reais — pelo mesmo motivo já regist
 essas regras ali faria a API responder com o formato de erro genérico do AJV em vez do
 envelope `{statusCode, error, message, details}` desta API.
 
+**IMPLEMENTED** (Prompt 022) — `PATCH /api/v1/properties/:id`, atualização parcial:
+
+- **Semântica PATCH**: campo ausente do body = preservar; campo presente = alterar; para os
+  campos nullable do domínio, campo presente com `null` explícito = limpar. `Zod` nunca
+  preenche uma chave ausente de um campo `.optional()` — é exatamente essa propriedade que
+  permite ao handler distinguir "ausente" de "`null` explícito" via `"campo" in body`, sem
+  jamais confundir os dois (Prompt 022, seções 43/44).
+- **`updatePropertyBodySchema` é um schema Zod próprio, não `createPropertyBodySchema
+  .partial()`** — reaproveitar cegamente o create colapsaria "ausente" e "`null`" no mesmo
+  `null` (os helpers do create já fazem esse `.nullish().transform(() => null)` de propósito
+  para a criação). `.strict()` rejeita qualquer chave fora do schema — incluindo
+  `id`/`created_at`/`updated_at`/`tenant_id`, que simplesmente nunca fazem parte dele —, e um
+  `.refine()` rejeita um body vazio (`{}` → 400, nunca um update sem efeito).
+- **Campos obrigatórios no create** (`title`, `property_type`, `transaction_type`, `price`)
+  continuam não-nulos no update: podem ser omitidos (mantém o valor atual) mas nunca limpos
+  com `null`.
+- `repository.update(id, input)` roda um único `UPDATE ... SET ...spread(input),
+  updated_at = now() WHERE id = $1 RETURNING *` — `updated_at` sempre via `now()` do
+  PostgreSQL (mesmo padrão já usado em `drizzle-process-provisioning-job-repository.ts`),
+  nunca `new Date()` da aplicação; `created_at` nunca é tocado. Retorna `undefined` quando o
+  id não existe — a camada de aplicação (`updateProperty()`) traduz isso em
+  `PropertyNotFoundError` → `404`.
+
+**IMPLEMENTED** (Prompt 022) — `DELETE /api/v1/properties/:id`, arquivamento:
+
+```text
+DELETE HTTP  ≠  DELETE SQL
+DELETE HTTP  →  UPDATE properties SET status = 'INACTIVE', updated_at = now() WHERE id = $1
+```
+
+Nenhum `DELETE FROM properties` existe em código de produção — `archive()`
+(`drizzle-property-repository.ts`) sempre executa o mesmo `UPDATE`, nunca um `DELETE`
+físico, preservando o registro e seu histórico (CLAUDE.md). **Idempotente por convergência**
+(mesmo princípio já usado para idempotência de provisioning nesta base de código): arquivar
+um imóvel já `INACTIVE` roda o mesmo `UPDATE` de novo e retorna `204` de novo — nunca um erro
+só porque já estava arquivado. `GET`/listagem continuam retornando imóveis `INACTIVE`
+normalmente (arquivamento não é exclusão lógica invisível nesta fase — filtro por status é
+prompt futuro). Sem `deleted_at`: os três estados existentes (`DRAFT`/`ACTIVE`/`INACTIVE`) já
+bastam para representar "arquivado" sem introduzir uma segunda dimensão de estado.
+
 **Error mapping** (`property-error-mapper.ts`) — central, nenhum handler tem seu próprio
 `if (error instanceof ...)`:
 
@@ -674,7 +717,11 @@ falhou, nome do cluster, secret reference).
 (`src/modules/properties/http/property-routes.test.ts`): tenant A cria, tenant A vê na
 listagem/`GET :id`, tenant B nunca vê na listagem, `GET :id` do recurso de A usando o header
 de B retorna `404` (a query sequer roda no database de B — nunca uma consulta cruzada que
-"acerta por acidente" e é bloqueada depois).
+"acerta por acidente" e é bloqueada depois). Estendido no Prompt 022:
+`PATCH`/`DELETE` do recurso de A usando o header de B também retornam `404` (nunca revelando
+que o recurso existe em outro database) e o registro em A permanece intacto — confirmado
+lendo o estado real de A após a tentativa de B, e confirmando que A ainda consegue
+atualizar/arquivar seu próprio recurso normalmente em seguida.
 
 ## Redis / BullMQ
 

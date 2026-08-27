@@ -34,6 +34,8 @@ function fakeRepository(overrides: Partial<PropertyRepository> = {}): PropertyRe
     }),
     list: async () => ({ data: [], total: 0 }),
     findById: async () => undefined,
+    update: async () => undefined,
+    archive: async () => undefined,
     ...overrides,
   };
 }

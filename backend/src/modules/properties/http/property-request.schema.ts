@@ -47,6 +47,23 @@ function optionalNonNegativeInt() {
 }
 
 /**
+ * Update-only variants, deliberately distinct from the `optional*`/`positiveDecimalString`
+ * helpers above (this task, section 8: reusing the create schema with a blind `.partial()`
+ * would collapse "field omitted" and "field explicitly cleared with null" into the same thing,
+ * since those helpers' `.nullish().transform(() => null)` already turns *both* into `null`).
+ * PATCH semantics require telling the two apart (section 43/44): a key absent from the parsed
+ * object means "leave unchanged"; a key present with `null` means "clear it" — only possible
+ * if the key is truly missing from Zod's output for an omitted field, never defaulted.
+ */
+function optionalNullableTrimmedString(maxLength: number) {
+  return z.string().trim().min(1).max(maxLength).nullable().optional();
+}
+
+function optionalNullableNonNegativeInt() {
+  return z.number().int().min(0).nullable().optional();
+}
+
+/**
  * Authoritative validation for the create-property request body. Field names are snake_case
  * on the wire (matching this task's own example payload) and mapped to the module's camelCase
  * `CreatePropertyInput` shape explicitly in `property-routes.ts` — never silently renamed by a
@@ -93,3 +110,42 @@ export const propertyIdParamsSchema = z.object({
 });
 
 export type PropertyIdParams = z.infer<typeof propertyIdParamsSchema>;
+
+/**
+ * Authoritative validation for the update-property (PATCH) request body. `.strict()` rejects
+ * any key outside this shape — including `id`/`created_at`/`updated_at`, which are simply
+ * never part of it (section 7: immutable fields) — and the `.refine()` below rejects an empty
+ * body (section 9: no no-op update). Required-on-create fields (`title`, `property_type`,
+ * `transaction_type`, `price`) stay non-nullable here too: they may be omitted (unchanged) but
+ * never explicitly cleared with `null` (section 45).
+ */
+export const updatePropertyBodySchema = z
+  .object({
+    title: z.string().trim().min(1, "title must not be empty").max(TITLE_MAX_LENGTH).optional(),
+    description: optionalNullableTrimmedString(DESCRIPTION_MAX_LENGTH),
+    property_type: z.enum(PROPERTY_TYPES).optional(),
+    transaction_type: z.enum(TRANSACTION_TYPES).optional(),
+    status: z.enum(PROPERTY_STATUSES).optional(),
+    price: positiveDecimalString("price").optional(),
+    bedrooms: optionalNullableNonNegativeInt(),
+    bathrooms: optionalNullableNonNegativeInt(),
+    parking_spaces: optionalNullableNonNegativeInt(),
+    area_m2: positiveDecimalString("area_m2").nullable().optional(),
+    street: optionalNullableTrimmedString(ADDRESS_FIELD_MAX_LENGTH),
+    number: optionalNullableTrimmedString(NUMBER_MAX_LENGTH),
+    complement: optionalNullableTrimmedString(ADDRESS_FIELD_MAX_LENGTH),
+    neighborhood: optionalNullableTrimmedString(ADDRESS_FIELD_MAX_LENGTH),
+    city: optionalNullableTrimmedString(ADDRESS_FIELD_MAX_LENGTH),
+    state: z
+      .string()
+      .trim()
+      .length(2, "state must be a 2-letter Brazilian UF")
+      .toUpperCase()
+      .nullable()
+      .optional(),
+    postal_code: optionalNullableTrimmedString(POSTAL_CODE_MAX_LENGTH),
+  })
+  .strict()
+  .refine((data) => Object.keys(data).length > 0, { message: "at least one field must be provided" });
+
+export type UpdatePropertyBody = z.infer<typeof updatePropertyBodySchema>;

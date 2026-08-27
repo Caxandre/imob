@@ -9,6 +9,7 @@ import {
   createPropertyRequestSchema,
   propertyListSchema,
   propertySchema,
+  updatePropertyRequestSchema,
 } from "../modules/properties/http/property-openapi.schema.js";
 import type { TenantDatabaseConnectionManager } from "../modules/tenant-runtime/application/tenant-database-connection-manager.js";
 import { createDrizzleTenantDatabaseResolver } from "../modules/tenant-runtime/infrastructure/drizzle-tenant-database-resolver.js";
@@ -98,6 +99,7 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(createTenantRequestSchema);
   app.addSchema(tenantSchema);
   app.addSchema(createPropertyRequestSchema);
+  app.addSchema(updatePropertyRequestSchema);
   app.addSchema(propertySchema);
   app.addSchema(propertyListSchema);
 
