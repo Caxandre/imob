@@ -2,7 +2,11 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { controlPlaneDb, controlPlanePool } from "../../../infrastructure/database/control-plane/client.js";
-import { provisioningJobs, tenants } from "../../../infrastructure/database/control-plane/schema.js";
+import {
+  databaseClusters,
+  provisioningJobs,
+  tenants,
+} from "../../../infrastructure/database/control-plane/schema.js";
 import { createRedisConnection } from "../../../infrastructure/queue/redis-connection.js";
 import {
   createTenantProvisioningQueue,
@@ -17,9 +21,29 @@ const repository = createDrizzleProcessProvisioningJobRepository(controlPlaneDb)
 
 let connection: ReturnType<typeof createRedisConnection>;
 let queue: TenantProvisioningQueue;
+// Real cluster row — finalizeProvisioning's tenant_databases insert has a NOT NULL FK to
+// database_clusters, so the fake DatabaseProvisioner's result must reference a real one.
+let clusterId: string;
 
 beforeEach(async () => {
-  await controlPlaneDb.execute(sql`TRUNCATE TABLE ${provisioningJobs}, ${tenants} CASCADE`);
+  await controlPlaneDb.execute(
+    sql`TRUNCATE TABLE ${provisioningJobs}, ${tenants}, ${databaseClusters} CASCADE`,
+  );
+  const [cluster] = await controlPlaneDb
+    .insert(databaseClusters)
+    .values({
+      name: "bullmq-worker-test-cluster",
+      provider: "local",
+      region: "local",
+      host: "localhost",
+      port: 5433,
+      secretReference: "clusters/bullmq-worker-test-cluster",
+    })
+    .returning();
+  if (!cluster) {
+    throw new Error("cluster insert returned no row");
+  }
+  clusterId = cluster.id;
   connection = createRedisConnection();
   queue = createTenantProvisioningQueue(connection);
 });
@@ -60,14 +84,16 @@ async function insertJob(tenantId: string) {
   return job;
 }
 
-// Arbitrary but internally consistent — only used to satisfy DatabaseProvisioner's return
-// type; no test in this file inspects its fields.
-const FAKE_PROVISIONING_RESULT = {
-  clusterId: "cluster-1",
-  databaseName: "tenant_fake",
-  secretReference: "tenant-databases/fake",
-  schemaVersion: 1,
-};
+// Internally consistent (real clusterId, so finalizeProvisioning's FK succeeds) but
+// otherwise arbitrary — no test in this file inspects these fields beyond that.
+function fakeResult() {
+  return {
+    clusterId,
+    databaseName: `tenant_${clusterId.replaceAll("-", "")}`,
+    secretReference: `tenant-databases/${clusterId}`,
+    schemaVersion: 1,
+  };
+}
 
 function fakeProvisioner(behavior: "succeed" | "throw" = "succeed") {
   const calls: { provisioningJobId: string; tenantId: string }[] = [];
@@ -78,7 +104,7 @@ function fakeProvisioner(behavior: "succeed" | "throw" = "succeed") {
       if (behavior === "throw") {
         throw new Error("provisioning boom");
       }
-      return FAKE_PROVISIONING_RESULT;
+      return fakeResult();
     },
   };
 

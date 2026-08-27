@@ -13,6 +13,12 @@ export interface ProvisioningJobSnapshot {
   status: ProvisioningJobStatus;
 }
 
+export interface FinalizeProvisioningInput {
+  provisioningJobId: string;
+  tenantId: string;
+  result: ProvisioningResult;
+}
+
 /**
  * Persistence port for the provisioning workflow. PostgreSQL is the source of truth (ADR-002)
  * — the worker always consults it before acting, never BullMQ's own job state.
@@ -24,8 +30,17 @@ export interface ProcessProvisioningJobRepository {
    * (`WHERE status = 'PENDING'`). Returns undefined if the job was no longer PENDING.
    */
   markRunning(id: string, currentStep: string): Promise<ProvisioningJobSnapshot | undefined>;
-  /** Guarded RUNNING → SUCCEEDED transition. */
-  markSucceeded(id: string): Promise<void>;
+  /**
+   * Atomically persists a completed `ProvisioningResult` into the Control Plane, within a
+   * single PostgreSQL transaction (ADR-003 "Finalization"): reconciles/creates
+   * `tenant_databases`, activates the tenant (`tenants.status = READY`), and marks the job
+   * `SUCCEEDED` — all three, or none. Idempotent: safe to call again for a job already
+   * `SUCCEEDED`/tenant already `READY`, as long as the persisted state is compatible with
+   * the same `result`; throws on any real inconsistency (job/tenant in an incompatible
+   * state, or an existing `tenant_databases` row that doesn't match `result`) instead of
+   * silently overwriting anything.
+   */
+  finalizeProvisioning(input: FinalizeProvisioningInput): Promise<void>;
   /** Guarded RUNNING → FAILED transition. */
   markFailed(id: string, errorMessage: string): Promise<void>;
 }
@@ -79,6 +94,48 @@ export class ProvisioningJobTenantMismatchError extends Error {
         `message payload named tenant "${actualTenantId}"`,
     );
     this.name = "ProvisioningJobTenantMismatchError";
+  }
+}
+
+/**
+ * Raised by `finalizeProvisioning()` when the provisioning job is not in a state finalization
+ * can act on — neither `RUNNING` (the normal case) nor an already-`SUCCEEDED` job whose
+ * persisted state is compatible with the same result (the idempotent-retry case). A job that
+ * is `PENDING` or `FAILED` must never be finalized.
+ */
+export class InvalidProvisioningJobStateError extends Error {
+  constructor(provisioningJobId: string, reason: string) {
+    super(`Provisioning job "${provisioningJobId}" cannot be finalized: ${reason}`);
+    this.name = "InvalidProvisioningJobStateError";
+  }
+}
+
+/**
+ * Raised by `finalizeProvisioning()` when the tenant is not in a state compatible with being
+ * marked `READY` — neither `PROVISIONING` (the normal case) nor already `READY` (the
+ * idempotent-retry case). A tenant that is `SUSPENDED` or `FAILED` must never be silently
+ * flipped to `READY`.
+ */
+export class TenantProvisioningStateError extends Error {
+  constructor(tenantId: string, actualStatus: string) {
+    super(`Tenant "${tenantId}" cannot be marked READY from status "${actualStatus}"`);
+    this.name = "TenantProvisioningStateError";
+  }
+}
+
+/**
+ * Raised by `finalizeProvisioning()` when a `tenant_databases` row already exists for this
+ * tenant but disagrees with the given `ProvisioningResult` on cluster/database/secret/schema
+ * version. Never silently overwritten — a real divergence here means something is
+ * inconsistent and must be investigated, not papered over.
+ */
+export class ProvisioningFinalizationConflictError extends Error {
+  constructor(tenantId: string) {
+    super(
+      `Tenant "${tenantId}" already has a tenant_databases record that is incompatible with ` +
+        "this ProvisioningResult",
+    );
+    this.name = "ProvisioningFinalizationConflictError";
   }
 }
 
@@ -146,10 +203,9 @@ export async function processProvisioningJob(
     return { outcome: "skipped", reason: "lost-claim-race" };
   }
 
+  let result: ProvisioningResult;
   try {
-    await provisioner.provision({ provisioningJobId: claimed.id, tenantId: claimed.tenantId });
-    await repository.markSucceeded(claimed.id);
-    return { outcome: "succeeded" };
+    result = await provisioner.provision({ provisioningJobId: claimed.id, tenantId: claimed.tenantId });
   } catch (error) {
     const errorMessage = toSanitizedErrorMessage(error);
     // If this itself throws (e.g. PostgreSQL unavailable), it propagates uncaught: we
@@ -158,4 +214,20 @@ export async function processProvisioningJob(
     await repository.markFailed(claimed.id, errorMessage);
     return { outcome: "failed", errorMessage };
   }
+
+  // External infrastructure provisioning already succeeded at this point — provision()
+  // returned. A failure here is a Control Plane finalization problem (e.g. a transient
+  // PostgreSQL error), never evidence that provisioning itself failed. Deliberately does
+  // NOT call markFailed: the provisioner is idempotent by discovery (ADR-003), so a future
+  // retry can redo this whole call safely and finish the finalization — marking FAILED here
+  // would make a fully working tenant database permanently unreachable from any retry.
+  // The job is left RUNNING and the error propagates uncaught, so the caller (BullMQ) sees
+  // a genuine processing failure rather than a persisted terminal outcome. RUNNING recovery
+  // after a crash mid-finalization remains a known, separate gap (ADR-002/ADR-003).
+  await repository.finalizeProvisioning({
+    provisioningJobId: claimed.id,
+    tenantId: claimed.tenantId,
+    result,
+  });
+  return { outcome: "succeeded" };
 }

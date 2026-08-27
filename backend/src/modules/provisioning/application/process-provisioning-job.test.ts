@@ -6,6 +6,7 @@ import {
   ProvisioningJobNotFoundError,
   ProvisioningJobTenantMismatchError,
   type DatabaseProvisioner,
+  type FinalizeProvisioningInput,
   type ProcessProvisioningJobRepository,
   type ProvisioningJobSnapshot,
   type ProvisioningJobStatus,
@@ -15,7 +16,7 @@ const JOB_ID = "job-1";
 const TENANT_ID = "tenant-1";
 
 // Arbitrary but internally consistent — only used to satisfy DatabaseProvisioner's return
-// type; no test in this file inspects its fields.
+// type; no test in this file inspects its fields beyond confirming it reaches finalizeProvisioning.
 const FAKE_PROVISIONING_RESULT = {
   clusterId: "cluster-1",
   databaseName: "tenant_fake",
@@ -29,12 +30,17 @@ interface FakeRepositoryOptions {
   tenantId?: string;
   markRunningReturnsUndefined?: boolean;
   markFailedFails?: boolean;
+  finalizeProvisioningFails?: boolean;
 }
 
 function fakeRepository(options: FakeRepositoryOptions = {}) {
-  const calls: { markRunning: string[]; markSucceeded: string[]; markFailed: [string, string][] } = {
+  const calls: {
+    markRunning: string[];
+    finalizeProvisioning: FinalizeProvisioningInput[];
+    markFailed: [string, string][];
+  } = {
     markRunning: [],
-    markSucceeded: [],
+    finalizeProvisioning: [],
     markFailed: [],
   };
 
@@ -54,8 +60,11 @@ function fakeRepository(options: FakeRepositoryOptions = {}) {
       expect(currentStep).toBe(PROVISION_DATABASE_STEP);
       return { ...snapshot, status: "RUNNING" };
     },
-    markSucceeded: async (id) => {
-      calls.markSucceeded.push(id);
+    finalizeProvisioning: async (input) => {
+      calls.finalizeProvisioning.push(input);
+      if (options.finalizeProvisioningFails) {
+        throw new Error("control plane unavailable during finalization");
+      }
     },
     markFailed: async (id, errorMessage) => {
       calls.markFailed.push([id, errorMessage]);
@@ -85,7 +94,7 @@ function fakeProvisioner(behavior: "succeed" | "throw" = "succeed") {
 }
 
 describe("processProvisioningJob", () => {
-  it("PENDING + provisioner success → RUNNING → SUCCEEDED", async () => {
+  it("PENDING + provisioner success → RUNNING → finalized → SUCCEEDED", async () => {
     const { repository, calls } = fakeRepository({ status: "PENDING" });
     const { provisioner, calls: provisionerCalls } = fakeProvisioner("succeed");
 
@@ -96,12 +105,14 @@ describe("processProvisioningJob", () => {
 
     expect(calls.markRunning).toEqual([JOB_ID]);
     expect(provisionerCalls).toEqual([{ provisioningJobId: JOB_ID, tenantId: TENANT_ID }]);
-    expect(calls.markSucceeded).toEqual([JOB_ID]);
+    expect(calls.finalizeProvisioning).toEqual([
+      { provisioningJobId: JOB_ID, tenantId: TENANT_ID, result: FAKE_PROVISIONING_RESULT },
+    ]);
     expect(calls.markFailed).toEqual([]);
     expect(outcome).toEqual({ outcome: "succeeded" });
   });
 
-  it("PENDING + provisioner throws → RUNNING → FAILED with a sanitized message", async () => {
+  it("PENDING + provisioner throws → RUNNING → FAILED with a sanitized message, never finalized", async () => {
     const { repository, calls } = fakeRepository({ status: "PENDING" });
     const { provisioner } = fakeProvisioner("throw");
 
@@ -111,7 +122,7 @@ describe("processProvisioningJob", () => {
     });
 
     expect(calls.markRunning).toEqual([JOB_ID]);
-    expect(calls.markSucceeded).toEqual([]);
+    expect(calls.finalizeProvisioning).toEqual([]);
     expect(calls.markFailed).toEqual([[JOB_ID, "provisioning boom"]]);
     expect(outcome).toEqual({ outcome: "failed", errorMessage: "provisioning boom" });
   });
@@ -227,5 +238,23 @@ describe("processProvisioningJob", () => {
         tenantId: TENANT_ID,
       }),
     ).rejects.toThrow("postgres unavailable while persisting FAILED");
+  });
+
+  it("propagates the error if finalization fails, without ever calling markFailed", async () => {
+    // Section 20-23: infra provisioning succeeded — only the Control Plane finalization
+    // failed. The job must not be marked FAILED (that would make a fully working tenant
+    // database unreachable from a future retry) — the error just propagates.
+    const { repository, calls } = fakeRepository({ status: "PENDING", finalizeProvisioningFails: true });
+    const { provisioner } = fakeProvisioner("succeed");
+
+    await expect(
+      processProvisioningJob(repository, provisioner, {
+        provisioningJobId: JOB_ID,
+        tenantId: TENANT_ID,
+      }),
+    ).rejects.toThrow("control plane unavailable during finalization");
+
+    expect(calls.finalizeProvisioning).toHaveLength(1);
+    expect(calls.markFailed).toEqual([]);
   });
 });

@@ -81,6 +81,12 @@ Ver ADR-003 para o raciocínio completo.
 - Tenant application roles não executam migrations nem possuem privilégios DDL
   (`CREATE`/`ALTER`/`DROP`/`TRUNCATE`); migrations pertencem à infraestrutura administrativa
   da plataforma.
+- Tenant `READY`, `tenant_databases` `READY` e provisioning job `SUCCEEDED` devem ser
+  confirmados atomicamente na mesma transação do Control Plane — nunca um sem o outro.
+- Uma falha ao persistir essa transação final, depois que o provisionamento externo já teve
+  sucesso, nunca deve marcar o provisioning job `FAILED` — isso tornaria um database de
+  tenant já funcional inalcançável por qualquer retry. Deixe o job no estado anterior
+  (recuperável) e propague o erro.
 - Nunca confiar no tipo de um secret recuperado de provider externo; validar o payload
   (Zod) antes de utilizá-lo. `SecretStore` é um boundary não confiável por definição — ele
   não afirma nenhuma tipagem que um provider real (AWS Secrets Manager, Vault, ...) não
