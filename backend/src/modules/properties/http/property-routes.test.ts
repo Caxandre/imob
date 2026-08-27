@@ -195,6 +195,28 @@ async function createProperty(app: FastifyInstance, tenantId: string, overrides:
   });
 }
 
+async function patchProperty(
+  app: FastifyInstance,
+  tenantId: string,
+  propertyId: string,
+  body: Record<string, unknown>,
+) {
+  return app.inject({
+    method: "PATCH",
+    url: `/api/v1/properties/${propertyId}`,
+    headers: { [TENANT_ID_HEADER]: tenantId },
+    payload: body,
+  });
+}
+
+async function deleteProperty(app: FastifyInstance, tenantId: string, propertyId: string) {
+  return app.inject({
+    method: "DELETE",
+    url: `/api/v1/properties/${propertyId}`,
+    headers: { [TENANT_ID_HEADER]: tenantId },
+  });
+}
+
 describe("Properties HTTP routes", () => {
   describe("POST /api/v1/properties", () => {
     it("creates a property and returns 201 with the persisted fields — never a tenant_id", async () => {
@@ -523,6 +545,272 @@ describe("Properties HTTP routes", () => {
     });
   });
 
+  describe("PATCH /api/v1/properties/:id", () => {
+    it("updates the given fields, returns 200, and GET reflects the change", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const patched = await patchProperty(app, tenant.id, propertyId, {
+          title: "Apartamento reformado no Centro",
+          price: "475000.00",
+          status: "ACTIVE",
+        });
+
+        expect(patched.statusCode).toBe(200);
+        expect(patched.json()).toMatchObject({
+          id: propertyId,
+          title: "Apartamento reformado no Centro",
+          price: "475000.00",
+          status: "ACTIVE",
+        });
+
+        const fetched = await app.inject({
+          method: "GET",
+          url: `/api/v1/properties/${propertyId}`,
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+        expect(fetched.json()).toMatchObject({
+          title: "Apartamento reformado no Centro",
+          price: "475000.00",
+          status: "ACTIVE",
+        });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("leaves fields not present in the body unchanged (partial update)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-partial", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id, { city: "São Paulo", bedrooms: 3 });
+        const propertyId = created.json().id;
+
+        const patched = await patchProperty(app, tenant.id, propertyId, { title: "Só o título mudou" });
+
+        expect(patched.statusCode).toBe(200);
+        expect(patched.json()).toMatchObject({ title: "Só o título mudou", city: "São Paulo", bedrooms: 3 });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("does not touch created_at, and bumps updated_at", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-timestamps", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const before = created.json();
+
+        const patched = await patchProperty(app, tenant.id, before.id, { title: "Novo título" });
+        const after = patched.json();
+
+        expect(after.created_at).toBe(before.created_at);
+        expect(Date.parse(after.updated_at)).toBeGreaterThan(Date.parse(before.updated_at));
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("allows clearing a nullable field with null", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-null", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id, { description: "Descrição original" });
+        const propertyId = created.json().id;
+
+        const patched = await patchProperty(app, tenant.id, propertyId, { description: null });
+
+        expect(patched.statusCode).toBe(200);
+        expect(patched.json().description).toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("rejects an empty body with 400", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-empty", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+
+        const patched = await patchProperty(app, tenant.id, created.json().id, {});
+
+        expect(patched.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it.each([
+      ["negative price", { price: "-1.00" }],
+      ["zero price", { price: "0.00" }],
+      ["negative bedrooms", { bedrooms: -1 }],
+      ["invalid status", { status: "UNKNOWN" }],
+      ["invalid property_type", { property_type: "CASTLE" }],
+      ["unknown field", { not_a_real_field: "x" }],
+      ["attempt to set id", { id: randomUUID() }],
+      ["attempt to set created_at", { created_at: "2020-01-01T00:00:00.000Z" }],
+      ["attempt to clear required field title with null", { title: null }],
+    ])("rejects an invalid update (%s) with 400", async (_label, overrides) => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-validation", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+
+        const patched = await patchProperty(app, tenant.id, created.json().id, overrides);
+
+        expect(patched.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 for a well-formed but unknown UUID", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-404", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const response = await patchProperty(app, tenant.id, randomUUID(), { title: "x" });
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 400 for a malformed id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("patch-bad-id", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const response = await app.inject({
+          method: "PATCH",
+          url: "/api/v1/properties/not-a-uuid",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+          payload: { title: "x" },
+        });
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("DELETE /api/v1/properties/:id (archive)", () => {
+    it("archives the property (status = INACTIVE), returns 204 with no body, and GET still returns it", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("archive", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id, { status: "ACTIVE" });
+        const propertyId = created.json().id;
+
+        const deleted = await deleteProperty(app, tenant.id, propertyId);
+        expect(deleted.statusCode).toBe(204);
+        expect(deleted.body).toBe("");
+
+        const fetched = await app.inject({
+          method: "GET",
+          url: `/api/v1/properties/${propertyId}`,
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+        expect(fetched.statusCode).toBe(200);
+        expect(fetched.json().status).toBe("INACTIVE");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("archiving is never a physical delete — the property still shows up in the listing", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("archive-listed", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        await deleteProperty(app, tenant.id, propertyId);
+
+        const list = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+        expect(list.json().data.map((p: { id: string }) => p.id)).toContain(propertyId);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("is idempotent — archiving twice converges, both 204", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("archive-idempotent", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id, { status: "ACTIVE" });
+        const propertyId = created.json().id;
+
+        const first = await deleteProperty(app, tenant.id, propertyId);
+        const second = await deleteProperty(app, tenant.id, propertyId);
+
+        expect(first.statusCode).toBe(204);
+        expect(second.statusCode).toBe(204);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 for a well-formed but unknown UUID", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("archive-404", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const response = await deleteProperty(app, tenant.id, randomUUID());
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 400 for a malformed id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("archive-bad-id", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const response = await app.inject({
+          method: "DELETE",
+          url: "/api/v1/properties/not-a-uuid",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
   describe("Isolation A/B", () => {
     it("tenant A's property is invisible to tenant B, both via list and via get-by-id (404, not a cross-database read)", async () => {
       const { secretStore } = await setupCluster();
@@ -561,6 +849,40 @@ describe("Properties HTTP routes", () => {
           headers: { [TENANT_ID_HEADER]: tenantA.id },
         });
         expect(getFromA.statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("tenant B cannot PATCH or DELETE tenant A's property (404, never revealing existence), and A's record is untouched", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("isolation-patch-a", secretStore);
+      const tenantB = await provisionReadyTenant("isolation-patch-b", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenantA.id, { title: "Propriedade da Tenant A" });
+        const propertyId = created.json().id;
+
+        const patchFromB = await patchProperty(app, tenantB.id, propertyId, { title: "Tentativa da Tenant B" });
+        expect(patchFromB.statusCode).toBe(404);
+
+        const deleteFromB = await deleteProperty(app, tenantB.id, propertyId);
+        expect(deleteFromB.statusCode).toBe(404);
+
+        // A's own database was never touched by B's attempts — the query never even ran there.
+        const getFromA = await app.inject({
+          method: "GET",
+          url: `/api/v1/properties/${propertyId}`,
+          headers: { [TENANT_ID_HEADER]: tenantA.id },
+        });
+        expect(getFromA.json()).toMatchObject({ title: "Propriedade da Tenant A", status: "DRAFT" });
+
+        // A can still update/archive its own property normally.
+        const patchFromA = await patchProperty(app, tenantA.id, propertyId, { title: "Atualizado pela A" });
+        expect(patchFromA.statusCode).toBe(200);
+        const deleteFromA = await deleteProperty(app, tenantA.id, propertyId);
+        expect(deleteFromA.statusCode).toBe(204);
       } finally {
         await app.close();
       }

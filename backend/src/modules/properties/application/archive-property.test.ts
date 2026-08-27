@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { PropertyNotFoundError, type Property } from "../domain/property.js";
-import { getProperty } from "./get-property.js";
+import { archiveProperty } from "./archive-property.js";
 import type { PropertyRepository } from "./property-repository.js";
 
 const FAKE_PROPERTY: Property = {
@@ -10,7 +10,7 @@ const FAKE_PROPERTY: Property = {
   description: null,
   propertyType: "APARTMENT",
   transactionType: "SALE",
-  status: "DRAFT",
+  status: "INACTIVE",
   price: "450000.00",
   bedrooms: null,
   bathrooms: null,
@@ -38,14 +38,28 @@ function fakeRepository(overrides: Partial<PropertyRepository> = {}): PropertyRe
   };
 }
 
-describe("getProperty", () => {
-  it("returns the property found by the repository", async () => {
-    await expect(getProperty(fakeRepository(), FAKE_PROPERTY.id)).resolves.toEqual(FAKE_PROPERTY);
+describe("archiveProperty", () => {
+  it("returns the archived property", async () => {
+    await expect(archiveProperty(fakeRepository(), FAKE_PROPERTY.id)).resolves.toEqual(FAKE_PROPERTY);
   });
 
-  it("throws PropertyNotFoundError when the repository finds nothing", async () => {
-    const repository = fakeRepository({ findById: async () => undefined });
+  it("passes the id through to the repository unchanged, without doing SQL itself", async () => {
+    const received: string[] = [];
+    const repository = fakeRepository({
+      archive: async (id) => {
+        received.push(id);
+        return FAKE_PROPERTY;
+      },
+    });
 
-    await expect(getProperty(repository, "missing-id")).rejects.toThrow(PropertyNotFoundError);
+    await archiveProperty(repository, FAKE_PROPERTY.id);
+
+    expect(received).toEqual([FAKE_PROPERTY.id]);
+  });
+
+  it("throws PropertyNotFoundError when the repository finds nothing to archive", async () => {
+    const repository = fakeRepository({ archive: async () => undefined });
+
+    await expect(archiveProperty(repository, "missing-id")).rejects.toThrow(PropertyNotFoundError);
   });
 });

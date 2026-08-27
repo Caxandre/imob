@@ -154,4 +154,101 @@ describe("createDrizzlePropertyRepository", () => {
 
     await expect(repository.list({ page: 1, limit: 20 })).resolves.toEqual({ data: [], total: 0 });
   });
+
+  describe("update", () => {
+    it("changes only the provided fields, preserves the rest, and bumps updated_at without touching created_at", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const created = await repository.create(sampleInput({ title: "Original", price: "450000.00" }));
+
+      const updated = await repository.update(created.id, { title: "Atualizado", price: "475000.00" });
+
+      expect(updated).toMatchObject({
+        id: created.id,
+        title: "Atualizado",
+        price: "475000.00",
+        // Untouched fields preserved exactly.
+        description: created.description,
+        bedrooms: created.bedrooms,
+        city: created.city,
+      });
+      expect(updated?.createdAt).toEqual(created.createdAt);
+      expect(updated?.updatedAt.getTime()).toBeGreaterThan(created.updatedAt.getTime());
+    });
+
+    it("clears a nullable field when explicitly given null", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const created = await repository.create(sampleInput({ description: "Descrição original" }));
+      expect(created.description).toBe("Descrição original");
+
+      const updated = await repository.update(created.id, { description: null });
+
+      expect(updated?.description).toBeNull();
+    });
+
+    it("leaves a field unchanged when it is not present in the input at all", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const created = await repository.create(sampleInput({ neighborhood: "Centro" }));
+
+      const updated = await repository.update(created.id, { title: "Só o título mudou" });
+
+      expect(updated?.neighborhood).toBe("Centro");
+    });
+
+    it("returns undefined when the property does not exist", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      await expect(repository.update(randomUUID(), { title: "x" })).resolves.toBeUndefined();
+    });
+  });
+
+  describe("archive", () => {
+    it("sets status to INACTIVE and bumps updated_at", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const created = await repository.create(sampleInput({ status: "ACTIVE" }));
+
+      const archived = await repository.archive(created.id);
+
+      expect(archived?.status).toBe("INACTIVE");
+      expect(archived?.updatedAt.getTime()).toBeGreaterThan(created.updatedAt.getTime());
+    });
+
+    it("is idempotent — archiving an already-INACTIVE property still succeeds", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const created = await repository.create(sampleInput({ status: "ACTIVE" }));
+
+      const first = await repository.archive(created.id);
+      const second = await repository.archive(created.id);
+
+      expect(first?.status).toBe("INACTIVE");
+      expect(second?.status).toBe("INACTIVE");
+    });
+
+    it("never physically deletes the row — it remains findable after archiving", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const created = await repository.create(sampleInput());
+      await repository.archive(created.id);
+
+      await expect(repository.findById(created.id)).resolves.toMatchObject({ id: created.id, status: "INACTIVE" });
+    });
+
+    it("returns undefined when the property does not exist", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      await expect(repository.archive(randomUUID())).resolves.toBeUndefined();
+    });
+  });
 });

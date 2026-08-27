@@ -11,6 +11,8 @@ function fakeRepository(result: ListPropertiesResult): PropertyRepository {
     },
     list: async () => result,
     findById: async () => undefined,
+    update: async () => undefined,
+    archive: async () => undefined,
   };
 }
 
@@ -39,6 +41,8 @@ describe("listProperties", () => {
         return { data: [], total: 0 };
       },
       findById: async () => undefined,
+      update: async () => undefined,
+      archive: async () => undefined,
     };
 
     await listProperties(repository, { page: 3, limit: 50 });

@@ -36,6 +36,10 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   HTTP, filesystem, Secrets Manager). Transações devem conter somente operações PostgreSQL
   necessárias; ver ADR-002 para o raciocínio completo aplicado ao dispatcher de
   provisionamento.
+- Registros de domínio com valor de negócio/histórico não devem ser excluídos fisicamente por
+  padrão; prefira um estado de ciclo de vida explícito (ex.: `status = INACTIVE`) a menos que
+  uma funcionalidade concreta exija exclusão real. Ver `properties` (Prompt 022) como exemplo
+  aplicado: `DELETE /api/v1/properties/:id` nunca executa `DELETE FROM properties`.
 
 ## Multi-tenancy — regra crítica
 
