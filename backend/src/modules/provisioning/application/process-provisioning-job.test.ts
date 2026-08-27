@@ -14,6 +14,15 @@ import {
 const JOB_ID = "job-1";
 const TENANT_ID = "tenant-1";
 
+// Arbitrary but internally consistent — only used to satisfy DatabaseProvisioner's return
+// type; no test in this file inspects its fields.
+const FAKE_PROVISIONING_RESULT = {
+  clusterId: "cluster-1",
+  databaseName: "tenant_fake",
+  secretReference: "tenant-databases/fake",
+  schemaVersion: 1,
+};
+
 interface FakeRepositoryOptions {
   status?: ProvisioningJobStatus;
   missing?: boolean;
@@ -68,6 +77,7 @@ function fakeProvisioner(behavior: "succeed" | "throw" = "succeed") {
       if (behavior === "throw") {
         throw new Error("provisioning boom");
       }
+      return FAKE_PROVISIONING_RESULT;
     },
   };
 

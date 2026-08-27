@@ -1,3 +1,5 @@
+import type { ProvisioningResult } from "./provisioning-result.js";
+
 export type ProvisioningJobStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
 
 /** The only provisioning step that exists today — see ARCHITECTURE.md. */
@@ -29,14 +31,34 @@ export interface ProcessProvisioningJobRepository {
 }
 
 /**
- * Provisions the tenant's actual database infrastructure. No real implementation exists yet
- * — creating a PostgreSQL database is out of scope for this task (see ARCHITECTURE.md).
+ * Provisions the tenant's actual database infrastructure and returns the result the
+ * application layer needs to finalize the workflow in the Control Plane (ADR-003) — this
+ * port itself never writes to `tenants`/`provisioning_jobs`/`tenant_databases`.
  *
- * Never implement this port with a no-op/fake outside of tests. Doing so in the real worker
- * would mark real provisioning jobs SUCCEEDED without ever creating anything.
+ * A real implementation exists as of Prompt 017
+ * (`../infrastructure/postgres-database-provisioner.ts`), but is not yet wired into this
+ * worker: doing so requires extending `markSucceeded`/finalization to persist
+ * `ProvisioningResult` into `tenant_databases` and activate the tenant, which is out of scope
+ * here (see ARCHITECTURE.md/ADR-003 "Finalization"). Never implement this port with a
+ * no-op/fake outside of tests — doing so in the real worker would mark real provisioning jobs
+ * SUCCEEDED without ever creating anything.
  */
 export interface DatabaseProvisioner {
-  provision(input: { provisioningJobId: string; tenantId: string }): Promise<void>;
+  provision(input: { provisioningJobId: string; tenantId: string }): Promise<ProvisioningResult>;
+}
+
+/**
+ * Wraps a failed provisioning step with a controlled, step-specific message (ADR-003
+ * "Security") — never the raw driver/PostgreSQL error text, which could in principle echo
+ * sensitive detail. The original error is preserved only on `.cause`, for structured logging,
+ * never for the value that ends up in `provisioning_jobs.error_message`
+ * (`toSanitizedErrorMessage` below only ever reads `.message`).
+ */
+export class DatabaseProvisioningError extends Error {
+  constructor(message: string, options?: { cause: unknown }) {
+    super(message, options);
+    this.name = "DatabaseProvisioningError";
+  }
 }
 
 export class ProvisioningJobNotFoundError extends Error {
