@@ -115,6 +115,17 @@ export const provisioningJobs = pgTable(
     dispatchClaimedAt: timestamp("dispatch_claimed_at", { withTimezone: true }),
     dispatchLeaseUntil: timestamp("dispatch_lease_until", { withTimezone: true }),
     dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+    // Execution lease (ADR-003 "Recovery", Prompt 019) — owned exclusively by the worker's
+    // execution/recovery machinery, a completely separate mechanism from the dispatch lease
+    // above (never shared state — see CLAUDE.md). executionToken identifies which single
+    // execution currently owns a RUNNING job; every terminal write (finalizeProvisioning,
+    // markFailed) requires it to still match, fencing a stale worker that resumes after its
+    // lease already expired and was claimed by another execution. Cleared (token, lease) on
+    // every terminal transition — executionHeartbeatAt deliberately survives as the record of
+    // last real activity.
+    executionToken: uuid("execution_token"),
+    executionHeartbeatAt: timestamp("execution_heartbeat_at", { withTimezone: true }),
+    executionLeaseUntil: timestamp("execution_lease_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -129,6 +140,23 @@ export const provisioningJobs = pgTable(
       "provisioning_jobs_dispatch_lease_requires_claim",
       sql`${t.dispatchLeaseUntil} IS NULL OR ${t.dispatchClaimedAt} IS NOT NULL`,
     ),
+    // Same shape as the dispatch lease constraint above, for the execution lease — a lease
+    // never exists without the token that owns it. token and lease are always cleared
+    // together on a terminal transition (unlike the dispatch protocol, there is no
+    // intermediate step here that clears one but not the other), so this constraint alone
+    // is enough — executionHeartbeatAt deliberately survives that same transition (last
+    // known activity, kept for observability), so no constraint ties it to the other two.
+    check(
+      "provisioning_jobs_execution_lease_requires_token",
+      sql`${t.executionLeaseUntil} IS NULL OR ${t.executionToken} IS NOT NULL`,
+    ),
+    // Partial index over exactly the recovery poller's eligibility predicate: jobs still
+    // RUNNING whose execution lease has expired (or, for a job that was RUNNING before this
+    // column existed, was never set at all — see the poller's WHERE clause). Ordered by
+    // executionLeaseUntil to serve its scan directly from the index.
+    index("provisioning_jobs_running_execution_lease_idx")
+      .on(t.executionLeaseUntil)
+      .where(sql`${t.status} = 'RUNNING'`),
     // Partial index over exactly the dispatcher's eligibility predicate (ADR-002): jobs
     // still PENDING and never confirmed dispatched. Ordered by createdAt to serve the
     // dispatcher's FIFO scan directly from the index, without a separate sort step.

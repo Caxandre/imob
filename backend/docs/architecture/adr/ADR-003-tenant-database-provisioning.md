@@ -518,21 +518,16 @@ Problema já registrado no ADR-002 (Cenário E) e reafirmado aqui: um worker pod
 meio da execução, deixando `provisioning_jobs.status = RUNNING` indefinidamente, sem que
 nada o reconheça como abandonado.
 
-Direção recomendada (não implementada nesta tarefa): um mecanismo de lease análogo ao do
-dispatcher (ADR-002), mas **pertencente exclusivamente ao worker**, nunca confundido com
-`dispatch_lease_until` (que é do dispatcher). Nomes conceituais candidatos:
-
-```text
-execution_heartbeat_at
-execution_lease_until
-```
-
-O worker atualizaria esse campo periodicamente enquanto processa; um processo de
-reconciliação futuro (não desenhado nesta ADR) poderia identificar jobs `RUNNING` cujo lease
-de execução expirou e torná-los elegíveis para um novo attempt — que, graças à idempotência
-por descoberta definida nesta ADR, poderia retomar com segurança a partir do
-`current_step` registrado, sem recriar recursos já existentes. Migration futura, não
-implementada agora.
+**Implementado no Prompt 019** (ver a seção "Prompt 019" abaixo para os detalhes) —
+substitui integralmente a direção apenas recomendada que este trecho registrava antes: um
+mecanismo de lease análogo ao do dispatcher (ADR-002), mas **pertencente exclusivamente à
+execução** (`execution_heartbeat_at`/`execution_lease_until`/`execution_token`), nunca
+confundido com `dispatch_lease_until`/`dispatch_claimed_at` (que são do dispatcher). O worker
+atualiza esses campos periodicamente enquanto processa (heartbeat); um processo de recovery
+separado identifica jobs `RUNNING` cujo lease de execução expirou e os torna elegíveis para um
+novo attempt — que, graças à idempotência por descoberta definida nesta ADR, retoma com
+segurança reexecutando `provision()` do zero (não a partir de `current_step`, que continua sem
+granularidade própria — ver "Prompt 019").
 
 ## Alternatives considered
 
@@ -567,9 +562,9 @@ implementada agora.
   `.schema_version`, `database_clusters.secret_reference`) já acomoda tudo o que esta ADR
   decide — nenhuma alteração de schema é necessária para começar a implementar
   `DatabaseProvisioner` seguindo esta decisão.
-- Uma migration futura identificada, não implementada: campos de lease de execução do
-  worker (`execution_heartbeat_at`/`execution_lease_until` ou equivalente) para recovery de
-  `RUNNING` abandonado.
+- **Superado pelo Prompt 019** — a migration de lease de execução (`execution_token`/
+  `execution_heartbeat_at`/`execution_lease_until`) foi implementada, exatamente com os nomes
+  candidatos já registrados aqui.
 - O futuro `DatabaseProvisioner` precisa ser escrito com a ordem e as regras de
   reconhecimento de recurso existente definidas aqui — em particular, a regra de que salvar
   o secret só acontece depois que a role já reflete a senha salva.
@@ -585,8 +580,8 @@ implementada agora.
 - O database e todos os objetos de migration do Tenant Data Plane são de propriedade da
   credencial administrativa do cluster, não da role do tenant — decisão revisada em relação
   à formulação inicial desta ADR (ver "Alternatives considered", G/H e ownership).
-- Recovery de `RUNNING` abandonado permanece uma lacuna conhecida e não resolvida — a
-  direção está registrada, a implementação não.
+- **Superado pelo Prompt 019** — recovery de `RUNNING` abandonado está implementado (execution
+  lease, heartbeat, claim de jobs expirados, stale worker fencing) — ver seção "Prompt 019".
 
 ## Prompt 011 — fundação determinística implementada
 
@@ -965,11 +960,13 @@ Implementa "Finalization" acima como código real: `ProcessProvisioningJobReposi
     prontos e só precisa refazer a finalização. Marcar `FAILED` aqui tornaria um database de
     tenant já funcional permanentemente inalcançável por qualquer retry (`FAILED` é terminal
     nesta fase, ADR-002).
-  - Consequência aceita e documentada: como o BullMQ ainda publica com `attempts: 1`, um job
-    que fica `RUNNING` após uma falha de finalização permanece `RUNNING` até que recovery de
-    `RUNNING` abandonado exista (lacuna já registrada no ADR-002/nesta ADR, não resolvida
-    aqui — deliberadamente fora do escopo desta tarefa). O `attempts` do BullMQ não foi
-    aumentado para compensar; isso seria resolver o sintoma, não a causa.
+  - Consequência aceita e documentada nesta tarefa: como o BullMQ ainda publica com
+    `attempts: 1`, um job que fica `RUNNING` após uma falha de finalização permanecia
+    `RUNNING` até que recovery de `RUNNING` abandonado existisse (lacuna já registrada no
+    ADR-002/nesta ADR, deliberadamente fora do escopo desta tarefa). **Superado pelo Prompt
+    019** — esse é exatamente um dos cenários que o recovery por execution lease resolve (ver
+    seção "Prompt 019"); o `attempts` do BullMQ continua sem aumento, já que quem resolve isso
+    agora é o mecanismo de recovery, não o BullMQ.
 - **`current_step = "FINALIZE"`** é escrito junto com `SUCCEEDED`, usando a mesma coluna
   `text` livre já usada por `PROVISION_DATABASE_STEP` — nenhum enum novo, conforme já
   decidido para essa coluna.
@@ -998,6 +995,111 @@ Implementa "Finalization" acima como código real: `ProcessProvisioningJobReposi
   nenhum `DROP` de produção, `DatabaseProvisioner` continua nunca escrevendo no Control
   Plane (boundary comprovado por um teste dedicado desde o Prompt 017, arquivo não tocado
   nesta tarefa).
+
+## Prompt 019 — recovery de jobs `RUNNING` abandonados, execution lease e stale worker fencing
+
+Implementa "Recovery" acima como código real, encerrando a lacuna registrada desde o
+ADR-002/o Prompt 018: um provisioning job não pode mais ficar preso indefinidamente em
+`RUNNING` só porque o worker responsável morreu — e, simultaneamente, uma execução antiga
+nunca pode finalizar ou falhar um job depois que outra execução assumiu seu lease.
+
+- **Execution lease — mecanismo completamente independente do dispatch lease (ADR-002).**
+  Três colunas novas em `provisioning_jobs`: `execution_token` (uuid), `execution_heartbeat_at`
+  (timestamptz), `execution_lease_until` (timestamptz) — nunca reutilizam ou compartilham
+  estado com `dispatch_claimed_at`/`dispatch_lease_until`, que continuam pertencendo
+  exclusivamente ao dispatcher. Migration puramente aditiva no Control Plane, colunas
+  nullable, sem backfill destrutivo; nenhuma migration no Tenant Data Plane. Constraint CHECK
+  (`execution_lease_until IS NULL OR execution_token IS NOT NULL`, mesmo padrão já usado pelo
+  lease do dispatcher) e índice parcial em `execution_lease_until WHERE status = 'RUNNING'`
+  para a query de recovery.
+- **Por que um token, e não só o `id` do job.** `id` sozinho identifica o job, mas não *qual*
+  execução é dona dele agora — duas execuções concorrentes (worker original ainda vivo mas
+  lento + recovery que já reclamou) compartilhariam o mesmo `id`. `execution_token` é gerado
+  de novo (`gen_random_uuid()`) a cada claim/reclaim, na mesma escrita que concede o lease, e
+  é isso que toda escrita subsequente (heartbeat, finalização, falha) precisa apresentar para
+  provar que ainda é a execução vigente.
+- **Concessão atômica na mesma escrita que muda o status — nunca uma escrita de
+  acompanhamento.** `PENDING → RUNNING` (`markRunning`) já concedia `attempts += 1`/
+  `started_at`/`current_step`; passou a conceder `execution_token`/`execution_heartbeat_at`/
+  `execution_lease_until` na mesma instrução `UPDATE`. Uma reclaim por recovery
+  (`claimExpiredRunningJobs`) faz o mesmo: concede um `execution_token` novo e incrementa
+  `attempts` — uma reclaim é uma tentativa de execução real, não uma continuação silenciosa da
+  anterior — sem tocar `started_at` (só a claim original o define) nem `dispatch_*`.
+- **Heartbeat — renovação periódica durante execuções longas.**
+  `src/modules/provisioning/application/execution-heartbeat.ts` é infra-free (sem logger, sem
+  dependência de Pino), como o resto da camada de aplicação de provisioning: expõe um
+  callback opcional (`onEvent`) em vez de logar diretamente, deixando o logging para o
+  entrypoint (`provisioning-worker.ts`, que só loga `ownership-lost` e `renewal-error` — uma
+  renovação de rotina a cada intervalo, para cada job em andamento, seria só ruído). Uma
+  falha transitória de renovação não aborta a execução em curso (loga e continua); perder a
+  posse (0 linhas afetadas pelo `UPDATE` de renovação, porque outra execução já reclamou o
+  job) para o timer do heartbeat. Nova variável de ambiente
+  `PROVISIONING_EXECUTION_HEARTBEAT_INTERVAL_MS` validada (Zod `.refine()`) para ser sempre
+  menor que `PROVISIONING_EXECUTION_LEASE_SECONDS * 1000` — um heartbeat mais lento que o
+  próprio lease jamais conseguiria renová-lo a tempo.
+- **`claimExpiredRunningJobs` — mesmo padrão de concorrência já usado pelo dispatcher
+  (ADR-002).** `SELECT ... WHERE status = 'RUNNING' AND execution_lease_until <= now() ORDER
+  BY execution_lease_until ASC, created_at ASC, id ASC LIMIT batchSize FOR UPDATE SKIP
+  LOCKED`, seguido de um `UPDATE` batched que concede novo token/heartbeat/lease e incrementa
+  `attempts`. Nunca toca colunas `dispatch_*`; nunca rebaixa `RUNNING` de volta para
+  `PENDING`. Testado com duas chamadas concorrentes para o mesmo job elegível: nunca ambas
+  reclamam.
+- **Job reclamado é executado diretamente pela camada de aplicação, nunca redespachado via
+  BullMQ.** A refatoração separa `startPendingProvisioningJob()` (claim fresca a partir de
+  `PENDING`, chamada pelo `Worker` BullMQ) de `executeRunningProvisioningJob()` (assume o
+  lease já concedido, executa `provision()` + finaliza/marca falha, com heartbeat ativo
+  durante toda a execução) — a segunda função é compartilhada por ambos os caminhos, chamada
+  diretamente tanto por `startPendingProvisioningJob()` quanto pelo novo
+  `recoverExpiredRunningJobsOnce()` (`recover-provisioning-jobs.ts`, mesmo formato de
+  `dispatchProvisioningJobsOnce`/ADR-002: puro, sem logging/timers, cada job do batch
+  processado independentemente — o erro de um nunca interrompe os demais nem fabrica um
+  outcome falso). Não foi criada uma terceira função `recoverRunningProvisioningJob()`
+  somente para nomear o caminho de recovery — seria um passthrough sem comportamento próprio
+  sobre `executeRunningProvisioningJob()` (CLAUDE.md: evitar abstração sem consumidor
+  concreto).
+- **Stale worker fencing — a regra central desta tarefa.** Toda escrita terminal
+  (`finalizeProvisioning`, `markFailed`) exige que o `execution_token` do chamador ainda
+  corresponda ao token atual do job (`WHERE ... AND execution_token = $token`, mesmo padrão de
+  guard já usado pelas transições de status desde o Prompt 009). Se não corresponder — porque
+  outra execução já reclamou o lease — a escrita é recusada e `ProvisioningExecutionOwnershipLostError`
+  é lançado; o chamador para de forma controlada: não sobrescreve estado, não marca `FAILED`,
+  não finaliza. **Exceção deliberada, testada explicitamente**: o retry idempotente de
+  `finalizeProvisioning` quando o job já está `SUCCEEDED` não exige correspondência de token
+  — o token pode já ter sido limpo pelo commit bem-sucedido anterior, e continua sendo o mesmo
+  resultado idempotente que o Prompt 018 já garantia. `markFailed` preserva seu comportamento
+  pré-existente de guard silencioso quando o job já não está `RUNNING` (não é mais um caso de
+  ownership perdido, é só um estado terminal alcançado por outro caminho) — só lança quando o
+  job ainda está `RUNNING` mas com token divergente.
+- **Transições terminais preservam `execution_heartbeat_at`.** Em `SUCCEEDED`/`FAILED`,
+  `execution_token` e `execution_lease_until` são sempre zerados (nunca sobrevivem a uma
+  transição terminal — é o que a constraint CHECK também impõe), mas `execution_heartbeat_at`
+  é deliberadamente preservado, como registro da última atividade conhecida da execução que
+  encerrou o job.
+- **Teste obrigatório de split-brain**: worker A reclama um job; seu lease expira; worker B
+  reclama via `claimExpiredRunningJobs`; a partir daí, toda escrita do token de A —
+  `renewExecutionLease` (retorna `false`), `markFailed` (lança), `finalizeProvisioning`
+  (lança) — falha ou é recusada, sem jamais alterar o job, que permanece de B até B mesmo
+  finalizá-lo com sucesso.
+- **Teste de progressão de `attempts`**: 1 na claim original (`PENDING → RUNNING`), 2 na
+  primeira reclaim por recovery, 3 numa segunda reclaim — nunca incrementado por renovação de
+  heartbeat.
+- **Cenário de recovery mais importante desta tarefa, herdado do Prompt 018**:
+  infraestrutura pronta (`provision()` retornou com sucesso) → `finalizeProvisioning()` nunca
+  chegou a rodar (crash simulado) → job permanece `RUNNING` → lease eventualmente expira →
+  recovery reclama → reexecuta `provision()` (idempotente por descoberta, reconhece
+  role/database/migrations/permissions/health check já prontos) → finaliza → tenant `READY`,
+  `tenant_databases READY`, job `SUCCEEDED`. Testado ponta a ponta com infraestrutura real
+  (`e2e-provisioning.test.ts`), sem Redis/BullMQ envolvido.
+- **Runtime**: o loop de recovery (`src/workers/provisioning-worker.ts`) roda no mesmo
+  processo do worker BullMQ, mas como componente claramente separado — seu próprio
+  `AbortController`/polling (`PROVISIONING_RECOVERY_POLL_INTERVAL_MS`,
+  `PROVISIONING_RECOVERY_BATCH_SIZE`), parado no shutdown gracioso antes de fechar o `Worker`
+  BullMQ/Redis/pool. A trava de produção existente (recusa-se a iniciar sob
+  `NODE_ENV=production`, por não existir `SecretStore` de produção) não foi tocada nem
+  enfraquecida.
+- Confirmado: nenhuma dependência nova, nenhuma rota HTTP/Swagger nova, `attempts: 1` do
+  BullMQ inalterado, retry automático de `FAILED` continua fora do escopo,
+  `DatabaseProvisioner` continua nunca escrevendo no Control Plane.
 
 ## Future implementation notes
 
