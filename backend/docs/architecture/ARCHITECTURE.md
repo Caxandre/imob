@@ -18,7 +18,11 @@ sem workspace e sem packages compartilhados — versionadas em um único reposit
 O backend é um **monólito modular**, não um conjunto de microserviços. API HTTP e workers
 compartilham o mesmo código-base, mas possuem entrypoints e responsabilidades independentes.
 
-- API HTTP: implementada (`src/main/server.ts`).
+- API HTTP: implementada (`src/main/server.ts`). Documentação OpenAPI 3.x/Swagger UI em
+  `GET /docs` (JSON bruto em `GET /docs/json`), gerada a partir dos schemas de rota do
+  Fastify (`@fastify/swagger`/`@fastify/swagger-ui`) — nunca um contrato mantido à parte.
+  Disponível sem restrição de ambiente nesta fase (nenhuma autenticação própria para
+  `/docs`); revisitar antes de um deploy de produção real.
 - Workers: dois entrypoints não-HTTP implementados, cada um com scripts próprios e nenhum
   iniciado automaticamente pela API ou entre si — `src/workers/provisioning-dispatcher.ts`
   (`pnpm dev:dispatcher` / `pnpm start:dispatcher`) e `src/workers/provisioning-worker.ts`

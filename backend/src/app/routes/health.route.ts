@@ -5,16 +5,13 @@ export async function healthRoute(app: FastifyInstance) {
     "/health",
     {
       schema: {
+        operationId: "healthCheck",
+        summary: "Health check",
         description: "Basic liveness check for the API process.",
-        tags: ["health"],
+        tags: ["System"],
         response: {
-          200: {
-            type: "object",
-            properties: {
-              status: { type: "string", enum: ["ok"] },
-            },
-            required: ["status"],
-          },
+          200: { $ref: "HealthResponse#" },
+          500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
         },
       },
     },
