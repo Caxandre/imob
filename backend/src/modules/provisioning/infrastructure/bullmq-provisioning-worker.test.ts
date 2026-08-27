@@ -13,11 +13,13 @@ import {
   PROVISION_TENANT_JOB_NAME,
   type TenantProvisioningQueue,
 } from "../../../infrastructure/queue/tenant-provisioning-queue.js";
-import type { DatabaseProvisioner } from "../application/process-provisioning-job.js";
+import type { DatabaseProvisioner, ProvisioningExecutionOptions } from "../application/process-provisioning-job.js";
 import { createProvisioningWorker } from "./bullmq-provisioning-worker.js";
 import { createDrizzleProcessProvisioningJobRepository } from "./drizzle-process-provisioning-job-repository.js";
 
 const repository = createDrizzleProcessProvisioningJobRepository(controlPlaneDb);
+// Large heartbeat interval so it never actually fires during these short-lived tests.
+const EXECUTION_OPTIONS: ProvisioningExecutionOptions = { leaseSeconds: 60, heartbeatIntervalMs: 999_999 };
 
 let connection: ReturnType<typeof createRedisConnection>;
 let queue: TenantProvisioningQueue;
@@ -145,7 +147,7 @@ describe("createProvisioningWorker (real Redis + PostgreSQL, fake DatabaseProvis
       { jobId: job.id, attempts: 1 },
     );
 
-    const worker = createProvisioningWorker(connection, repository, provisioner);
+    const worker = createProvisioningWorker(connection, repository, provisioner, EXECUTION_OPTIONS);
     try {
       await waitForJobSettled(worker, job.id);
     } finally {
@@ -169,7 +171,7 @@ describe("createProvisioningWorker (real Redis + PostgreSQL, fake DatabaseProvis
       { jobId: job.id, attempts: 1 },
     );
 
-    const worker = createProvisioningWorker(connection, repository, provisioner);
+    const worker = createProvisioningWorker(connection, repository, provisioner, EXECUTION_OPTIONS);
     let settled: "completed" | "failed";
     try {
       settled = await waitForJobSettled(worker, job.id);
@@ -198,7 +200,7 @@ describe("createProvisioningWorker (real Redis + PostgreSQL, fake DatabaseProvis
       { jobId: job.id, attempts: 1 },
     );
 
-    const worker = createProvisioningWorker(connection, repository, provisioner);
+    const worker = createProvisioningWorker(connection, repository, provisioner, EXECUTION_OPTIONS);
     try {
       await waitForJobSettled(worker, job.id);
       expect(calls).toHaveLength(1);

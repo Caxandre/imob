@@ -91,6 +91,10 @@ Ver ADR-003 para o raciocínio completo.
   (Zod) antes de utilizá-lo. `SecretStore` é um boundary não confiável por definição — ele
   não afirma nenhuma tipagem que um provider real (AWS Secrets Manager, Vault, ...) não
   possa garantir.
+- Dispatch lease e execution lease são mecanismos independentes e não podem compartilhar
+  estado.
+- Toda mutação terminal de provisioning `RUNNING` deve ser protegida pelo execution token
+  atual.
 
 ## Git, Pull Requests e CI
 
