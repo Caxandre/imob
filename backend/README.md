@@ -95,6 +95,49 @@ Servidor sobe em `http://localhost:3000` (ajustável via `PORT`).
 - Health check: `GET /health`
 - Documentação OpenAPI: `GET /docs`
 
+## API documentation
+
+A API expõe uma especificação OpenAPI 3.x e uma interface Swagger UI, geradas diretamente
+dos schemas de rota do Fastify (`@fastify/swagger` + `@fastify/swagger-ui`) — o mesmo
+contrato validado em runtime, nunca uma cópia mantida à mão.
+
+1. Suba a infraestrutura local e o backend:
+
+   ```bash
+   docker compose up -d
+   pnpm dev
+   ```
+
+2. Abra no navegador:
+
+   ```text
+   http://localhost:3000/docs
+   ```
+
+   A especificação bruta (JSON) também fica disponível em `http://localhost:3000/docs/json`.
+
+3. Use **Try it out** em qualquer rota para executar requests reais contra o servidor em
+   execução — não há mock nem servidor de exemplo separado. Em particular,
+   `POST /api/v1/tenants` **cria um registro real** no Control Plane apontado por
+   `CONTROL_PLANE_DATABASE_URL` no seu `.env`.
+
+### Fluxo de teste manual sugerido
+
+```text
+Swagger UI
+  → Tenants → POST /api/v1/tenants → Try it out
+  → preencher o payload de exemplo (name/slug)
+  → Execute
+  → conferir 201, com o tenant criado (status "PROVISIONING")
+```
+
+Para observar o `409 Conflict` documentado, execute o mesmo request novamente sem alterar o
+`slug` — a segunda tentativa retorna `409` porque o slug já está em uso.
+
+Rotas documentadas hoje: `GET /health` (tag **System**) e `POST /api/v1/tenants` (tag
+**Tenants**). Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o
+Swagger descreve apenas a interface HTTP pública.
+
 ## Build e produção
 
 ```bash

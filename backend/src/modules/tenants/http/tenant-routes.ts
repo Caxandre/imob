@@ -2,33 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { createTenant, type TenantRepository } from "../application/create-tenant.js";
 import { TenantSlugAlreadyExistsError, type Tenant } from "../domain/tenant.js";
-import {
-  createTenantBodySchema,
-  NAME_MAX_LENGTH,
-  SLUG_MAX_LENGTH,
-  SLUG_MIN_LENGTH,
-} from "./create-tenant.schema.js";
-
-const errorResponseSchema = {
-  type: "object",
-  properties: {
-    statusCode: { type: "integer" },
-    error: { type: "string" },
-    message: { type: "string" },
-    details: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          message: { type: "string" },
-        },
-        required: ["path", "message"],
-      },
-    },
-  },
-  required: ["statusCode", "error", "message"],
-} as const;
+import { createTenantBodySchema } from "./create-tenant.schema.js";
 
 function toResponse(tenant: Tenant) {
   return {
@@ -47,43 +21,19 @@ export function tenantRoutes(repository: TenantRepository) {
       "/tenants",
       {
         schema: {
-          summary: "Create a tenant in the Control Plane",
+          operationId: "createTenant",
+          summary: "Create tenant",
           description:
-            "Registers a new tenant with status PROVISIONING. No tenant database is " +
-            "provisioned by this endpoint.",
-          tags: ["tenants"],
-          body: {
-            type: "object",
-            // Length and format rules are enforced by Zod after normalization (trim, and
-            // lowercase for slug), which JSON Schema cannot express on the raw payload.
-            properties: {
-              name: {
-                type: "string",
-                description: `Display name. Trimmed; must not be empty and must be at most ${NAME_MAX_LENGTH} characters after trimming.`,
-              },
-              slug: {
-                type: "string",
-                description: `Public identifier. Trimmed and lowercased, then must match ^[a-z0-9]+(-[a-z0-9]+)*$ and be between ${SLUG_MIN_LENGTH} and ${SLUG_MAX_LENGTH} characters.`,
-              },
-            },
-            required: ["name", "slug"],
-          },
+            "Creates the tenant in the Control Plane and atomically records the intent to " +
+            "provision its database. The tenant database itself is not created by this " +
+            "endpoint — provisioning happens asynchronously afterwards.",
+          tags: ["Tenants"],
+          body: { $ref: "CreateTenantRequest#" },
           response: {
-            201: {
-              description: "Tenant created",
-              type: "object",
-              properties: {
-                id: { type: "string", format: "uuid" },
-                name: { type: "string" },
-                slug: { type: "string" },
-                status: { type: "string", enum: ["PROVISIONING"] },
-                createdAt: { type: "string", format: "date-time" },
-                updatedAt: { type: "string", format: "date-time" },
-              },
-              required: ["id", "name", "slug", "status", "createdAt", "updatedAt"],
-            },
-            400: { description: "Invalid payload", ...errorResponseSchema },
-            409: { description: "Slug already in use", ...errorResponseSchema },
+            201: { description: "Tenant created", $ref: "Tenant#" },
+            400: { description: "Invalid payload", $ref: "ErrorResponse#" },
+            409: { description: "Slug already in use", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
           },
         },
       },
