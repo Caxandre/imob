@@ -95,6 +95,9 @@ Ver ADR-003 para o raciocínio completo.
   estado.
 - Toda mutação terminal de provisioning `RUNNING` deve ser protegida pelo execution token
   atual.
+- Runtime de negócio de tenant nunca utiliza credencial administrativa do cluster.
+- Tenant Data Plane deve ser resolvido através de `tenant_databases`; não derivar database
+  runtime diretamente de `slug` ou `tenantId`.
 
 ## Git, Pull Requests e CI
 
