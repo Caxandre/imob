@@ -755,6 +755,90 @@ segurança que a formulação original desta ADR não detalhava — `RUN_MIGRATI
   `ALTER DEFAULT PRIVILEGES`, nenhuma migration de tenant, nenhum health check, nenhuma
   alteração no worker/máquina de estado, nenhum registro em `tenant_databases`.
 
+## Prompt 015 — schema inicial do Tenant Data Plane, migration runner e permissões implementados
+
+Implementa `RUN_MIGRATIONS` dos "Provisioning steps" acima, mais o `GRANT`/
+`ALTER DEFAULT PRIVILEGES` já detalhados em "Credentials and secrets" (antes só decisão, sem
+código). `HEALTH_CHECK` continua não implementado, e nenhuma das duas peças desta tarefa está
+ligada ao `DatabaseProvisioner`/worker.
+
+- **`schemaVersion` — mecanismo escolhido.** `tenant_databases.schema_version` é `integer`
+  (schema não alterado nesta tarefa); a representação escolhida é a contagem de linhas em
+  `drizzle.__drizzle_migrations` (tabela que o próprio migrator do `drizzle-orm` cria e
+  mantém — `id serial, hash text, created_at bigint`, uma linha por migration efetivamente
+  aplicada). Deriva do estado real das migrations aplicadas, nunca de um contador paralelo
+  mantido manualmente — exatamente a preferência já registrada nesta ADR. Cresce em
+  exatamente 1 a cada nova migration de tenant adicionada e aplicada; estável entre chamadas
+  quando nada novo está pendente.
+- **Migration runner — comportamento do migrator do `drizzle-orm` verificado, não assumido.**
+  `drizzle-orm/node-postgres`'s `migrate()` já (re)aplica apenas migrations mais novas que a
+  última registrada em `drizzle.__drizzle_migrations`, dentro de uma única transação — seguro
+  para chamar repetidamente, e seguro contra um crash no meio de uma migration (a transação
+  nunca comita parcialmente). **Não** é, por si só, seguro contra duas chamadas concorrentes
+  para o mesmo database: a leitura da última migration aplicada acontece *antes* dessa
+  transação, então duas chamadas concorrentes podem ambas observar "nada aplicado ainda" e
+  ambas tentarem o mesmo `CREATE TABLE` — a mesma classe de corrida real de catálogo já
+  encontrada e tratada em `postgres-tenant-database-provisioner.ts` (Prompt 014).
+  **Decisão**: em vez de inventar um lock distribuído novo, `runTenantMigrations()` reutiliza
+  exatamente a técnica já validada no Prompt 014 — um advisory lock de sessão do PostgreSQL
+  (`pg_advisory_lock(hashtext(<chave fixa>))`), com o pool limitado a `max: 1` para garantir
+  que o lock, a migration e o unlock rodem sempre na mesma conexão física (necessário para
+  `pg_advisory_unlock` de fato liberar o que `pg_advisory_lock` adquiriu). Como o alvo de cada
+  chamada já é sempre um único database de tenant específico, a chave do lock não precisa
+  incorporar o nome do database (diferente do Prompt 014, que compartilha uma única conexão
+  de manutenção `"postgres"` entre todos os tenants).
+- **`GRANT`/`ALTER DEFAULT PRIVILEGES` implementados, mas em ordem divergente da nota
+  registrada anteriormente nesta ADR — sinalizado explicitamente, não seguido em silêncio.**
+  "Future implementation notes" (abaixo) recomendava `ALTER DEFAULT PRIVILEGES` como o
+  **primeiro** statement no database, **antes** de qualquer migration — nessa ordem, o
+  `GRANT` explícito sobre objetos existentes seria só um mecanismo de recuperação, nunca
+  necessário no caminho feliz. O Prompt 015 especificou explicitamente a ordem oposta:
+  `RUN_MIGRATIONS` roda primeiro, e **todos** os `GRANT`s (incluindo
+  `ALTER DEFAULT PRIVILEGES`) rodam depois — é essa ordem explícita da tarefa que foi
+  implementada, não a nota anterior. Consequência real: o `GRANT` explícito sobre objetos
+  existentes deixa de ser só "mecanismo de recuperação" e passa a ser sempre necessário no
+  caminho feliz também, já que `ALTER DEFAULT PRIVILEGES` nunca chega a rodar antes de a
+  primeira migration já ter criado `users`/`audit_logs`/`outbox_events`. Ambas as ordens são
+  seguras e convergem para o mesmo resultado final (nenhuma é logicamente melhor que a
+  outra) — a nota antiga na seção "Future implementation notes" está desatualizada em relação
+  à implementação real e deve ser lida como superada por este registro.
+  `grantTenantApplicationPrivileges()` concede `USAGE` no schema `public`, `SELECT`/
+  `INSERT`/`UPDATE`/`DELETE` em todas as tabelas existentes, `USAGE`/`SELECT` em todas as
+  sequences existentes, e configura `ALTER DEFAULT PRIVILEGES` para tabelas/sequences
+  futuras — nessa ordem, reaplicável a qualquer momento sem erro (`GRANT` e
+  `ALTER DEFAULT PRIVILEGES` são idempotentes por natureza; nenhum lock adicional foi
+  necessário aqui). `FOR ROLE` é omitido deliberadamente no `ALTER DEFAULT PRIVILEGES`: o
+  PostgreSQL usa a role atual da conexão quando omitido, que já é a credencial
+  administrativa/de migration conectada — a mesma que rodará toda migration futura.
+- **`public.CREATE` — fail-closed, não apenas confiando no default.** PostgreSQL 15+ já para
+  de conceder `CREATE` em `public` para `PUBLIC` por padrão, mas esse default nunca é
+  assumido: `grantTenantApplicationPrivileges()` executa
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC` explicitamente antes de qualquer `GRANT`,
+  garantindo a propriedade mesmo que o default de alguma instância divirja. Testado
+  diretamente: a application role do tenant, após todos os `GRANT`s, ainda não consegue
+  `CREATE TABLE` no schema `public`.
+- **Application role sem DDL — propriedade central desta tarefa.** Nenhum `CREATE`/`ALTER`/
+  `DROP`/`TRUNCATE`/`REFERENCES`/`TRIGGER` é concedido à role do tenant em nenhum momento.
+  Comprovado com PostgreSQL real: a role consegue `INSERT`/`SELECT`/`UPDATE`/`DELETE` em
+  `users` após os `GRANT`s, mas uma tentativa real de `CREATE TABLE` é rejeitada.
+- **Migrations rodam com a credencial administrativa/de migration, nunca a da tenant
+  application role**, consistente com "Execução de migrations" acima — `runTenantMigrations`
+  e `grantTenantApplicationPrivileges` recebem a mesma credencial administrativa como alvo de
+  conexão; a tenant application role nunca aparece como credencial de conexão em nenhuma das
+  duas.
+- **Isolamento A/B validado no nível de dados, não só de conexão** (o de conexão já era
+  coberto pelo Prompt 014): dois tenants provisionados ponta a ponta (role + database +
+  migrations + grants), cada um inserindo uma linha em `users` através da própria
+  application role — a linha de um nunca aparece na consulta do outro, porque cada uma vive
+  em um database PostgreSQL fisicamente separado, sem nenhuma coluna `tenant_id` envolvida.
+- **Nenhuma coluna `tenant_id`** em `users`/`audit_logs`/`outbox_events` — o database físico
+  já é o boundary de isolamento (ADR-001); uma coluna de discriminação reintroduziria
+  exatamente o risco que a decisão original rejeitou.
+- Confirmado: nenhuma migration nova de Control Plane (a única migration desta tarefa é
+  `drizzle/tenant/0000_modern_deathbird.sql`), nenhuma alteração no worker/dispatcher/máquina
+  de estado, nenhum registro em `tenant_databases`, nenhum tenant `READY`, nenhuma senha ou
+  credencial administrativa persistida/logada.
+
 ## Future implementation notes
 
 Registrado para a tarefa que implementar o `DatabaseProvisioner` real, sem comprometer
@@ -769,15 +853,19 @@ detalhes de implementação nesta ADR:
 - Geração de senha via módulo `crypto` nativo do Node (nunca `Math.random()`).
 - `current_step` permanece `text` livre — nenhum enum PostgreSQL é criado para os 7 valores
   listados, conforme já decidido para essa coluna (Prompt 002/007).
-- A implementação de migrations do Tenant Data Plane (`drizzle/tenant/`) é uma tarefa
-  própria, separada da implementação do `DatabaseProvisioner` em si, mas ambas precisam
-  existir antes do passo `RUN_MIGRATIONS` funcionar de verdade.
+- **Superado pelo Prompt 015** — a implementação de migrations do Tenant Data Plane
+  (`drizzle/tenant/`, `src/infrastructure/database/tenant/`) já existe como peça isolada
+  (`runTenantMigrations`), mas ainda separada da implementação do `DatabaseProvisioner` em
+  si; ambas precisam existir antes do passo `RUN_MIGRATIONS` funcionar de verdade dentro do
+  worker.
 - `DatabaseProvisioner.provision()` deve retornar `ProvisioningResult` (`clusterId`,
   `databaseName`, `secretReference`, `schemaVersion`) em vez de `void`. A camada de
   aplicação — não o provisionador — é quem grava esse resultado em `tenant_databases`,
   ativa o tenant e finaliza o `provisioning_job`.
-- O provisionamento de cada database deve executar os comandos `ALTER DEFAULT PRIVILEGES`
-  (ver "Credentials and secrets") **antes** de rodar a primeira migration do Tenant Data
-  Plane — nessa ordem, nenhum `GRANT` explícito é necessário no caminho feliz. O `GRANT`
-  explícito documentado na mesma seção existe apenas como mecanismo de recuperação, caso
-  essa ordem não possa ser garantida para algum database.
+- **Superado pelo Prompt 015** (ver seção "Prompt 015" acima para o registro completo): esta
+  nota recomendava executar `ALTER DEFAULT PRIVILEGES` (ver "Credentials and secrets")
+  **antes** de rodar a primeira migration do Tenant Data Plane, tornando o `GRANT` explícito
+  apenas um mecanismo de recuperação. A implementação real seguiu a ordem oposta, explícita
+  no Prompt 015: migrations primeiro, `GRANT`/`ALTER DEFAULT PRIVILEGES` depois — o `GRANT`
+  explícito sobre objetos existentes é, portanto, sempre necessário no caminho feliz, não só
+  na recuperação. Mantido aqui apenas como histórico da recomendação original.

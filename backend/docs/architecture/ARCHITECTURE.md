@@ -279,16 +279,47 @@ nunca reabrir `PUBLIC` como compensação (fail-closed). `GRANT USAGE`/DML em ta
 `ALTER DEFAULT PRIVILEGES`, migrations de tenant e health check continuam fora do escopo
 deste componente.
 
-**PLANNED** — `DatabaseProvisioner` real (orquestrando os dois componentes acima com
-`RUN_MIGRATIONS` → `HEALTH_CHECK`), `SecretStore` de produção, migrations do Tenant Data
-Plane, `GRANT`s de aplicação (tabelas/sequences), `ALTER DEFAULT PRIVILEGES`, criação de
-registros em `tenant_databases`, ativação do tenant (`tenants.status = READY`), recovery de
-jobs `RUNNING` abandonados, política de retry para jobs `FAILED`. Nenhum desses existe ainda;
-apenas a decisão arquitetural está registrada.
+**PLANNED** — `DatabaseProvisioner` real (orquestrando os componentes acima com
+`RUN_MIGRATIONS` → `HEALTH_CHECK`), `SecretStore` de produção, criação de registros em
+`tenant_databases`, ativação do tenant (`tenants.status = READY`), recovery de jobs `RUNNING`
+abandonados, política de retry para jobs `FAILED`. Nenhum desses existe ainda; apenas a
+decisão arquitetural está registrada.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
 escreve nelas: não há repositories, services nem endpoints para essas tabelas.
+
+**IMPLEMENTED** — schema inicial do Tenant Data Plane, migration runner e permissões da
+application role (`src/infrastructure/database/tenant/schema.ts`,
+`src/infrastructure/database/tenant/migrate.ts`,
+`src/infrastructure/database/tenant/permissions.ts`, `drizzle/tenant/`), isolado e testado,
+ainda **não** ligado ao `DatabaseProvisioner`/worker:
+
+```text
+tenant database existe (Prompt 014) + tenant application role existe (Prompt 013)
+    ↓
+runTenantMigrations(target) — pg_advisory_lock por database, aplica drizzle/tenant/*,
+    devolve { schemaVersion } (contagem de linhas em drizzle.__drizzle_migrations)
+    ↓
+grantTenantApplicationPrivileges(target, roleName)
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC (fail-closed, não confia só no default do PG15+)
+    GRANT USAGE ON SCHEMA public
+    GRANT SELECT/INSERT/UPDATE/DELETE ON ALL TABLES IN SCHEMA public
+    GRANT USAGE/SELECT ON ALL SEQUENCES IN SCHEMA public
+    ALTER DEFAULT PRIVILEGES ... GRANT ... ON TABLES/SEQUENCES (objetos de migrations futuras)
+```
+
+`target` é sempre a credencial administrativa/de migration do cluster (nunca a tenant
+application role — DDL nunca é privilégio da role do tenant). Schema inicial:
+`users`/`audit_logs`/`outbox_events`, nenhuma com coluna `tenant_id` — o database físico já é
+o boundary de isolamento (ADR-001). Diretório de migrations (`drizzle/tenant/`) e config
+Drizzle Kit (`drizzle.tenant.config.ts`, script `pnpm tenant-db:generate`) completamente
+separados do Control Plane. Não existe script `tenant-db:migrate` — só o runner programático,
+já que não há "o" database de tenant único para um script aplicar migrations contra;
+aplicar em todos os tenants (rollout/batch/canário) é decisão futura. `RUN_MIGRATIONS` (o
+"passo" descrito em ADR-003) e o `GRANT` de aplicação continuam fora do
+`DatabaseProvisioner`/worker — nenhuma integração, nenhum registro em `tenant_databases`,
+nenhum tenant `READY`.
 
 ## Tenant Data Plane
 

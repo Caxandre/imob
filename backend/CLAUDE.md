@@ -78,6 +78,9 @@ Ver ADR-003 para o raciocínio completo.
   cluster.
 - Todo database de tenant em cluster compartilhado deve revogar `CONNECT` de `PUBLIC` e
   concedê-lo apenas às roles explicitamente autorizadas.
+- Tenant application roles não executam migrations nem possuem privilégios DDL
+  (`CREATE`/`ALTER`/`DROP`/`TRUNCATE`); migrations pertencem à infraestrutura administrativa
+  da plataforma.
 - Nunca confiar no tipo de um secret recuperado de provider externo; validar o payload
   (Zod) antes de utilizá-lo. `SecretStore` é um boundary não confiável por definição — ele
   não afirma nenhuma tipagem que um provider real (AWS Secrets Manager, Vault, ...) não
