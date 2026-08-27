@@ -17,6 +17,7 @@
     "start:provisioning-worker": "node --env-file=.env dist/workers/provisioning-worker.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file=.env src/infrastructure/database/control-plane/migrate.ts",
+    "tenant-db:generate": "drizzle-kit generate --config=drizzle.tenant.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
