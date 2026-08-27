@@ -191,7 +191,7 @@ describe("End-to-end tenant provisioning", () => {
       clusterId,
       databaseName: expectedNames.databaseName,
       secretReference: expectedNames.secretReference,
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "READY",
     });
 
@@ -214,12 +214,17 @@ describe("End-to-end tenant provisioning", () => {
       const tables = await tenantClient.query<{ table_name: string }>(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
       );
-      expect(tables.rows.map((row) => row.table_name)).toEqual(["audit_logs", "outbox_events", "users"]);
+      expect(tables.rows.map((row) => row.table_name)).toEqual([
+        "audit_logs",
+        "outbox_events",
+        "properties",
+        "users",
+      ]);
 
       const migrations = await tenantClient.query<{ count: string }>(
         "SELECT count(*) AS count FROM drizzle.__drizzle_migrations",
       );
-      expect(Number(migrations.rows[0]?.count)).toBe(1);
+      expect(Number(migrations.rows[0]?.count)).toBe(2);
     } finally {
       await tenantClient.end();
     }

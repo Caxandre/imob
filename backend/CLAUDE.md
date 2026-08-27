@@ -53,6 +53,9 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
 - Tenants podem estar distribuídos em múltiplos clusters PostgreSQL, e alguns tenants podem
   ter infraestrutura dedicada. Não assuma que todos os tenants estão no mesmo servidor ou
   cluster.
+- Tabelas de domínio no Tenant Data Plane nunca devem conter `tenant_id` — o isolamento do
+  tenant é dado pelo boundary do database, não por uma coluna discriminadora.
+- Migrations de tenant nunca devem rodar como parte de uma requisição HTTP normal.
 
 ## Provisionamento de database de tenant — regras permanentes
 

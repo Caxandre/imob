@@ -480,11 +480,11 @@ Fluxo completo, do request até o database físico do tenant:
 ```text
 Request
    ↓
-Authentication          (futuro — ver "Tenant context HTTP" abaixo)
+Authentication           (PLANNED — ver "Tenant context HTTP" abaixo)
    ↓
-Tenant Context           (futuro)
+Tenant Context            ← IMPLEMENTED, temporário (Prompt 021 — X-Tenant-Id)
    ↓
-TenantDatabaseResolver  ← IMPLEMENTED (Prompt 020)
+TenantDatabaseResolver   ← IMPLEMENTED (Prompt 020)
    ↓
 TenantDatabaseConnectionManager ← IMPLEMENTED (Prompt 020)
    ↓
@@ -539,24 +539,142 @@ revalidado no mesmo teste com o mesmo tipo de prova já usada no nível do provi
 consegue conectar ao database de outro): **IMPLEMENTED**
 (`src/modules/tenant-runtime/e2e-tenant-database-runtime.test.ts`).
 
-Nenhuma rota HTTP nova consome este runtime ainda — os testes chamam
-`TenantDatabaseResolver.resolve()`/`TenantDatabaseConnectionManager.withTenantDatabase()`
-diretamente. Por não haver ainda nenhum consumidor HTTP real, o connection manager não está
-instanciado em `src/app/build-app.ts`/`src/main/server.ts` — essa composição (e o
-correspondente hook `onClose` do Fastify) fica para quando um primeiro endpoint de negócio
-realmente precisar dele, evitando uma composição sem consumidor concreto (CLAUDE.md).
+**IMPLEMENTED** (Prompt 021) — `src/app/build-app.ts` agora recebe um
+`TenantDatabaseConnectionManager` já construído (`BuildAppDependencies`), nunca o constrói
+internamente — qual `SecretStore` o alimenta (e, em particular, se ele é compartilhado com um
+processo de worker separado) é uma decisão de composição do entrypoint chamador
+(`server.ts`/`dev-full.ts`/testes), não algo que `buildApp()` decide sozinho. Um hook
+`onClose` do Fastify fecha esse connection manager automaticamente quando a app é fechada —
+nunca um singleton impossível de fechar.
 
-### Tenant context HTTP **(futuro)**
+### Tenant context HTTP — mecanismo temporário
+
+**IMPLEMENTED** (Prompt 021), deliberadamente provisório: `src/app/tenant-context.ts`
+resolve um `TenantContext { tenantId }` a partir do header `X-Tenant-Id` obrigatório em toda
+rota de domínio, validado (presente + UUID válido) *antes* de qualquer consulta ao Control
+Plane/Tenant Data Plane. Encapsulado em `resolveTenantContext(request)` — nenhum handler lê
+`request.headers["x-tenant-id"]` diretamente — para que, quando autenticação real existir,
+apenas essa função precise mudar.
+
+**`X-Tenant-Id` não é autenticação.** Qualquer cliente que conheça um `tenantId` pode informar
+esse header — nada aqui prova que o chamador tem autorização para agir como aquele tenant.
+Por isso: nenhum termo como "authenticated tenant"/"authorized user" é usado em código ou
+documentação para esse mecanismo; a API de Properties não deve ser considerada pronta para
+exposição pública enquanto autenticação real não existir; e o fail-fast de produção existente
+(nenhum `SecretStore` de produção — ADR-004) permanece intacto e não foi enfraquecido.
 
 - **Tenant Registry**: hoje é diretamente `tenant_databases`/`database_clusters`, consultados
   pelo `TenantDatabaseResolver` — não existe (nem é necessária ainda) uma camada de cache
   separada.
-- **Tenant Resolver HTTP (futuro)**: identificar qual `tenantId` uma requisição autenticada
-  representa. Não decidido nesta tarefa (Prompt 020 deliberadamente não implementa
-  autenticação) — a futura identificação pode vir do contexto autenticado e/ou de
-  domínio/slug, dependendo da rota; `x-tenant-id` não é assumido como mecanismo definitivo.
-  Nunca a partir de parâmetros informados livremente pelo cliente (`databaseName`,
-  `databaseUrl`, etc.).
+- **Tenant Resolver HTTP/autenticação — PLANNED**: identificar qual `tenantId` uma requisição
+  *autenticada* representa. Não decidido nesta tarefa — a futura identificação pode vir do
+  contexto autenticado e/ou de domínio/slug, dependendo da rota; `X-Tenant-Id` não é assumido
+  como mecanismo definitivo de produto. Nunca a partir de parâmetros informados livremente
+  pelo cliente (`databaseName`, `databaseUrl`, etc.).
+
+## Properties (primeiro módulo de domínio)
+
+**IMPLEMENTED** (Prompt 021) — primeiro módulo funcional do domínio imobiliário
+(`src/modules/properties/`), provando de ponta a ponta a regra final desta fase: uma rota
+HTTP de domínio opera exclusivamente no Tenant Data Plane correto, sem `tenant_id` nas
+tabelas e sem credencial administrativa.
+
+```text
+POST   /api/v1/properties
+GET    /api/v1/properties
+GET    /api/v1/properties/:id
+```
+
+```text
+request
+    ↓
+resolveTenantContext(request)                 — X-Tenant-Id, seção acima
+    ↓
+TenantDatabaseResolver.resolve(tenantId)      — Prompt 020
+    ↓
+TenantDatabaseConnectionManager.withTenantDatabase(target, ...)  — Prompt 020
+    ↓
+PropertyRepository (Drizzle, tipado só com o schema do Tenant Data Plane)
+    ↓
+CreateProperty / ListProperties / GetProperty (application layer, sem SQL)
+```
+
+Nenhum handler conhece `host`/`port`/`databaseName`/`secretReference` — esses detalhes vivem
+inteiramente dentro de `TenantDatabaseTarget`, resolvidos e consumidos sem sair da função de
+registro das rotas.
+
+**Schema** (`src/infrastructure/database/tenant/schema.ts`, Tenant Data Plane) — tabela
+`properties`, **sem coluna `tenant_id`** (o database físico já é o boundary de isolamento,
+ADR-001; nenhuma outra tabela deste schema tem essa coluna e esta não é exceção). Campos:
+`title` (obrigatório), `description`, `property_type`
+(`HOUSE`/`APARTMENT`/`LAND`/`COMMERCIAL`/`OTHER`), `transaction_type` (`SALE`/`RENT`),
+`status` (`DRAFT`/`ACTIVE`/`INACTIVE` — deliberadamente sem `SOLD`/`RENTED`, que exigiriam uma
+máquina de estado própria fora do escopo desta tarefa), `price` `numeric(15,2)` (nunca float),
+`bedrooms`/`bathrooms`/`parking_spaces` (inteiros, nullable), `area_m2` `numeric(10,2)`
+(nullable), campos de endereço (`street`/`number`/`complement`/`neighborhood`/`city`/`state`/
+`postal_code`, todos nullable — `state` é `varchar(2)`, nunca uma tabela de UFs), timestamps
+`TIMESTAMPTZ`. Checks: `price > 0`,
+`bedrooms`/`bathrooms`/`parking_spaces >= 0` (quando presentes), `area_m2 > 0` (quando
+presente). Índice único: `(created_at DESC, id DESC)`, servindo exatamente a única listagem
+que esta tarefa tem (sem filtros ainda) — sem índices em `status`/`property_type`/
+`transaction_type`/`city`, deliberadamente, até existir uma rota que realmente filtre por
+eles.
+
+**Migration**: `drizzle/tenant/0001_fancy_blackheart.sql`, puramente aditiva (nenhuma
+migration no Control Plane). `schemaVersion` (contagem de `drizzle.__drizzle_migrations`)
+passa de 1 para 2 em qualquer tenant database migrado a partir desta tarefa —
+`runTenantMigrations()`/o provisioner aplicam-na automaticamente para tenants novos, sem
+nenhuma mudança de lógica.
+
+**PLANNED** — rollout de migration para tenant databases já existentes antes desta tarefa
+(ficam parados em `schemaVersion = 1`, sem a tabela `properties`, até serem migrados
+manualmente). Rodar migrations dentro de uma requisição HTTP normal é expressamente proibido
+(nunca implementado, nem será) — ver `TenantDatabaseConnectionManager`, que só abre conexões,
+nunca aplica DDL. Um mecanismo de rollout em lote/canário para tenants existentes é trabalho
+de infraestrutura futuro, fora do escopo desta tarefa.
+
+**Money contract HTTP**: `price`/`area_m2` trafegam como **string decimal** (ex.: `"450000.00"`),
+nunca `number` — evita perda de precisão do JavaScript sobre valores arbitrariamente grandes.
+Documentado no Swagger (`property-openapi.schema.ts`).
+
+**Validação** (`property-request.schema.ts`, Zod): `title` trimmed/obrigatório;
+`property_type`/`transaction_type`/`status` são enums fechados; `price`/`area_m2` exigem um
+formato de string decimal (até 2 casas) e valor `> 0`; `bedrooms`/`bathrooms`/
+`parking_spaces` são inteiros `>= 0` quando presentes; `state` normaliza para 2 letras
+maiúsculas. O JSON Schema do corpo da requisição (usado só para o Swagger) é deliberadamente
+solto — sem `enum`/`minimum`/`required` reais — pelo mesmo motivo já registrado em
+`tenant-openapi.schema.ts`: a validação AJV do Fastify roda *antes* do handler, e encoder
+essas regras ali faria a API responder com o formato de erro genérico do AJV em vez do
+envelope `{statusCode, error, message, details}` desta API.
+
+**Error mapping** (`property-error-mapper.ts`) — central, nenhum handler tem seu próprio
+`if (error instanceof ...)`:
+
+```text
+X-Tenant-Id ausente/inválido                              → 400
+PropertyNotFoundError                                      → 404
+TenantNotReadyError (qualquer status != READY, inclusive
+    tenant inexistente)                                    → 409
+TenantDatabaseNotAvailableError /
+TenantDatabaseRuntimeConfigurationError (cluster INACTIVE) /
+TenantSecretNotFoundError / InvalidTenantSecretError        → 503
+```
+
+**Decisão deliberada, ver seções 49-51 do Prompt 021**: todo motivo de "tenant não utilizável
+agora" (`PROVISIONING`, `FAILED`, `SUSPENDED`, e também um `tenantId` que simplesmente não
+existe) mapeia para o **mesmo** `409 Conflict` — nunca `404` para "tenant inexistente" nem
+`403` para `SUSPENDED`. Como `X-Tenant-Id` não é autenticação, diferenciar esses casos pelo
+código HTTP permitiria a um chamador não autenticado enumerar `tenantId`s válidos só
+observando a resposta. `TenantDatabaseNotAvailableError`/cluster `INACTIVE`/secret ausente ou
+inválido mapeiam para `503` — são problemas de infraestrutura/operação, nunca algo que o
+chamador corrija mudando a requisição; nenhuma mensagem inclui detalhe interno (qual check
+falhou, nome do cluster, secret reference).
+
+**IMPLEMENTED** — isolamento A/B provado em nível HTTP
+(`src/modules/properties/http/property-routes.test.ts`): tenant A cria, tenant A vê na
+listagem/`GET :id`, tenant B nunca vê na listagem, `GET :id` do recurso de A usando o header
+de B retorna `404` (a query sequer roda no database de B — nunca uma consulta cruzada que
+"acerta por acidente" e é bloqueada depois).
 
 ## Redis / BullMQ
 
@@ -574,6 +692,74 @@ fila, chama a camada de aplicação diretamente. `entrypoint` do worker ainda se
 iniciar especificamente sob `NODE_ENV=production`, por não existir ainda um provider de
 `SecretStore` de produção (ver seção Control Plane) — essa trava não mudou com o Prompt 019.
 **PLANNED**: `SecretStore` de produção em si ([ADR-004](adr/ADR-004-production-secret-store.md)).
+
+### Local development runtime — o gap de SecretStore entre processos
+
+A API HTTP (`src/main/server.ts`), o worker de provisionamento
+(`src/workers/provisioning-worker.ts`) e o dispatcher
+(`src/workers/provisioning-dispatcher.ts`) são **processos separados de verdade** — essa é a
+topologia real, inclusive em produção. Cada um constrói sua própria instância de
+`createInMemorySecretStore()` (o único `SecretStore` que existe hoje — ADR-004). Como essa
+implementação é apenas um `Map` em memória de processo, **um secret de tenant escrito pelo
+worker durante o provisioning não é visível para a API rodando como outro processo** — e
+vice-versa. Isso não é um bug: é a consequência honesta e esperada de não existir ainda um
+`SecretStore` de produção real compartilhado (AWS Secrets Manager, ADR-004) nem qualquer
+outro mecanismo de compartilhamento local seguro. Nenhum fallback para a credencial
+administrativa do cluster existe ou é permitido para contornar isso.
+
+**IMPLEMENTED** (Prompt 021) — `src/main/dev-full.ts` (`pnpm dev:full`), um runtime **somente
+de desenvolvimento** que sobe a API HTTP e o worker de provisionamento no mesmo processo,
+compartilhando a mesma instância de `SecretStore`:
+
+```text
+pnpm dev:full
+    ↓
+uma única composição de dependências
+    ↓
+InMemorySecretStore compartilhado
+    ├── HTTP API (build-app.ts → TenantDatabaseConnectionManager)
+    └── provisioning worker (createProvisioningWorkerRuntime)
+```
+
+`createProvisioningWorkerRuntime()` (`src/workers/provisioning-worker-runtime.ts`) foi
+extraído de `provisioning-worker.ts` especificamente para isso: recebe o `SecretStore` (e o
+logger) do chamador em vez de construí-los internamente, para que `provisioning-worker.ts`
+(processo isolado) e `dev-full.ts` (processo combinado) montem exatamente o mesmo pipeline a
+partir de instâncias diferentes — sem duplicar a composição. Testado diretamente
+(`src/workers/provisioning-worker-runtime.test.ts`): um `TenantDatabaseConnectionManager`
+construído a partir do **mesmo** `SecretStore` que o worker usou resolve e conecta com
+sucesso; construído a partir de um `SecretStore` **diferente**, falha com
+`TenantSecretNotFoundError` — nunca recorrendo à credencial administrativa.
+
+`dev-full.ts` recusa-se a iniciar sob `NODE_ENV=production` com seu próprio fail-fast
+explícito (não depende só do guard interno do `InMemorySecretStore`) — este runtime **não
+representa a topologia de produção** e nunca deve ser usado como se representasse. Os três
+entrypoints independentes (`server.ts`, `provisioning-worker.ts`,
+`provisioning-dispatcher.ts`) continuam existindo, inalterados em intenção — eles continuam
+não compartilhando `SecretStore` entre si quando executados separadamente, e essa é uma
+limitação documentada, não corrigida por este runtime combinado (que é uma conveniência local
+temporária, não uma correção da arquitetura real). `dev-full.ts` deixa de ser necessário
+quando o Prompt de ADR-004 (AWS Secrets Manager) for implementado.
+
+Fluxo local recomendado para testar `POST/GET /api/v1/properties` manualmente via Swagger
+(ver também README.md):
+
+```bash
+docker compose up -d
+pnpm db:migrate
+pnpm dev:dispatcher     # terminal separado — continua processo independente
+pnpm dev:full           # API + provisioning worker, SecretStore compartilhado
+```
+
+**Limitação pré-existente, não introduzida nem resolvida por esta tarefa**: nenhum mecanismo
+neste código semeia automaticamente o secret administrativo do cluster
+(`database_clusters.secret_reference`) em um `SecretStore` de um processo real em execução —
+todo teste que precisa dele chama `secretStore.put()` diretamente, dentro do próprio processo
+de teste. Isso significa que provisionar um tenant de verdade via `pnpm dev:full`/Swagger
+(`POST /api/v1/tenants` → aguardar `READY`) hoje ainda exige um passo manual adicional fora
+deste código para colocar esse secret no `SecretStore` do processo em execução — uma lacuna
+que já existia antes deste Prompt (nada, antes dele, permitia provisionar um tenant real fora
+de um teste automatizado) e que continua fora do escopo desta tarefa resolver.
 
 ## Transactional Outbox **(futuro)**
 

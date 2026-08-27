@@ -11,6 +11,7 @@
     "dev": "tsx watch --env-file=.env src/main/server.ts",
     "dev:dispatcher": "tsx watch --env-file=.env src/workers/provisioning-dispatcher.ts",
     "dev:provisioning-worker": "tsx watch --env-file=.env src/workers/provisioning-worker.ts",
+    "dev:full": "tsx watch --env-file=.env src/main/dev-full.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file=.env dist/main/server.js",
     "start:dispatcher": "node --env-file=.env dist/workers/provisioning-dispatcher.js",

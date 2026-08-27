@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { buildApp } from "../../../app/build-app.js";
+import { buildTestApp } from "../../../app/test-support/build-test-app.js";
 import { controlPlaneDb, controlPlanePool } from "../../../infrastructure/database/control-plane/client.js";
 import {
   provisioningJobs,
@@ -22,7 +22,7 @@ beforeEach(async () => {
   await controlPlaneDb.execute(
     sql`TRUNCATE TABLE ${provisioningJobs}, ${tenantDatabases}, ${tenants} CASCADE`,
   );
-  app = buildApp();
+  app = buildTestApp();
   await app.ready();
 });
 

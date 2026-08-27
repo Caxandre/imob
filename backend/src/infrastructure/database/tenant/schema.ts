@@ -1,4 +1,17 @@
-import { jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import {
+  check,
+  index,
+  integer,
+  jsonb,
+  numeric,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  uuid,
+  varchar,
+} from "drizzle-orm/pg-core";
 
 /**
  * Tenant Data Plane schema (ADR-001/ADR-003). Applied once per tenant database, never shared
@@ -50,3 +63,71 @@ export const outboxEvents = pgTable("outbox_events", {
   processedAt: timestamp("processed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const propertyType = pgEnum("property_type", ["HOUSE", "APARTMENT", "LAND", "COMMERCIAL", "OTHER"]);
+
+export const transactionType = pgEnum("transaction_type", ["SALE", "RENT"]);
+
+// Deliberately small (Prompt 021): SOLD/RENTED would need a real state machine (who
+// transitions it, from which prior status, is it reversible) that is not part of this task's
+// scope. DRAFT/ACTIVE/INACTIVE covers "not yet published" / "published" / "withdrawn" without
+// inventing that workflow ahead of a real requirement.
+export const propertyStatus = pgEnum("property_status", ["DRAFT", "ACTIVE", "INACTIVE"]);
+
+/**
+ * First domain table of the Tenant Data Plane (Prompt 021). No `tenant_id` column, like every
+ * other table in this schema — the physical database itself is the tenant isolation boundary
+ * (ADR-001); a discriminator column here would reintroduce exactly the shared-table risk
+ * ADR-001 rejected. No `created_by`/`owner_user_id` yet — there is no authenticated user
+ * concept in this system yet (only the temporary `X-Tenant-Id` HTTP mechanism), and inventing
+ * ownership fields ahead of real authentication would be guessing at a requirement that
+ * doesn't exist.
+ */
+export const properties = pgTable(
+  "properties",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: text("title").notNull(),
+    description: text("description"),
+    propertyType: propertyType("property_type").notNull(),
+    transactionType: transactionType("transaction_type").notNull(),
+    status: propertyStatus("status").notNull().default("DRAFT"),
+    // NUMERIC, never float — money must never lose precision to binary floating point.
+    // Drizzle's default numeric mode returns a string in JS, which also matches the HTTP
+    // contract this task chose (price travels as a decimal string, never a JSON number).
+    price: numeric("price", { precision: 15, scale: 2 }).notNull(),
+    bedrooms: integer("bedrooms"),
+    bathrooms: integer("bathrooms"),
+    parkingSpaces: integer("parking_spaces"),
+    // Same NUMERIC-not-float reasoning as price; nullable, since not every listing (e.g. LAND
+    // without a finished construction) necessarily states a build area at creation time.
+    areaM2: numeric("area_m2", { precision: 10, scale: 2 }),
+    street: text("street"),
+    number: text("number"),
+    complement: text("complement"),
+    neighborhood: text("neighborhood"),
+    city: text("city"),
+    // Brazilian UF: two letters, never a separate lookup table for a fixed, tiny set of
+    // values (this task, section 15).
+    state: varchar("state", { length: 2 }),
+    postalCode: text("postal_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Serves the only query this task's listing needs — ORDER BY created_at DESC, id DESC —
+    // directly from the index. No index yet on status/property_type/transaction_type/city:
+    // this task's GET /properties has no filter parameters, so an index on a column nothing
+    // queries would be speculative (CLAUDE.md: avoid abstractions without a concrete
+    // consumer) — add one if/when a filtered listing is actually built.
+    index("properties_created_at_id_idx").on(t.createdAt.desc(), t.id.desc()),
+    check("properties_price_positive", sql`${t.price} > 0`),
+    check("properties_bedrooms_non_negative", sql`${t.bedrooms} IS NULL OR ${t.bedrooms} >= 0`),
+    check("properties_bathrooms_non_negative", sql`${t.bathrooms} IS NULL OR ${t.bathrooms} >= 0`),
+    check(
+      "properties_parking_spaces_non_negative",
+      sql`${t.parkingSpaces} IS NULL OR ${t.parkingSpaces} >= 0`,
+    ),
+    check("properties_area_m2_positive", sql`${t.areaM2} IS NULL OR ${t.areaM2} > 0`),
+  ],
+);

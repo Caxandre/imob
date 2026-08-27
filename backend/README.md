@@ -9,8 +9,11 @@ packages compartilhados entre os dois. Ver o [README da raiz](../README.md).
 **Todos os comandos deste documento devem ser executados a partir do diretório
 `backend/`.**
 
-Estado atual: baseline técnica inicial. Nenhuma funcionalidade de negócio (auth, tenants,
-imóveis, leads, billing, etc.) foi implementada ainda.
+Estado atual: provisioning de tenant completo (database exclusivo por tenant, real, sob
+demanda) e o primeiro módulo de domínio (`properties`) implementado sobre o Tenant Data Plane
+— ver [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) para o estado
+completo. Autenticação ainda não existe; rotas de domínio usam um mecanismo temporário de
+tenant context (`X-Tenant-Id`) enquanto isso.
 
 ## Stack
 
@@ -86,11 +89,37 @@ Drizzle registra as migrations já aplicadas e ignora as que não estão pendent
 
 ## Execução local
 
+### Desenvolvimento por componentes (topologia real de produção)
+
 ```bash
-pnpm dev
+pnpm dev                      # API HTTP
+pnpm dev:dispatcher           # dispatcher de provisioning
+pnpm dev:provisioning-worker  # worker de provisioning
 ```
 
-Servidor sobe em `http://localhost:3000` (ajustável via `PORT`).
+Três processos independentes, cada um sem acesso à memória dos outros — a mesma topologia
+real usada em produção. **Limitação conhecida**: `pnpm dev` e `pnpm dev:provisioning-worker`
+não compartilham `SecretStore` entre si (cada um tem sua própria instância em memória, vazia
+no início) — um secret de tenant escrito pelo worker durante o provisioning não fica visível
+para a API rodando neste modo. Isso é esperado até existir um `SecretStore` de produção real
+(ADR-004) ou outro mecanismo de compartilhamento seguro. Use o modo integrado abaixo para
+testar rotas de domínio (`/api/v1/properties`) manualmente contra um tenant provisionado
+localmente.
+
+### Desenvolvimento integrado (só para testes manuais locais)
+
+```bash
+pnpm dev:full          # API + provisioning worker no mesmo processo, SecretStore compartilhado
+pnpm dev:dispatcher     # continua processo separado
+```
+
+`pnpm dev:full` existe **somente como conveniência de desenvolvimento local**, até o
+`SecretStore` de produção (ADR-004) estar implementado — não representa a topologia real e
+recusa-se a iniciar sob `NODE_ENV=production`. Ver
+[`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md#local-development-runtime--o-gap-de-secretstore-entre-processos)
+para os detalhes completos.
+
+Servidor sobe em `http://localhost:3000` (ajustável via `PORT`) em qualquer um dos dois modos.
 
 - Health check: `GET /health`
 - Documentação OpenAPI: `GET /docs`
@@ -101,11 +130,15 @@ A API expõe uma especificação OpenAPI 3.x e uma interface Swagger UI, geradas
 dos schemas de rota do Fastify (`@fastify/swagger` + `@fastify/swagger-ui`) — o mesmo
 contrato validado em runtime, nunca uma cópia mantida à mão.
 
-1. Suba a infraestrutura local e o backend:
+1. Suba a infraestrutura local e o backend. Para exercitar só `Tenants`/`GET /health`,
+   `pnpm dev` é suficiente. Para também exercitar `Properties` (que exige um tenant `READY`),
+   use o modo integrado:
 
    ```bash
    docker compose up -d
-   pnpm dev
+   pnpm db:migrate
+   pnpm dev:dispatcher   # outro terminal
+   pnpm dev:full         # outro terminal — API + provisioning worker, SecretStore compartilhado
    ```
 
 2. Abra no navegador:
@@ -134,8 +167,35 @@ Swagger UI
 Para observar o `409 Conflict` documentado, execute o mesmo request novamente sem alterar o
 `slug` — a segunda tentativa retorna `409` porque o slug já está em uso.
 
-Rotas documentadas hoje: `GET /health` (tag **System**) e `POST /api/v1/tenants` (tag
-**Tenants**). Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o
+### Testando Properties (requer `pnpm dev:full` e um tenant READY)
+
+```text
+Swagger UI (com pnpm dev:full em execução)
+  → Tenants → POST /api/v1/tenants → Try it out → Execute
+  → aguardar o provisioning terminar (worker rodando no mesmo processo) — confira o log até
+    "provisioning job processed"; o tenant fica READY quando o job SUCCEEDED
+  → copiar o id do tenant retornado
+  → Properties → POST /api/v1/properties → Try it out
+    → preencher X-Tenant-Id com o id do tenant → preencher o payload de exemplo → Execute
+    → conferir 201, com o property criado
+  → Properties → GET /api/v1/properties → Try it out
+    → preencher X-Tenant-Id com o mesmo id → Execute → conferir a listagem paginada
+  → Properties → GET /api/v1/properties/{id} → Try it out
+    → preencher X-Tenant-Id e o id retornado pelo POST → Execute → conferir 200
+```
+
+`X-Tenant-Id` é **temporário** — um mecanismo de desenvolvimento/integração enquanto
+autenticação real não existe, não uma decisão definitiva de produto (ver
+[`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)). Qualquer cliente
+que conheça um `tenantId` pode informá-lo; isso não é autenticação.
+
+Sem `pnpm dev:full` (ou seja, com `pnpm dev` sozinho), `POST/GET /api/v1/properties` contra um
+tenant provisionado pelo worker separado falha ao resolver a credencial do tenant — ver a
+seção "Local development runtime" em `ARCHITECTURE.md`.
+
+Rotas documentadas hoje: `GET /health` (tag **System**), `POST /api/v1/tenants` (tag
+**Tenants**), e `POST/GET /api/v1/properties`, `GET /api/v1/properties/{id}` (tag
+**Properties**). Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o
 Swagger descreve apenas a interface HTTP pública.
 
 ## Build e produção
@@ -150,8 +210,12 @@ pnpm start
 | Comando           | Descrição                                  |
 | ------------------ | -------------------------------------------- |
 | `pnpm dev`         | Sobe a API em modo desenvolvimento (watch)   |
+| `pnpm dev:full`    | DEV-ONLY: API + provisioning worker no mesmo processo, SecretStore compartilhado |
+| `pnpm dev:dispatcher` | Sobe o dispatcher de provisioning (watch)  |
+| `pnpm dev:provisioning-worker` | Sobe o worker de provisioning isolado (watch) |
 | `pnpm db:generate` | Gera migration a partir do schema do Control Plane |
 | `pnpm db:migrate`  | Aplica migrations pendentes do Control Plane |
+| `pnpm tenant-db:generate` | Gera migration a partir do schema do Tenant Data Plane |
 | `pnpm build`       | Compila TypeScript para `dist/`              |
 | `pnpm start`       | Executa o build de produção                  |
 | `pnpm typecheck`   | Verifica tipos sem gerar output              |
@@ -186,10 +250,14 @@ Resumo:
 - **Backend e frontend são aplicações independentes**, sem workspace e sem packages
   compartilhados, versionadas no mesmo repositório Git.
 - **Monólito modular**: API HTTP e workers vivem no mesmo projeto, com entrypoints
-  independentes (apenas a API está implementada nesta fase).
+  independentes de produção (`server.ts`, `provisioning-worker.ts`,
+  `provisioning-dispatcher.ts`) mais um runtime combinado só de desenvolvimento
+  (`dev-full.ts`, ver "Execução local" acima).
 - **Control Plane**: banco PostgreSQL central com dados globais do SaaS. O schema inicial já
   existe, com as tabelas `tenants`, `database_clusters`, `tenant_databases` e
   `provisioning_jobs`. Planos e billing ainda não possuem tabelas.
-- **Tenant Data Plane**: cada tenant terá seu próprio database PostgreSQL exclusivo — a
-  criação dinâmica desses databases é trabalho futuro, fora do escopo desta fase.
+- **Tenant Data Plane**: cada tenant possui seu próprio database PostgreSQL exclusivo,
+  provisionado sob demanda de forma real e assíncrona (`tenants` → `provisioning_jobs` →
+  dispatcher → BullMQ → worker). Primeiro módulo de domínio (`properties`) já implementado
+  sobre esse schema.
 - O código de domínio nunca assume que todos os tenants compartilham o mesmo database.
