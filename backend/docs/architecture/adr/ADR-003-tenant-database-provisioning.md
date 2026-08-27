@@ -576,13 +576,12 @@ implementada agora.
 - O step atual do worker (`PROVISION_DATABASE`, único, do Prompt 009) será refinado para os
   sete steps listados em "Provisioning steps" quando o `DatabaseProvisioner` real for
   implementado — nenhuma mudança de código acontece nesta tarefa.
-- `tenants.status = READY` continua não implementado; quando implementado, só pode
-  acontecer dentro da transação final atômica descrita aqui, executada pela camada de
-  aplicação — nunca pelo `DatabaseProvisioner`.
-- A interface `DatabaseProvisioner.provision()` precisará mudar seu retorno de `void` para
-  `ProvisioningResult` quando a implementação real for escrita — mudança futura, não feita
-  nesta tarefa. `ProcessProvisioningJobRepository` também precisará de uma operação de
-  finalização estendida que aceite esse resultado — forma exata não decidida aqui.
+- **Superado pelo Prompt 018** — `tenants.status = READY` já é implementado, exatamente
+  dentro da transação final atômica descrita aqui, executada pela camada de aplicação
+  (`finalizeProvisioning()`) — nunca pelo `DatabaseProvisioner`.
+- **Superado pelo Prompt 018** — `DatabaseProvisioner.provision()` já retorna
+  `ProvisioningResult` em vez de `void`, e `ProcessProvisioningJobRepository` já tem a
+  operação de finalização estendida (`finalizeProvisioning()`) que a persiste.
 - O database e todos os objetos de migration do Tenant Data Plane são de propriedade da
   credencial administrativa do cluster, não da role do tenant — decisão revisada em relação
   à formulação inicial desta ADR (ver "Alternatives considered", G/H e ownership).
@@ -914,6 +913,92 @@ Ainda **não** ligado ao worker: essa integração exige estender a finalizaçã
   nenhuma credencial exposta em `ProvisioningResult` ou em log, worker ainda recusando-se a
   iniciar (inalterado).
 
+## Prompt 018 — finalização transacional do Control Plane, worker real ligado
+
+Implementa "Finalization" acima como código real: `ProcessProvisioningJobRepository
+.finalizeProvisioning()` substitui o antigo `markSucceeded()` isolado, e
+`processProvisioningJob` passa a usar o `ProvisioningResult` que `DatabaseProvisioner
+.provision()` já retornava desde o Prompt 017 (antes descartado). O worker de produção
+(`src/workers/provisioning-worker.ts`) está ligado ao pipeline real completo.
+
+- **Uma única transação, com os guards descritos originalmente em "Finalization" —
+  implementados exatamente como decidido, sem desvio.** Dentro de `db.transaction()`:
+  `SELECT ... FOR UPDATE` no `provisioning_job` e no `tenant` (nessa ordem); valida
+  `job.type = CREATE_DATABASE` e `job.status` (`RUNNING`, ou `SUCCEEDED` só se compatível
+  com o mesmo resultado — ver idempotência abaixo); valida `tenant.status` (`PROVISIONING`,
+  ou `READY` só se já compatível); reconcilia `tenant_databases` (cria `READY` se ausente,
+  ou verifica compatibilidade se já existir); marca `tenant.status = READY` e
+  `provisioning_job.status = SUCCEEDED` (só se ainda não estavam). Todas as três escritas —
+  ou nenhuma.
+- **Locking: `FOR UPDATE` em linhas que já existem, nunca advisory lock.** O job e o tenant
+  sempre existem antes da finalização (o FK `provisioning_jobs.tenant_id → tenants.id` com
+  `ON DELETE RESTRICT` garante isso) — travá-los primeiro serializa naturalmente qualquer
+  finalização concorrente para o mesmo job/tenant, incluindo a decisão "criar ou reconhecer
+  `tenant_databases`", sem precisar de um advisory lock adicional (diferente do Prompt 014,
+  onde o database ainda não existe no momento do lock). Testado com duas chamadas
+  genuinamente concorrentes para o mesmo job: a segunda bloqueia no `FOR UPDATE` até a
+  primeira commitar, então relê o estado já finalizado e segue pelo caminho idempotente —
+  nenhuma `unique_violation` escapa como falha.
+- **Idempotência após commit — a regra central desta tarefa.** `SUCCEEDED`/`READY` só são
+  aceitos como "já finalizado, nada a fazer" quando o `tenant_databases` existente é
+  **compatível** com o `ProvisioningResult` recebido (mesmo `clusterId`/`databaseName`/
+  `secretReference`/`schemaVersion`) — nunca apenas por já estar nesses status. Um retry
+  legítimo após crash (commit ocorreu, processo caiu antes de retornar) reconhece o estado
+  como consistente e retorna com sucesso, sem duplicar nada. Uma divergência real (`Provisioning
+  FinalizationConflictError`) nunca é silenciosamente sobrescrita.
+- **`schemaVersion` divergente é tratado como inconsistência, nunca como upgrade.** Esta
+  finalização não é o mecanismo de rollout de migrations para tenants existentes — se um
+  retry chegar com `schemaVersion` maior que o já registrado, isso é tratado exatamente como
+  qualquer outro campo incompatível (`ProvisioningFinalizationConflictError`), não como "aplicar
+  a versão mais nova". Migration rollout para tenants já `READY` é responsabilidade futura,
+  fora desta ADR.
+- **Distinção explícita entre falha de provisioning e falha de finalização — a mudança de
+  comportamento mais importante desta tarefa.** Antes: `provision()` e `markSucceeded()`
+  compartilhavam o mesmo `try/catch`, então qualquer falha (incluindo uma falha transitória
+  ao persistir o sucesso) marcava o job `FAILED`. Agora:
+  - `DatabaseProvisioner.provision()` falha → `FAILED` (comportamento preservado,
+    inalterado — a infraestrutura externa realmente não ficou pronta).
+  - `finalizeProvisioning()` falha **depois** de `provision()` já ter retornado com sucesso
+    → o job **permanece `RUNNING`**, nunca é marcado `FAILED`, e o erro propaga sem ser
+    capturado. Justificativa: `provision()` é idempotente por descoberta (Prompts 013–017)
+    — um retry futuro reconhece role/database/migrations/permissions/health check já
+    prontos e só precisa refazer a finalização. Marcar `FAILED` aqui tornaria um database de
+    tenant já funcional permanentemente inalcançável por qualquer retry (`FAILED` é terminal
+    nesta fase, ADR-002).
+  - Consequência aceita e documentada: como o BullMQ ainda publica com `attempts: 1`, um job
+    que fica `RUNNING` após uma falha de finalização permanece `RUNNING` até que recovery de
+    `RUNNING` abandonado exista (lacuna já registrada no ADR-002/nesta ADR, não resolvida
+    aqui — deliberadamente fora do escopo desta tarefa). O `attempts` do BullMQ não foi
+    aumentado para compensar; isso seria resolver o sintoma, não a causa.
+- **`current_step = "FINALIZE"`** é escrito junto com `SUCCEEDED`, usando a mesma coluna
+  `text` livre já usada por `PROVISION_DATABASE_STEP` — nenhum enum novo, conforme já
+  decidido para essa coluna.
+- **Nada persistido além do que `ProvisioningResult` já expõe.** `tenant_databases` recebe
+  `tenant_id`/`cluster_id`/`database_name`/`secret_reference`/`schema_version`/`status
+  READY` — nunca username, password, host, port ou connection string.
+- **Worker real ligado** (`src/workers/provisioning-worker.ts`): compõe o pipeline completo
+  (`DatabaseClusterSelector`, os dois resolvedores de credencial, `TenantRoleProvisioner`,
+  `TenantDatabaseProvisioner`, `runTenantMigrations`, `grantTenantApplicationPrivileges`,
+  `TenantDatabaseHealthChecker`, `DatabaseProvisioner`, `finalizeProvisioning`) e inicia de
+  verdade — a trava incondicional anterior ("nenhum `DatabaseProvisioner` real") foi
+  removida. Uma trava mais estreita permanece, testada manualmente nos dois sentidos:
+  recusa-se a iniciar especificamente sob `NODE_ENV=production` (log + `process.exit(1)`,
+  antes de compor qualquer dependência), porque nenhum provider de `SecretStore` de
+  produção existe — `createInMemorySecretStore` continua test/dev support apenas (já se
+  recusa a construir sob produção, por conta própria; a checagem no entrypoint é adicional e
+  deliberada, não silenciosa). Fora de produção, o worker inicia e processa jobs reais.
+- **Primeiro teste ponta a ponta real do provisioning**: criação de tenant (transação real)
+  → `processProvisioningJob` → `DatabaseProvisioner` real → `finalizeProvisioning` real,
+  sem Redis/BullMQ (chamado diretamente, exatamente como o worker faz) e sem nenhum mock
+  além do `SecretStore` em memória. Confirma tenant `READY`, `provisioning_job SUCCEEDED`,
+  `tenant_databases READY`, e — independentemente da bookkeeping do Control Plane — que o
+  database físico, a role e as migrations do tenant realmente existem, verificado com a
+  própria credencial do tenant.
+- Confirmado: nenhuma migration nova, nenhuma dependência nova, nenhuma rota HTTP nova,
+  nenhum `DROP` de produção, `DatabaseProvisioner` continua nunca escrevendo no Control
+  Plane (boundary comprovado por um teste dedicado desde o Prompt 017, arquivo não tocado
+  nesta tarefa).
+
 ## Future implementation notes
 
 Registrado para a tarefa que implementar o `DatabaseProvisioner` real, sem comprometer
@@ -928,16 +1013,15 @@ detalhes de implementação nesta ADR:
 - Geração de senha via módulo `crypto` nativo do Node (nunca `Math.random()`).
 - `current_step` permanece `text` livre — nenhum enum PostgreSQL é criado para os 7 valores
   listados, conforme já decidido para essa coluna (Prompt 002/007).
-- **Superado pelo Prompt 017** — a implementação de migrations do Tenant Data Plane
+- **Superado pelos Prompts 017/018** — a implementação de migrations do Tenant Data Plane
   (`drizzle/tenant/`, `src/infrastructure/database/tenant/`) não está mais separada do
   `DatabaseProvisioner`: `createPostgresDatabaseProvisioner` já a compõe junto com todas as
-  outras peças. Falta apenas ligar esse `DatabaseProvisioner` ao worker (ver "Prompt 017"
-  acima).
-- **Superado pelo Prompt 017** — `DatabaseProvisioner.provision()` já retorna
+  outras peças, e esse `DatabaseProvisioner` já está ligado ao worker (Prompt 018).
+- **Superado pelo Prompt 018** — `DatabaseProvisioner.provision()` já retorna
   `ProvisioningResult` (`clusterId`, `databaseName`, `secretReference`, `schemaVersion`) em
-  vez de `void`. A camada de aplicação — não o provisionador — continua sendo quem, no
-  futuro, gravará esse resultado em `tenant_databases` e ativará o tenant; essa parte
-  permanece não implementada.
+  vez de `void`, e a camada de aplicação já grava esse resultado em `tenant_databases` e
+  ativa o tenant (`finalizeProvisioning()`, ver "Prompt 018" acima) — não mais uma tarefa
+  futura.
 - **Superado pelo Prompt 015** (ver seção "Prompt 015" acima para o registro completo): esta
   nota recomendava executar `ALTER DEFAULT PRIVILEGES` (ver "Credentials and secrets")
   **antes** de rodar a primeira migration do Tenant Data Plane, tornando o `GRANT` explícito

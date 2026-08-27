@@ -110,7 +110,7 @@ iniciado automaticamente pelo processo HTTP. O dispatcher só escreve as três c
 dispatch — nunca `status`, `attempts` ou `current_step`, que continuam sendo
 responsabilidade exclusiva do worker.
 
-**IMPLEMENTED** — worker de provisionamento e máquina de estado
+**IMPLEMENTED** — worker de provisionamento, máquina de estado e finalização transacional
 (`src/workers/provisioning-worker.ts`, `src/modules/provisioning/`):
 
 ```text
@@ -123,41 +123,56 @@ findById — PostgreSQL é sempre consultado antes de agir, nunca o estado do Bu
 PENDING → RUNNING (UPDATE ... WHERE status='PENDING' — a escrita é a própria arbitragem)
     attempts += 1, started_at = now(), current_step = PROVISION_DATABASE
     ↓
-DatabaseProvisioner.provision() (porta, sem implementação real)
+DatabaseProvisioner.provision() — real (Prompt 017), infraestrutura externa
     ↓
-sucesso → SUCCEEDED, finished_at        falha → FAILED, finished_at, error_message
+falha de provisioning → FAILED, finished_at, error_message (nenhuma finalização é tentada)
+    ↓
+sucesso → ProvisioningResult
+    ↓
+repository.finalizeProvisioning() — transação única do Control Plane (Prompt 018):
+    tenant_databases (READY) + tenant (READY) + provisioning_job (SUCCEEDED), atômicos
+    ↓
+falha na finalização → job permanece RUNNING, erro propaga sem tocar Control Plane
+    (a infra externa já está pronta; um retry futuro só precisa refazer a finalização)
 ```
 
 Idempotente diante de redelivery do BullMQ: job já `SUCCEEDED`/`FAILED` não é reprocessado;
 job já `RUNNING` não é reexecutado concorrentemente (recovery de `RUNNING` abandonado é
-lacuna conhecida, não resolvida). `FAILED` é estado terminal nesta fase — sem retry
-automático, nem do workflow nem do BullMQ (`attempts: 1` explícito na publicação).
+lacuna conhecida, não resolvida — inclui o caso de crash durante a finalização, agora que ela
+existe). `FAILED` é estado terminal nesta fase — sem retry automático, nem do workflow nem do
+BullMQ (`attempts: 1` explícito na publicação). **Distinção deliberada** (ADR-003): uma falha
+do `DatabaseProvisioner` em si marca o job `FAILED` (não recuperável nesta fase); uma falha
+*só* na finalização (infraestrutura externa já pronta, só a transação do Control Plane
+falhou) nunca marca `FAILED` — marcar `FAILED` ali tornaria um database de tenant já
+funcional inalcançável por qualquer retry futuro.
 
-**Segurança de runtime**: uma implementação real de `DatabaseProvisioner` já existe (Prompt
-017 — ver mais abaixo), mas **não está conectada** a este worker: fazer isso exige estender a
-finalização (`markSucceeded`) para persistir `ProvisioningResult` em `tenant_databases` e
-ativar o tenant, fora do escopo daquela tarefa (ADR-003 "Finalization"). O entrypoint de
-produção (`src/workers/provisioning-worker.ts`) **recusa-se a iniciar**, com log e saída
-explícitos, em vez de rodar sem finalização real — isso impediria que jobs reais fossem
-marcados `SUCCEEDED` sem `tenant_databases`/tenant `READY` nunca serem registrados. Toda a
-infraestrutura ao redor (BullMQ `Worker`, repository, use case) está implementada e testada
-com um `DatabaseProvisioner` fake apenas em testes.
+**Runtime**: `src/workers/provisioning-worker.ts` agora compõe e inicia o pipeline real
+completo (`DatabaseClusterSelector` → resolvedores de credencial → `TenantRoleProvisioner` →
+`TenantDatabaseProvisioner` → migrations → permissions → `TenantDatabaseHealthChecker` →
+`DatabaseProvisioner` → `finalizeProvisioning`) — a trava incondicional anterior ("nenhum
+`DatabaseProvisioner` real existe") foi removida, já que um existe desde o Prompt 017. Uma
+trava mais estreita e ainda real permanece: **recusa-se a iniciar especificamente sob
+`NODE_ENV=production`**, porque não existe ainda um provider de `SecretStore` de produção
+(AWS Secrets Manager, Vault, ...) — usar `createInMemorySecretStore` (que já se recusa a
+construir sob produção, por conta própria) em um deploy real seria fingir prontidão que não
+existe. Fora de produção (`development`/`test`), o worker inicia e processa jobs de verdade.
 
-**IMPLEMENTED (documentation)** — a arquitetura de provisionamento do database físico do
-tenant está decidida em [ADR-003](adr/ADR-003-tenant-database-provisioning.md):
+**IMPLEMENTED** — a arquitetura de provisionamento do database físico do tenant, decidida em
+[ADR-003](adr/ADR-003-tenant-database-provisioning.md), agora está **totalmente
+implementada e ligada ao worker** (Prompts 011–018):
 
 ```text
 worker (application layer)
     ↓
-DatabaseProvisioner.provision() (real, futuro) — infraestrutura externa, nunca escreve no Control Plane
+DatabaseProvisioner.provision() — real, infraestrutura externa, nunca escreve no Control Plane
     ↓
 DatabaseClusterSelector → cluster
     ↓
-CREATE_ROLE → SAVE_CREDENTIALS → CREATE_DATABASE → RUN_MIGRATIONS → HEALTH_CHECK
+CREATE_ROLE → SAVE_CREDENTIALS → CREATE_DATABASE → RUN_MIGRATIONS → PERMISSIONS → HEALTH_CHECK
     ↓
 retorna ProvisioningResult (clusterId, databaseName, secretReference, schemaVersion)
     ↓
-worker persiste REGISTER_DATABASE — transação única: tenant_databases + tenant READY + provisioning_job SUCCEEDED
+worker persiste finalizeProvisioning() — transação única: tenant_databases + tenant READY + provisioning_job SUCCEEDED
 ```
 
 Identidade técnica de database/role/secret derivada de `tenant.id` (nunca do `slug`);
@@ -284,14 +299,16 @@ nunca reabrir `PUBLIC` como compensação (fail-closed). `GRANT USAGE`/DML em ta
 `ALTER DEFAULT PRIVILEGES`, migrations de tenant e health check continuam fora do escopo
 deste componente.
 
-**PLANNED** — `SecretStore` de produção, criação de registros em `tenant_databases`,
-ativação do tenant (`tenants.status = READY`), recovery de jobs `RUNNING` abandonados,
-política de retry para jobs `FAILED`. `DatabaseProvisioner` real está **IMPLEMENTED** — ver
-abaixo.
+**PLANNED** — `SecretStore` de produção, recovery de jobs `RUNNING` abandonados (inclui
+crash durante a finalização — ver Prompt 018 abaixo), política de retry para jobs `FAILED`.
+`DatabaseProvisioner` real, criação de registros em `tenant_databases` e ativação do tenant
+(`tenants.status = READY`) estão **IMPLEMENTED** — ver abaixo.
 
-**PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
-`tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
-escreve nelas: não há repositories, services nem endpoints para essas tabelas.
+**PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`
+e `provisioning_jobs` existem como schema, mas nenhum repository/service/endpoint próprio
+lê ou escreve neles fora do fluxo de provisioning já implementado. `tenant_databases` já é
+escrito pela finalização do provisioning (Prompt 018) — nenhuma leitura própria (Tenant
+Registry) existe ainda.
 
 **IMPLEMENTED** — schema inicial do Tenant Data Plane, migration runner e permissões da
 application role (`src/infrastructure/database/tenant/schema.ts`,
@@ -352,10 +369,10 @@ TenantDatabaseHealthChecker.check({cluster, databaseName, credential, expectedSc
 ProvisioningResult { clusterId, databaseName, secretReference, schemaVersion }
 ```
 
-`DatabaseProvisioner.provision()` (`process-provisioning-job.ts`) mudou de `Promise<void>`
-para `Promise<ProvisioningResult>` — mudança mínima para compilar; `processProvisioningJob`
-continua descartando o valor de retorno (`await provisioner.provision(...)`), e a máquina de
-estado do worker permanece exatamente a mesma (`markSucceeded`/`markFailed` inalterados).
+`DatabaseProvisioner.provision()` (`process-provisioning-job.ts`) retorna
+`Promise<ProvisioningResult>`. Desde o Prompt 018, `processProvisioningJob` usa esse
+resultado (deixou de descartá-lo): chama `repository.finalizeProvisioning()` em vez do
+antigo `markSucceeded()` isolado — ver bloco de finalização acima e o Prompt 018 na ADR-003.
 Erros de cada etapa são encapsulados em `DatabaseProvisioningError` com mensagem controlada
 por passo (ADR-003 "Security"), preservando a causa original só em `.cause`.
 
@@ -374,11 +391,11 @@ infraestrutura externa e retorna um resultado — nunca escreve em
 chamada para o mesmo tenant reconhece role/database/migrations/permissions já existentes,
 não rotaciona a senha, e converge para o mesmo `ProvisioningResult`.
 
-**PLANNED** — integração deste `DatabaseProvisioner` ao worker (o entrypoint de produção
-continua se recusando a iniciar), finalização transacional (`tenant_databases` + tenant
-`READY` + `provisioning_job SUCCEEDED`), recovery de jobs `RUNNING` abandonados, política de
-retry para jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está
-registrada (ADR-003 "Finalization").
+**IMPLEMENTED** (Prompt 018) — este `DatabaseProvisioner` está ligado ao worker, e a
+finalização transacional do Control Plane (`tenant_databases` + tenant `READY` +
+`provisioning_job SUCCEEDED`, atômicos) está implementada — ver o bloco do worker acima e
+ADR-003 "Finalization". **PLANNED**: recovery de jobs `RUNNING` abandonados (inclui o caso
+de crash durante a finalização), política de retry para jobs `FAILED`.
 
 ## Tenant Data Plane
 
@@ -439,11 +456,12 @@ Nenhuma parte desse fluxo existe ainda. Em particular:
 Redis está disponível localmente (Docker Compose) e no CI. **IMPLEMENTED**: a fila
 `tenant-provisioning` (`src/infrastructure/queue/`), alimentada pelo dispatcher de
 provisionamento e consumida por um `Worker` BullMQ real
-(`src/modules/provisioning/infrastructure/bullmq-provisioning-worker.ts`). Publicação sem
-retry automático (`attempts: 1` explícito) — o workflow de provisionamento não reinventa
+(`src/modules/provisioning/infrastructure/bullmq-provisioning-worker.ts`), com o
+`DatabaseProvisioner` real e a finalização transacional já ligados (Prompt 018). Publicação
+sem retry automático (`attempts: 1` explícito) — o workflow de provisionamento não reinventa
 sua política de retry no BullMQ. **PLANNED**: o entrypoint de produção do worker ainda se
-recusa a iniciar — um `DatabaseProvisioner` real existe (Prompt 017), mas conectá-lo exige a
-finalização transacional ainda não implementada (ver seção Control Plane).
+recusa a iniciar especificamente sob `NODE_ENV=production`, por não existir ainda um
+provider de `SecretStore` de produção (ver seção Control Plane).
 
 ## Transactional Outbox **(futuro)**
 

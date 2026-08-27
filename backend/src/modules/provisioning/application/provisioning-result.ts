@@ -7,9 +7,9 @@
  * host, no connection string, no admin credential. `secretReference` is a pointer into a
  * SecretStore, never the secret value itself.
  *
- * Not wired to any code yet — `DatabaseProvisioner.provision()` still returns `Promise<void>`
- * (see process-provisioning-job.ts). Adopting this as its return type is a future change
- * that also requires adapting the worker's finalization step; out of scope here.
+ * `DatabaseProvisioner.provision()` returns this (see process-provisioning-job.ts); the
+ * Control Plane finalization (`ProcessProvisioningJobRepository.finalizeProvisioning()`,
+ * Prompt 018) persists it into `tenant_databases`.
  */
 export interface ProvisioningResult {
   clusterId: string;
