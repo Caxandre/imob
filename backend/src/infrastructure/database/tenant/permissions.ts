@@ -68,6 +68,17 @@ export async function grantTenantApplicationPrivileges(
       `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${role}`,
     );
     await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${role}`);
+
+    // Read-only visibility into drizzle's own migration ledger (Prompt 017) — required so the
+    // Tenant Data Plane health check can confirm the expected schemaVersion is actually
+    // applied using the tenant's own credential, the same connection it uses to prove
+    // CONNECT/auth/SELECT 1 work, rather than a second administrative connection. This grants
+    // SELECT on the tracking table only — never DDL, and no visibility into any other
+    // administrative schema. Requires `runTenantMigrations()` to have already created
+    // `drizzle.__drizzle_migrations` — true for every caller in this codebase, which always
+    // runs migrations before permissions (ADR-003, Prompt 015).
+    await client.query(`GRANT USAGE ON SCHEMA drizzle TO ${role}`);
+    await client.query(`GRANT SELECT ON drizzle.__drizzle_migrations TO ${role}`);
   } finally {
     await client.end();
   }

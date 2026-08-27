@@ -133,14 +133,15 @@ job já `RUNNING` não é reexecutado concorrentemente (recovery de `RUNNING` ab
 lacuna conhecida, não resolvida). `FAILED` é estado terminal nesta fase — sem retry
 automático, nem do workflow nem do BullMQ (`attempts: 1` explícito na publicação).
 
-**Segurança de runtime**: `DatabaseProvisioner` (porta em
-`process-provisioning-job.ts`) não possui implementação real — criar o database físico do
-tenant está fora do escopo desta fase. O entrypoint de produção
-(`src/workers/provisioning-worker.ts`) **recusa-se a iniciar**, com log e saída explícitos,
-em vez de rodar com uma implementação fake/no-op — isso impediria que jobs reais fossem
-marcados `SUCCEEDED` sem nenhum database ter sido criado. Toda a infraestrutura ao redor
-(BullMQ `Worker`, repository, use case) está implementada e testada com um
-`DatabaseProvisioner` fake apenas em testes.
+**Segurança de runtime**: uma implementação real de `DatabaseProvisioner` já existe (Prompt
+017 — ver mais abaixo), mas **não está conectada** a este worker: fazer isso exige estender a
+finalização (`markSucceeded`) para persistir `ProvisioningResult` em `tenant_databases` e
+ativar o tenant, fora do escopo daquela tarefa (ADR-003 "Finalization"). O entrypoint de
+produção (`src/workers/provisioning-worker.ts`) **recusa-se a iniciar**, com log e saída
+explícitos, em vez de rodar sem finalização real — isso impediria que jobs reais fossem
+marcados `SUCCEEDED` sem `tenant_databases`/tenant `READY` nunca serem registrados. Toda a
+infraestrutura ao redor (BullMQ `Worker`, repository, use case) está implementada e testada
+com um `DatabaseProvisioner` fake apenas em testes.
 
 **IMPLEMENTED (documentation)** — a arquitetura de provisionamento do database físico do
 tenant está decidida em [ADR-003](adr/ADR-003-tenant-database-provisioning.md):
@@ -283,11 +284,10 @@ nunca reabrir `PUBLIC` como compensação (fail-closed). `GRANT USAGE`/DML em ta
 `ALTER DEFAULT PRIVILEGES`, migrations de tenant e health check continuam fora do escopo
 deste componente.
 
-**PLANNED** — `DatabaseProvisioner` real (orquestrando os componentes acima com
-`RUN_MIGRATIONS` → `HEALTH_CHECK`), `SecretStore` de produção, criação de registros em
-`tenant_databases`, ativação do tenant (`tenants.status = READY`), recovery de jobs `RUNNING`
-abandonados, política de retry para jobs `FAILED`. Nenhum desses existe ainda; apenas a
-decisão arquitetural está registrada.
+**PLANNED** — `SecretStore` de produção, criação de registros em `tenant_databases`,
+ativação do tenant (`tenants.status = READY`), recovery de jobs `RUNNING` abandonados,
+política de retry para jobs `FAILED`. `DatabaseProvisioner` real está **IMPLEMENTED** — ver
+abaixo.
 
 **PLANNED** — planos, assinaturas e billing ainda não possuem tabelas. `database_clusters`,
 `tenant_databases` e `provisioning_jobs` existem como schema, mas nenhum código lê ou
@@ -320,10 +320,65 @@ o boundary de isolamento (ADR-001). Diretório de migrations (`drizzle/tenant/`)
 Drizzle Kit (`drizzle.tenant.config.ts`, script `pnpm tenant-db:generate`) completamente
 separados do Control Plane. Não existe script `tenant-db:migrate` — só o runner programático,
 já que não há "o" database de tenant único para um script aplicar migrations contra;
-aplicar em todos os tenants (rollout/batch/canário) é decisão futura. `RUN_MIGRATIONS` (o
-"passo" descrito em ADR-003) e o `GRANT` de aplicação continuam fora do
-`DatabaseProvisioner`/worker — nenhuma integração, nenhum registro em `tenant_databases`,
-nenhum tenant `READY`.
+aplicar em todos os tenants (rollout/batch/canário) é decisão futura.
+
+**IMPLEMENTED** — `DatabaseProvisioner` real, compondo todas as peças acima, mais o health
+check do Tenant Data Plane
+(`src/modules/provisioning/infrastructure/postgres-database-provisioner.ts`,
+`src/modules/provisioning/application/tenant-database-health-checker.ts`,
+`src/modules/provisioning/infrastructure/postgres-tenant-database-health-checker.ts`,
+`src/modules/provisioning/application/tenant-database-credential-resolver.ts`), isolado e
+testado, ainda **não** ligado ao worker:
+
+```text
+tenantId
+    ↓
+DatabaseClusterSelector.selectClusterFor(tenantId) → cluster
+    ↓
+TenantRoleProvisioner.ensureRole({tenantId, cluster})       — Prompt 013
+    ↓
+TenantDatabaseProvisioner.ensureDatabase({tenantId, cluster}) — Prompt 014
+    ↓
+ClusterAdminCredentialResolver.resolve(cluster.secretReference) — uma vez, reaplicado nos dois passos abaixo
+    ↓
+runTenantMigrations(target) → { schemaVersion }              — Prompt 015
+    ↓
+grantTenantApplicationPrivileges(target, roleName)            — Prompt 015
+    ↓
+TenantDatabaseCredentialResolver.resolve(secretReference) → credencial do tenant
+    ↓
+TenantDatabaseHealthChecker.check({cluster, databaseName, credential, expectedSchemaVersion})
+    ↓
+ProvisioningResult { clusterId, databaseName, secretReference, schemaVersion }
+```
+
+`DatabaseProvisioner.provision()` (`process-provisioning-job.ts`) mudou de `Promise<void>`
+para `Promise<ProvisioningResult>` — mudança mínima para compilar; `processProvisioningJob`
+continua descartando o valor de retorno (`await provisioner.provision(...)`), e a máquina de
+estado do worker permanece exatamente a mesma (`markSucceeded`/`markFailed` inalterados).
+Erros de cada etapa são encapsulados em `DatabaseProvisioningError` com mensagem controlada
+por passo (ADR-003 "Security"), preservando a causa original só em `.cause`.
+
+Health check: autentica com a **credencial de aplicação do tenant** (nunca a administrativa)
+contra o database do tenant, confirma `current_database()`, executa `SELECT 1`, e compara o
+número de migrations aplicadas (`drizzle.__drizzle_migrations`, consultado com a própria
+credencial do tenant) contra o `schemaVersion` real devolvido por `runTenantMigrations`.
+`grantTenantApplicationPrivileges` (Prompt 015) ganhou um `GRANT` adicional, mínimo e
+somente leitura (`USAGE` no schema `drizzle` + `SELECT` em
+`drizzle.__drizzle_migrations`), exigido para essa comparação funcionar com a credencial do
+tenant em vez de uma segunda conexão administrativa.
+
+Fronteira obrigatória (ADR-003, CLAUDE.md): `DatabaseProvisioner` só executa/descobre
+infraestrutura externa e retorna um resultado — nunca escreve em
+`tenants`/`provisioning_jobs`/`tenant_databases`. Idempotente ponta a ponta: uma segunda
+chamada para o mesmo tenant reconhece role/database/migrations/permissions já existentes,
+não rotaciona a senha, e converge para o mesmo `ProvisioningResult`.
+
+**PLANNED** — integração deste `DatabaseProvisioner` ao worker (o entrypoint de produção
+continua se recusando a iniciar), finalização transacional (`tenant_databases` + tenant
+`READY` + `provisioning_job SUCCEEDED`), recovery de jobs `RUNNING` abandonados, política de
+retry para jobs `FAILED`. Nenhum desses existe ainda; apenas a decisão arquitetural está
+registrada (ADR-003 "Finalization").
 
 ## Tenant Data Plane
 
@@ -387,7 +442,8 @@ provisionamento e consumida por um `Worker` BullMQ real
 (`src/modules/provisioning/infrastructure/bullmq-provisioning-worker.ts`). Publicação sem
 retry automático (`attempts: 1` explícito) — o workflow de provisionamento não reinventa
 sua política de retry no BullMQ. **PLANNED**: o entrypoint de produção do worker ainda se
-recusa a iniciar, porque não existe `DatabaseProvisioner` real (ver seção Control Plane).
+recusa a iniciar — um `DatabaseProvisioner` real existe (Prompt 017), mas conectá-lo exige a
+finalização transacional ainda não implementada (ver seção Control Plane).
 
 ## Transactional Outbox **(futuro)**
 

@@ -60,6 +60,15 @@ async function insertJob(tenantId: string) {
   return job;
 }
 
+// Arbitrary but internally consistent — only used to satisfy DatabaseProvisioner's return
+// type; no test in this file inspects its fields.
+const FAKE_PROVISIONING_RESULT = {
+  clusterId: "cluster-1",
+  databaseName: "tenant_fake",
+  secretReference: "tenant-databases/fake",
+  schemaVersion: 1,
+};
+
 function fakeProvisioner(behavior: "succeed" | "throw" = "succeed") {
   const calls: { provisioningJobId: string; tenantId: string }[] = [];
 
@@ -69,6 +78,7 @@ function fakeProvisioner(behavior: "succeed" | "throw" = "succeed") {
       if (behavior === "throw") {
         throw new Error("provisioning boom");
       }
+      return FAKE_PROVISIONING_RESULT;
     },
   };
 

@@ -839,6 +839,81 @@ ligada ao `DatabaseProvisioner`/worker.
   de estado, nenhum registro em `tenant_databases`, nenhum tenant `READY`, nenhuma senha ou
   credencial administrativa persistida/logada.
 
+## Prompt 017 — `DatabaseProvisioner` real composto, com health check, implementado
+
+Implementa `HEALTH_CHECK` dos "Provisioning steps" acima e **compõe** todos os componentes
+dos Prompts 013–015 em um `DatabaseProvisioner` real
+(`createPostgresDatabaseProvisioner`) que executa a sequência completa dos passos 1–6 e
+retorna um `ProvisioningResult` real — sem reimplementar nenhuma lógica SQL já existente.
+Ainda **não** ligado ao worker: essa integração exige estender a finalização do worker
+(`REGISTER_DATABASE`), fora do escopo desta tarefa (ver "Finalization" acima).
+
+- **Composição, não reimplementação.** `createPostgresDatabaseProvisioner` orquestra
+  `DatabaseClusterSelector.selectClusterFor()` → `TenantRoleProvisioner.ensureRole()` →
+  `TenantDatabaseProvisioner.ensureDatabase()` → `runTenantMigrations()` →
+  `grantTenantApplicationPrivileges()` → `TenantDatabaseCredentialResolver.resolve()` →
+  `TenantDatabaseHealthChecker.check()`, nessa ordem — nenhum `CREATE ROLE`/`CREATE
+  DATABASE`/`GRANT`/SQL de migration é duplicado no orquestrador; cada etapa continua
+  pertencendo ao componente que já a implementa e já é testado isoladamente.
+- **Credencial administrativa resolvida uma vez, reaplicada em migrations e permissions.**
+  O orquestrador resolve `ClusterAdminCredentialResolver.resolve(cluster.secretReference)`
+  uma única vez e usa o mesmo objeto `target` (`host`/`port`/`database`/`user`/`password`)
+  tanto para `runTenantMigrations()` quanto para `grantTenantApplicationPrivileges()` —
+  torna explícita, por construção (não por convenção), a propriedade que "Credentials and
+  secrets" já exigia: a role que roda as migrations é sempre a mesma para a qual `ALTER
+  DEFAULT PRIVILEGES` foi configurado, porque é literalmente a mesma chamada de conexão.
+- **`TenantDatabaseCredentialResolver` (novo)** — `src/modules/provisioning/application/
+  tenant-database-credential-resolver.ts` — resolve e valida a credencial de aplicação do
+  tenant a partir do `secretReference`, espelhando `ClusterAdminCredentialResolver` para o
+  namespace de secret do tenant. Dois erros: `TenantSecretNotFoundError` (novo — ao
+  contrário do `TenantRoleProvisioner`, onde secret ausente é um dos quatro estados
+  reconciliáveis, aqui o secret já deveria existir, então sua ausência é uma inconsistência
+  real a reportar) e `InvalidTenantSecretError` (reaproveitado de
+  `tenant-role-provisioner.ts` — mesmo tipo de falha, não duplicado com outro nome).
+- **`TenantDatabaseHealthChecker` (novo)** — porta em
+  `application/tenant-database-health-checker.ts`, implementação real em
+  `infrastructure/postgres-tenant-database-health-checker.ts`. Autentica **sempre com a
+  credencial de aplicação do tenant**, nunca a administrativa — provar que o database
+  existe não prova que a aplicação consegue realmente usá-lo; só a credencial do tenant
+  prova isso. Verifica, na mesma conexão: `current_database()` bate com o `databaseName`
+  esperado; `SELECT 1` funciona; e o `schemaVersion` esperado bate com a contagem real de
+  `drizzle.__drizzle_migrations`. Fail-closed: qualquer condição falhando lança
+  `TenantDatabaseHealthCheckError` sem afirmar sucesso e sem alterar nada.
+- **Achado de implementação — `grantTenantApplicationPrivileges` (Prompt 015) precisou de
+  um `GRANT` a mais, não previsto originalmente.** A role do tenant não tinha nenhum
+  privilégio sobre o schema `drizzle` (onde o migrator do `drizzle-orm` guarda sua própria
+  tabela de controle) — sem isso, o health check não conseguiria ler `schemaVersion` usando
+  a credencial do tenant, exatamente como esta ADR exige. Adicionado, mínimo e somente
+  leitura: `GRANT USAGE ON SCHEMA drizzle` + `GRANT SELECT ON
+  drizzle.__drizzle_migrations` para a role do tenant — nenhum outro privilégio sobre esse
+  schema, nunca DDL. Extensão pequena e sinalizada explicitamente ao componente existente do
+  Prompt 015 (reaproveitado, não duplicado em outro lugar), não uma reformulação.
+- **`DatabaseProvisioner.provision()` — mudança de contrato mínima, sem tocar a máquina de
+  estado do worker.** O retorno mudou de `Promise<void>` para `Promise<ProvisioningResult>`
+  em `process-provisioning-job.ts`, exatamente como esta ADR já previa. `processProvisioningJob`
+  continua descartando o valor resolvido (`await provisioner.provision(...)`) — nenhuma
+  linha de lógica da máquina de estado foi alterada, só os dois fakes de teste que
+  implementavam a porta antiga precisaram passar a devolver um `ProvisioningResult`
+  (mudança mecânica, sem novo comportamento testado). `DatabaseProvisioningError` (novo,
+  também em `process-provisioning-job.ts`) encapsula cada etapa com mensagem controlada
+  (`"Failed to select database cluster"`, `"Failed to create tenant credentials"`, etc. —
+  exatamente a lista já registrada em "Security" acima), preservando a causa original só em
+  `.cause`.
+- **Fronteira reafirmada e testada.** Um teste de integração confirma diretamente que, após
+  `provision()` bem-sucedido, `tenants`/`provisioning_jobs`/`tenant_databases` continuam
+  vazias no Control Plane — não apenas "nenhum código escreve lá" por inspeção, mas
+  verificado contra PostgreSQL real.
+- **Idempotência ponta a ponta.** Uma segunda chamada de `provision()` para o mesmo tenant
+  reconhece role, database, migrations e permissions já satisfeitos (cada peça já era
+  idempotente isoladamente — Prompts 013–015) e converge para um `ProvisioningResult`
+  logicamente idêntico, sem rotacionar a senha do tenant. Testado também o caso de falha
+  parcial anterior às migrations (role e database já existentes, migrations nunca rodaram):
+  o retry reconhece ambos e prossegue normalmente.
+- Confirmado: nenhuma migration nova (nem Control Plane, nem Tenant Data Plane), nenhuma
+  alteração funcional no dispatcher, nenhum `DROP` destrutivo, nenhuma rota HTTP nova,
+  nenhuma credencial exposta em `ProvisioningResult` ou em log, worker ainda recusando-se a
+  iniciar (inalterado).
+
 ## Future implementation notes
 
 Registrado para a tarefa que implementar o `DatabaseProvisioner` real, sem comprometer
@@ -853,15 +928,16 @@ detalhes de implementação nesta ADR:
 - Geração de senha via módulo `crypto` nativo do Node (nunca `Math.random()`).
 - `current_step` permanece `text` livre — nenhum enum PostgreSQL é criado para os 7 valores
   listados, conforme já decidido para essa coluna (Prompt 002/007).
-- **Superado pelo Prompt 015** — a implementação de migrations do Tenant Data Plane
-  (`drizzle/tenant/`, `src/infrastructure/database/tenant/`) já existe como peça isolada
-  (`runTenantMigrations`), mas ainda separada da implementação do `DatabaseProvisioner` em
-  si; ambas precisam existir antes do passo `RUN_MIGRATIONS` funcionar de verdade dentro do
-  worker.
-- `DatabaseProvisioner.provision()` deve retornar `ProvisioningResult` (`clusterId`,
-  `databaseName`, `secretReference`, `schemaVersion`) em vez de `void`. A camada de
-  aplicação — não o provisionador — é quem grava esse resultado em `tenant_databases`,
-  ativa o tenant e finaliza o `provisioning_job`.
+- **Superado pelo Prompt 017** — a implementação de migrations do Tenant Data Plane
+  (`drizzle/tenant/`, `src/infrastructure/database/tenant/`) não está mais separada do
+  `DatabaseProvisioner`: `createPostgresDatabaseProvisioner` já a compõe junto com todas as
+  outras peças. Falta apenas ligar esse `DatabaseProvisioner` ao worker (ver "Prompt 017"
+  acima).
+- **Superado pelo Prompt 017** — `DatabaseProvisioner.provision()` já retorna
+  `ProvisioningResult` (`clusterId`, `databaseName`, `secretReference`, `schemaVersion`) em
+  vez de `void`. A camada de aplicação — não o provisionador — continua sendo quem, no
+  futuro, gravará esse resultado em `tenant_databases` e ativará o tenant; essa parte
+  permanece não implementada.
 - **Superado pelo Prompt 015** (ver seção "Prompt 015" acima para o registro completo): esta
   nota recomendava executar `ALTER DEFAULT PRIVILEGES` (ver "Credentials and secrets")
   **antes** de rodar a primeira migration do Tenant Data Plane, tornando o `GRANT` explícito
