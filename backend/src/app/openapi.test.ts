@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { buildApp } from "./build-app.js";
+import { buildTestApp } from "./test-support/build-test-app.js";
 
 /**
  * These tests only ever construct `buildApp()` and read its generated OpenAPI document or
@@ -14,7 +14,7 @@ import { buildApp } from "./build-app.js";
 let app: FastifyInstance;
 
 beforeEach(async () => {
-  app = buildApp();
+  app = buildTestApp();
   await app.ready();
 });
 
@@ -56,7 +56,12 @@ describe("OpenAPI specification", () => {
     const spec = getSpec();
 
     expect(Object.keys(spec.paths)).toEqual(
-      expect.arrayContaining(["/health", "/api/v1/tenants"]),
+      expect.arrayContaining([
+        "/health",
+        "/api/v1/tenants",
+        "/api/v1/properties",
+        "/api/v1/properties/{id}",
+      ]),
     );
   });
 
@@ -83,11 +88,41 @@ describe("OpenAPI specification", () => {
     );
   });
 
+  it("documents the Properties routes with the temporary X-Tenant-Id header and expected responses", () => {
+    const spec = getSpec();
+
+    const create = spec.paths["/api/v1/properties"]?.post;
+    expect(create?.operationId).toBe("createProperty");
+    expect(create?.tags).toEqual(["Properties"]);
+    expect(Object.keys(create?.responses ?? {})).toEqual(
+      expect.arrayContaining(["201", "400", "409", "503", "500"]),
+    );
+
+    const list = spec.paths["/api/v1/properties"]?.get;
+    expect(list?.operationId).toBe("listProperties");
+    expect(list?.tags).toEqual(["Properties"]);
+
+    const getById = spec.paths["/api/v1/properties/{id}"]?.get;
+    expect(getById?.operationId).toBe("getProperty");
+    expect(getById?.tags).toEqual(["Properties"]);
+    expect(Object.keys(getById?.responses ?? {})).toEqual(
+      expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
+    );
+  });
+
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
     const spec = getSpec();
 
     expect(Object.keys(spec.components?.schemas ?? {})).toEqual(
-      expect.arrayContaining(["ErrorResponse", "HealthResponse", "CreateTenantRequest", "Tenant"]),
+      expect.arrayContaining([
+        "ErrorResponse",
+        "HealthResponse",
+        "CreateTenantRequest",
+        "Tenant",
+        "CreatePropertyRequest",
+        "Property",
+        "PropertyList",
+      ]),
     );
   });
 

@@ -146,7 +146,7 @@ async function listPublicTables(databaseName: string): Promise<string[]> {
 }
 
 describe("Tenant Data Plane — migrations and permissions", () => {
-  it("applies users/audit_logs/outbox_events to an empty tenant database", async () => {
+  it("applies users/audit_logs/outbox_events/properties to an empty tenant database", async () => {
     const { secretStore } = buildDeps();
     await seedAdminSecret(secretStore);
     const tenantId = freshTenantId();
@@ -154,8 +154,13 @@ describe("Tenant Data Plane — migrations and permissions", () => {
 
     const result = await runTenantMigrations(target);
 
-    expect(result.schemaVersion).toBe(1);
-    await expect(listPublicTables(databaseName)).resolves.toEqual(["audit_logs", "outbox_events", "users"]);
+    expect(result.schemaVersion).toBe(2);
+    await expect(listPublicTables(databaseName)).resolves.toEqual([
+      "audit_logs",
+      "outbox_events",
+      "properties",
+      "users",
+    ]);
   });
 
   it("is idempotent: a second run applies nothing new and reports the same schemaVersion", async () => {
@@ -179,7 +184,12 @@ describe("Tenant Data Plane — migrations and permissions", () => {
     const results = await Promise.all([runTenantMigrations(target), runTenantMigrations(target)]);
 
     expect(results[0]).toEqual(results[1]);
-    await expect(listPublicTables(databaseName)).resolves.toEqual(["audit_logs", "outbox_events", "users"]);
+    await expect(listPublicTables(databaseName)).resolves.toEqual([
+      "audit_logs",
+      "outbox_events",
+      "properties",
+      "users",
+    ]);
   });
 
   it("grants the tenant role DML but never DDL, and the role can actually operate the table", async () => {

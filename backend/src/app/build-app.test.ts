@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildApp } from "./build-app.js";
+import { buildTestApp } from "./test-support/build-test-app.js";
 
 describe("GET /health", () => {
   it("returns 200 with status ok", async () => {
-    const app = buildApp();
+    const app = buildTestApp();
 
     const response = await app.inject({
       method: "GET",
