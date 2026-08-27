@@ -202,9 +202,10 @@ completo (`DatabaseClusterSelector` → resolvedores de credencial → `TenantRo
 `DatabaseProvisioner` real existe") foi removida, já que um existe desde o Prompt 017. Uma
 trava mais estreita e ainda real permanece: **recusa-se a iniciar especificamente sob
 `NODE_ENV=production`**, porque não existe ainda um provider de `SecretStore` de produção
-(AWS Secrets Manager, Vault, ...) — usar `createInMemorySecretStore` (que já se recusa a
-construir sob produção, por conta própria) em um deploy real seria fingir prontidão que não
-existe. Fora de produção (`development`/`test`), o worker inicia e processa jobs de verdade.
+([ADR-004](adr/ADR-004-production-secret-store.md): AWS Secrets Manager é o provider alvo,
+status PLANNED) — usar `createInMemorySecretStore` (que já se recusa a construir sob
+produção, por conta própria) em um deploy real seria fingir prontidão que não existe. Fora de
+produção (`development`/`test`), o worker inicia e processa jobs de verdade.
 
 **IMPLEMENTED** — a arquitetura de provisionamento do database físico do tenant, decidida em
 [ADR-003](adr/ADR-003-tenant-database-provisioning.md), agora está **totalmente
@@ -348,7 +349,8 @@ nunca reabrir `PUBLIC` como compensação (fail-closed). `GRANT USAGE`/DML em ta
 `ALTER DEFAULT PRIVILEGES`, migrations de tenant e health check continuam fora do escopo
 deste componente.
 
-**PLANNED** — `SecretStore` de produção, política de retry para jobs `FAILED`.
+**PLANNED** — `SecretStore` de produção ([ADR-004](adr/ADR-004-production-secret-store.md):
+AWS Secrets Manager), política de retry para jobs `FAILED`.
 `DatabaseProvisioner` real, criação de registros em `tenant_databases`, ativação do tenant
 (`tenants.status = READY`) e recovery de jobs `RUNNING` abandonados (inclui crash durante a
 finalização — Prompt 019) estão **IMPLEMENTED** — ver abaixo.
@@ -466,40 +468,95 @@ Tenants podem, no futuro, estar distribuídos entre múltiplos clusters PostgreS
 determinados clientes podem ter infraestrutura PostgreSQL dedicada. **O código de domínio
 nunca deve assumir que todos os tenants estão no mesmo database ou cluster.**
 
-Estado atual: apenas a infraestrutura local (`postgres-tenants` no Docker Compose) está
-disponível. Nenhum provisioning dinâmico de databases existe ainda.
+Estado atual: a infraestrutura local (`postgres-tenants` no Docker Compose) está disponível,
+e o provisioning dinâmico de databases de tenant está implementado desde os Prompts 011–018
+(ver seção Control Plane acima) — cada tenant `READY` já possui um database físico real,
+provisionado sob demanda.
 
-## Resolução de tenant **(futuro)**
+## Runtime tenant database (resolver + connection manager)
 
-Fluxo planejado para determinar qual database físico atender por requisição:
+Fluxo completo, do request até o database físico do tenant:
 
 ```text
 Request
    ↓
-Authentication
+Authentication          (futuro — ver "Tenant context HTTP" abaixo)
    ↓
-Tenant Context
+Tenant Context           (futuro)
    ↓
-Tenant Registry
+TenantDatabaseResolver  ← IMPLEMENTED (Prompt 020)
    ↓
-Database Resolver
+TenantDatabaseConnectionManager ← IMPLEMENTED (Prompt 020)
    ↓
-Connection Manager
-   ↓
-Tenant Database
+Tenant Database (Tenant Data Plane, real PostgreSQL)
 ```
 
-Nenhuma parte desse fluxo existe ainda. Em particular:
+**IMPLEMENTED** (Prompt 020) — `TenantDatabaseResolver`
+(`src/modules/tenant-runtime/application/tenant-database-resolver.ts`,
+`.../infrastructure/drizzle-tenant-database-resolver.ts`): dado um `tenantId`, resolve um
+`TenantDatabaseTarget` (`tenantId`, `clusterId`, `host`, `port`, `databaseName`,
+`secretReference`, `schemaVersion` — nunca uma senha) consultando sempre o Control Plane, na
+ordem `tenants → tenant_databases → database_clusters`, e nunca derivando o database
+diretamente de `tenantId`/`slug` (ADR-001/CLAUDE.md) mesmo sendo o naming determinístico.
+Cada chamada é revalidada do zero — nunca cacheada entre chamadas — para que um tenant
+suspenso após uma resolução anterior bem-sucedida seja recusado na próxima:
 
-- **Tenant Registry (futuro)**: mapeamento de qual tenant vive em qual database/cluster,
-  mantido no Control Plane. As tabelas que sustentarão esse mapeamento
-  (`tenant_databases`, `database_clusters`) já existem, mas nenhum código de leitura,
-  resolução ou cache foi implementado.
-- **Tenant Resolver (futuro)**: resolve a identidade do tenant a partir do contexto
-  autenticado da requisição — nunca a partir de parâmetros informados livremente pelo
-  cliente (`databaseName`, `databaseUrl`, etc.).
-- **Tenant Connection Manager (futuro)**: gerencia pools de conexão por tenant/database,
-  incluindo cache e ciclo de vida de conexões.
+```text
+tenants.status != READY               → TenantNotReadyError
+tenant_databases ausente/status != READY → TenantDatabaseNotAvailableError
+database_clusters ausente/status != ACTIVE → TenantDatabaseRuntimeConfigurationError
+```
+
+**IMPLEMENTED** (Prompt 020) — `TenantDatabaseConnectionManager`
+(`src/modules/tenant-runtime/application/tenant-database-connection-manager.ts`,
+`.../infrastructure/pg-tenant-database-connection-manager.ts`): dado um `TenantDatabaseTarget`
+já resolvido, abre (e reutiliza) uma conexão real, sempre autenticada com a **credencial de
+aplicação do tenant** resolvida de `target.secretReference` via `TenantDatabaseCredentialResolver`
+— nunca a credencial administrativa do cluster (`database_clusters.secret_reference`), que
+permanece de uso exclusivo de provisioning/migrations/manutenção. Um `pg.Pool` (com
+`drizzle-orm/node-postgres`, tipado exclusivamente com o schema do Tenant Data Plane — tabelas
+do Control Plane não aparecem nesse tipo) por tenant, cacheado por `tenantId` em um `Map`
+limitado (`maxPools`, default 50) com eviction least-recently-used — nunca um único `Pool`
+compartilhado alternando database/credential por chamada, e nunca pools ilimitados para
+tenants ilimitados. A resolução da credencial acontece (e pode falhar) antes de qualquer
+`pg.Pool` ser criado — um secret ausente ou inválido nunca resulta em tentativa de conexão.
+`invalidate(tenantId)` fecha e descarta o pool cacheado de um tenant (preparado para uma
+futura rotação de credencial, ainda não implementada); `close()` encerra todos os pools
+cacheados, para uso em shutdown gracioso.
+
+Estratégia de pooling desta fase (avaliada e documentada, seção 13 do Prompt 020): *lazy pool
+per tenant* + *cache limitado por capacidade* (eviction least-recently-used quando `maxPools`
+é atingido). Deliberadamente **não** implementado nesta tarefa: eviction proativa por
+ociosidade (remover do cache o pool de um tenant sem uso há N minutos) — cada `pg.Pool`
+individual já usa `idleTimeoutMillis` para encerrar conexões físicas ociosas *dentro* do seu
+próprio pool, mas isso não remove a entrada do tenant do cache do connection manager. Uma
+eviction por tempo ocioso é um refinamento futuro razoável, não implementado por ser
+prematuro sem um padrão real de tráfego observado ainda.
+
+Isolamento físico A/B (confirmado com dois tenants reais, provisionados ponta a ponta, e
+revalidado no mesmo teste com o mesmo tipo de prova já usada no nível do provisionador —
+`postgres-tenant-database-provisioner.test.ts` — de que a credencial de um tenant nunca
+consegue conectar ao database de outro): **IMPLEMENTED**
+(`src/modules/tenant-runtime/e2e-tenant-database-runtime.test.ts`).
+
+Nenhuma rota HTTP nova consome este runtime ainda — os testes chamam
+`TenantDatabaseResolver.resolve()`/`TenantDatabaseConnectionManager.withTenantDatabase()`
+diretamente. Por não haver ainda nenhum consumidor HTTP real, o connection manager não está
+instanciado em `src/app/build-app.ts`/`src/main/server.ts` — essa composição (e o
+correspondente hook `onClose` do Fastify) fica para quando um primeiro endpoint de negócio
+realmente precisar dele, evitando uma composição sem consumidor concreto (CLAUDE.md).
+
+### Tenant context HTTP **(futuro)**
+
+- **Tenant Registry**: hoje é diretamente `tenant_databases`/`database_clusters`, consultados
+  pelo `TenantDatabaseResolver` — não existe (nem é necessária ainda) uma camada de cache
+  separada.
+- **Tenant Resolver HTTP (futuro)**: identificar qual `tenantId` uma requisição autenticada
+  representa. Não decidido nesta tarefa (Prompt 020 deliberadamente não implementa
+  autenticação) — a futura identificação pode vir do contexto autenticado e/ou de
+  domínio/slug, dependendo da rota; `x-tenant-id` não é assumido como mecanismo definitivo.
+  Nunca a partir de parâmetros informados livremente pelo cliente (`databaseName`,
+  `databaseUrl`, etc.).
 
 ## Redis / BullMQ
 
@@ -516,7 +573,7 @@ componente independente do `Worker` BullMQ — nunca redespacha um job reclamado
 fila, chama a camada de aplicação diretamente. `entrypoint` do worker ainda se recusa a
 iniciar especificamente sob `NODE_ENV=production`, por não existir ainda um provider de
 `SecretStore` de produção (ver seção Control Plane) — essa trava não mudou com o Prompt 019.
-**PLANNED**: `SecretStore` de produção em si.
+**PLANNED**: `SecretStore` de produção em si ([ADR-004](adr/ADR-004-production-secret-store.md)).
 
 ## Transactional Outbox **(futuro)**
 
