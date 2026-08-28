@@ -8,7 +8,7 @@ import { createProperty } from "../application/create-property.js";
 import { getProperty } from "../application/get-property.js";
 import { listProperties } from "../application/list-properties.js";
 import { updateProperty } from "../application/update-property.js";
-import type { UpdatePropertyInput } from "../application/property-repository.js";
+import type { ListPropertiesInput, PropertyListFilters, UpdatePropertyInput } from "../application/property-repository.js";
 import type { Property } from "../domain/property.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
 import { mapPropertyRouteError } from "./property-error-mapper.js";
@@ -16,7 +16,12 @@ import { tenantIdHeaderSchema } from "./property-openapi.schema.js";
 import {
   createPropertyBodySchema,
   listPropertiesQuerySchema,
+  PROPERTY_SORT_FIELDS,
+  PROPERTY_STATUSES,
+  PROPERTY_TYPES,
   propertyIdParamsSchema,
+  SORT_ORDERS,
+  TRANSACTION_TYPES,
   updatePropertyBodySchema,
 } from "./property-request.schema.js";
 
@@ -164,7 +169,12 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
           operationId: "listProperties",
           summary: "List properties",
           description:
-            "Lists properties in the tenant's own database, ordered by created_at DESC, id DESC.",
+            "Lists properties in the tenant's own database, with optional structured filters " +
+            "(AND-combined) and sorting. With no parameters, defaults to created_at DESC, id " +
+            "DESC — the same behavior as before filters/sorting existed. Unknown query " +
+            "parameters are rejected with 400. Examples:\n" +
+            "`/api/v1/properties?status=ACTIVE&property_type=APARTMENT&city=S%C3%A3o%20Paulo`\n" +
+            "`/api/v1/properties?price_min=300000.00&price_max=600000.00&sort=price&order=asc`",
           tags: ["Properties"],
           headers: tenantIdHeaderSchema,
           querystring: {
@@ -172,7 +182,41 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
             properties: {
               page: { type: "integer", minimum: 1, description: "Defaults to 1." },
               limit: { type: "integer", minimum: 1, maximum: 100, description: "Defaults to 20, capped at 100." },
+              status: { type: "string", enum: [...PROPERTY_STATUSES], description: "Exact match." },
+              property_type: { type: "string", enum: [...PROPERTY_TYPES], description: "Exact match." },
+              transaction_type: { type: "string", enum: [...TRANSACTION_TYPES], description: "Exact match." },
+              city: {
+                type: "string",
+                description: "Case-insensitive, exact match after trim (e.g. \"São Paulo\").",
+              },
+              state: {
+                type: "string",
+                description: "Brazilian UF, 2 letters, normalized to uppercase (e.g. \"SP\").",
+              },
+              price_min: { type: "string", description: "Decimal string, > 0 (e.g. \"300000.00\")." },
+              price_max: {
+                type: "string",
+                description: "Decimal string, > 0, must be >= price_min (e.g. \"600000.00\").",
+              },
+              bedrooms_min: { type: "integer", minimum: 0 },
+              bathrooms_min: { type: "integer", minimum: 0 },
+              parking_spaces_min: { type: "integer", minimum: 0 },
+              area_min: { type: "string", description: "Decimal string, > 0 (e.g. \"60.00\")." },
+              area_max: {
+                type: "string",
+                description: "Decimal string, > 0, must be >= area_min (e.g. \"120.00\").",
+              },
+              sort: {
+                type: "string",
+                enum: [...PROPERTY_SORT_FIELDS],
+                description: "Defaults to created_at. Always tie-broken by id for stable pagination.",
+              },
+              order: { type: "string", enum: [...SORT_ORDERS], description: "Defaults to desc." },
             },
+            examples: [
+              { status: "ACTIVE", property_type: "APARTMENT", city: "São Paulo", price_max: "600000.00" },
+              { price_min: "300000.00", price_max: "600000.00", sort: "price", order: "asc" },
+            ],
           },
           response: {
             200: { description: "Paginated list of properties", $ref: "PropertyList#" },
@@ -191,10 +235,36 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
           return badRequest(reply, "Invalid query parameters", parsedQuery.error.issues);
         }
 
+        const query = parsedQuery.data;
+        // Only defined filters are copied — the repository/SQL layer treats an absent key as
+        // "no restriction on this column" (this task, section 29: the HTTP layer normalizes and
+        // validates; it never builds SQL itself).
+        const filters: PropertyListFilters = {
+          status: query.status,
+          propertyType: query.property_type,
+          transactionType: query.transaction_type,
+          city: query.city,
+          state: query.state,
+          priceMin: query.price_min,
+          priceMax: query.price_max,
+          bedroomsMin: query.bedrooms_min,
+          bathroomsMin: query.bathrooms_min,
+          parkingSpacesMin: query.parking_spaces_min,
+          areaMin: query.area_min,
+          areaMax: query.area_max,
+        };
+        const listInput: ListPropertiesInput = {
+          page: query.page,
+          limit: query.limit,
+          filters,
+          sort: query.sort,
+          order: query.order,
+        };
+
         const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
         const result = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
           const repository = createDrizzlePropertyRepository(db);
-          return listProperties(repository, { page: parsedQuery.data.page, limit: parsedQuery.data.limit });
+          return listProperties(repository, listInput);
         });
 
         return reply.send({
