@@ -243,6 +243,7 @@ const EXAMPLE_PROPERTY_MEDIA = {
   original_filename: "foto-sala.jpg",
   position: 0,
   is_cover: true,
+  processing_status: "PROCESSING",
   created_at: "2026-08-28T12:00:00.000Z",
   updated_at: "2026-08-28T12:00:00.000Z",
 } as const;
@@ -268,6 +269,16 @@ export const propertyMediaSchema = {
     original_filename: { type: "string", nullable: true },
     position: { type: "integer", minimum: 0 },
     is_cover: { type: "boolean", description: "At most one media per property has this set to true." },
+    processing_status: {
+      type: "string",
+      enum: ["PROCESSING", "READY", "FAILED"],
+      description:
+        "Lifecycle of this media's derived variants (thumbnail/card/detail) — never about the " +
+        "original itself, which is already usable via public_url in every state. New uploads " +
+        "start PROCESSING. No variant processing is implemented yet — every media currently " +
+        "either starts PROCESSING (new uploads) or was migrated to READY (media that existed " +
+        "before this field, meaning \"original operational,\" not \"variants exist\").",
+    },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
@@ -280,6 +291,7 @@ export const propertyMediaSchema = {
     "original_filename",
     "position",
     "is_cover",
+    "processing_status",
     "created_at",
     "updated_at",
   ],

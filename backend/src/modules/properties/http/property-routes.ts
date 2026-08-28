@@ -86,6 +86,7 @@ function toPropertyMediaResponse(media: PropertyMedia) {
     original_filename: media.originalFilename,
     position: media.position,
     is_cover: media.isCover,
+    processing_status: media.processingStatus,
     created_at: media.createdAt.toISOString(),
     updated_at: media.updatedAt.toISOString(),
   };

@@ -142,7 +142,7 @@ describe("createPostgresDatabaseProvisioner", () => {
       clusterId: expect.any(String),
       databaseName: expectedNames.databaseName,
       secretReference: expectedNames.secretReference,
-      schemaVersion: 5,
+      schemaVersion: 6,
     });
 
     // Never the cluster admin secret reference — only the tenant's own.
@@ -206,6 +206,6 @@ describe("createPostgresDatabaseProvisioner", () => {
     const provisioner = buildProvisioner(secretStore);
     const result = await provisioner.provision({ provisioningJobId: randomUUID(), tenantId });
 
-    expect(result.schemaVersion).toBe(5);
+    expect(result.schemaVersion).toBe(6);
   });
 });

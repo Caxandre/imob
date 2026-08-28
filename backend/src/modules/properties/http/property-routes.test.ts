@@ -1208,6 +1208,7 @@ describe("Properties HTTP routes", () => {
           size_bytes: bytes.length,
           original_filename: "foto.jpg",
           position: 0,
+          processing_status: "PROCESSING",
         });
         expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
         expect(body.object_key).toBeUndefined();

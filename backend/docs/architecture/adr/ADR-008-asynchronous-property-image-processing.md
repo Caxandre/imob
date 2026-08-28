@@ -3,8 +3,16 @@
 ## Status
 
 Aceito. Implementação: **PLANNED / DESIGNED** (Prompt 029) — esta ADR define a arquitetura;
-nenhum código de processamento de imagem é implementado nesta tarefa. `sharp` é o provider
-escolhido, mas **não instalado**.
+nenhum código de processamento de imagem foi implementado naquela tarefa. `sharp` é o provider
+escolhido, mas **ainda não instalado**.
+
+**Prompt 030 — IMPLEMENTED (foundation only)**: a infraestrutura persistente que este documento
+descreve abaixo — `property_media.processing_status`, a tabela `property_media_variants`, o
+contrato da fila BullMQ (`media-processing`/`process-property-media`) e o registro transacional
+da intenção de processar via `outbox_events` — está implementada. Ainda **PLANNED**: qualquer
+processamento real de imagem, o worker que consome a fila, e o dispatcher que efetivamente
+publica um job a partir de um evento de outbox (ver "Queue and worker" e "Deferred: outbox
+dispatcher across tenants" abaixo, ambos atualizados pelo Prompt 030).
 
 ## Context
 
@@ -217,6 +225,27 @@ Fila BullMQ distinta da fila de provisionamento (`tenant-provisioning`) — nunc
 queue: media-processing
 job:   process-property-media
 ```
+
+**Atualizado pelo Prompt 030 — boundary transacional antes do BullMQ.** O upload HTTP nunca
+chama `queue.add()` diretamente. Chamar PostgreSQL e BullMQ como duas escritas independentes
+logo após o commit do upload reintroduziria exatamente o problema de dual-write que o
+provisionamento já resolveu de outra forma (dispatcher + dispatch lease, ADR-002) — se o
+`INSERT` de `property_media` tiver sucesso mas o `queue.add()` falhar (Redis indisponível,
+timeout, o processo morrer entre as duas chamadas), a intenção de processar essa mídia se perde
+silenciosamente, sem nenhum rastro no PostgreSQL para uma reconciliação futura encontrar.
+
+A correção adotada: a mesma transação PostgreSQL que insere `property_media` também insere um
+evento no `outbox_events` do Tenant Data Plane — tabela já existente em todo tenant database
+desde a primeira migration, reaproveitada aqui em vez de uma tabela de jobs nova (`aggregate_type
+= "PROPERTY_MEDIA"`, `aggregate_id = mediaId`, `event_type =
+"PROPERTY_MEDIA_PROCESSING_REQUESTED"`, `payload = {propertyId, mediaId}` — `tenantId` nunca no
+payload, já implícito por o outbox viver dentro do database daquele único tenant). Isso garante
+que "a mídia existe" e "a intenção de processá-la foi registrada" sejam atômicas — uma delas
+nunca existe sem a outra — sem depender do BullMQ/Redis estarem disponíveis no momento do
+upload. Publicar o job real no BullMQ a partir desse evento de outbox é responsabilidade de um
+dispatcher **ainda não implementado** (ver "Deferred: outbox dispatcher across tenants" abaixo)
+— o Prompt 030 implementou apenas o registro da intenção (outbox) e o contrato da fila em si
+(nomes/payload/validação Zod), nunca um publisher/consumer reais.
 
 **Payload mínimo**, mesmo princípio já aplicado a `ProvisionTenantJobPayload` (ADR-002):
 PostgreSQL/R2 continuam a fonte de verdade, o job só precisa de identificadores suficientes para
@@ -441,6 +470,28 @@ vez, não antes.
 Métricas futuras possíveis, não implementadas nesta tarefa: duração de processamento, contagem
 de falhas, profundidade da fila. Logs seguros (ver "Security" acima) já são o mínimo esperado
 desde a primeira implementação real.
+
+## Deferred: outbox dispatcher across tenants
+
+Registrado explicitamente pelo Prompt 030 (seção 42/69/74) como uma pendência arquitetural real,
+não escondida: `property_media`/`outbox_events` vivem no Tenant Data Plane — um database físico
+por tenant (ADR-001) — então não existe hoje um único lugar para consultar "todo evento de
+outbox pendente, em todos os tenants" da forma que o dispatcher de provisionamento consulta
+`provisioning_jobs` (Control Plane, um único database) hoje.
+
+Explicitamente **rejeitado** sem um desenho real: um dispatcher ingênuo que, em loop, conecta a
+cada tenant database conhecido e faz `poll` no `outbox_events` de cada um. Isso escalaria mal (N
+conexões abertas/fechadas repetidamente, uma por tenant, a cada ciclo) e não tem uma fonte óbvia
+de "quais tenant databases existem agora" sem reconsultar o Control Plane a cada ciclo também.
+
+Este documento **não decide** a solução — apenas registra que ela precisa existir antes que um
+worker de `sharp` real possa consumir jobs publicados a partir desses eventos de outbox. Um
+Prompt futuro precisa resolver especificamente: como descobrir os tenant databases ativos, como
+paralelizar/agendar o polling entre eles sem um custo de conexão proporcional ao número de
+tenants a cada ciclo, e como esse dispatcher se relaciona (ou não) com o dispatcher de
+provisionamento já existente (ADR-002) — provavelmente um componente novo e independente, dado
+que o domínio (multi-database) é estruturalmente diferente do de `provisioning_jobs`
+(single-database).
 
 ## Consequência para o Prompt 028 — delete
 
