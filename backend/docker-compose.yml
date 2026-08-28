@@ -21,8 +21,11 @@ services:
       timeout: 5s
       retries: 5
 
-  # Cluster where tenant-owned databases will be provisioned later, one per tenant.
-  # No dynamic provisioning happens yet — this only makes the server available locally.
+  # Cluster where tenant-owned databases are provisioned dynamically, one per tenant (ADR-003).
+  # This only makes the PostgreSQL server available locally — the database_clusters row that
+  # points at it (host "localhost", port 5433 below) still needs to exist in the Control
+  # Plane; `pnpm dev:full` bootstraps that row automatically (see .env.example), other
+  # entrypoints require it to be seeded manually.
   postgres-tenants:
     image: postgres:17-alpine
     container_name: imob-postgres-tenants

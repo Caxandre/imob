@@ -818,15 +818,37 @@ pnpm dev:dispatcher     # terminal separado — continua processo independente
 pnpm dev:full           # API + provisioning worker, SecretStore compartilhado
 ```
 
-**Limitação pré-existente, não introduzida nem resolvida por esta tarefa**: nenhum mecanismo
-neste código semeia automaticamente o secret administrativo do cluster
-(`database_clusters.secret_reference`) em um `SecretStore` de um processo real em execução —
-todo teste que precisa dele chama `secretStore.put()` diretamente, dentro do próprio processo
-de teste. Isso significa que provisionar um tenant de verdade via `pnpm dev:full`/Swagger
-(`POST /api/v1/tenants` → aguardar `READY`) hoje ainda exige um passo manual adicional fora
-deste código para colocar esse secret no `SecretStore` do processo em execução — uma lacuna
-que já existia antes deste Prompt (nada, antes dele, permitia provisionar um tenant real fora
-de um teste automatizado) e que continua fora do escopo desta tarefa resolver.
+**IMPLEMENTED** (Prompt 024) — `bootstrapLocalDevCluster()`
+(`src/main/dev-full-bootstrap.ts`) closes the manual-bootstrap gap above, for `dev-full.ts`
+specifically. Called once at `dev-full.ts` startup, before `app.listen()`:
+
+```text
+dev-full.ts startup
+    ↓
+createInMemorySecretStore()  (fresh, empty — every process restart)
+    ↓
+bootstrapLocalDevCluster(secretStore, logger, { clusterName, host, port, adminUsername, adminPassword })
+    ├── database_clusters row for TENANT_DATABASE_DEFAULT_CLUSTER: insert only if missing
+    │   (onConflictDoNothing on the unique name — idempotent by discovery, CLAUDE.md; never
+    │   overwrites an already-existing row, so a locally-customized one is never reset)
+    └── secretStore.put(cluster.secretReference, {username, password}): unconditional, every
+        call — the SecretStore itself never survives a restart even though the
+        database_clusters row does, so this is what actually re-closes the gap each time
+    ↓
+POST /api/v1/tenants → provisioning succeeds without any manual step
+```
+
+Connection details come from four new **dev-only** env vars, read exclusively by
+`dev-full.ts` — `DEV_BOOTSTRAP_CLUSTER_HOST`/`_PORT`/`_ADMIN_USERNAME`/`_ADMIN_PASSWORD`
+(all optional, defaulting to `postgres-tenants`'s Docker Compose values). `server.ts`,
+`provisioning-worker.ts` and `provisioning-dispatcher.ts` never read them and never call
+`bootstrapLocalDevCluster()` — running them as separate processes still requires the
+`database_clusters` row and admin secret to be seeded manually, exactly as before this Prompt;
+this task changes nothing about production behavior or about any entrypoint other than
+`dev-full.ts`. Proven end to end
+(`src/main/dev-full-bootstrap.test.ts`): after only `bootstrapLocalDevCluster()` (no other
+manual step), `POST /api/v1/tenants` through the real HTTP app provisions a real tenant
+database and the tenant reaches `READY`.
 
 ## Transactional Outbox **(futuro)**
 
