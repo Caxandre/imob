@@ -4,6 +4,8 @@ import { buildApp } from "../app/build-app.js";
 import { env } from "../config/env.js";
 import { controlPlanePool } from "../infrastructure/database/control-plane/client.js";
 import { createLoggerOptions } from "../infrastructure/logger/logger.js";
+import { createCloudflareR2ObjectStorage } from "../infrastructure/object-storage/cloudflare-r2-object-storage.js";
+import { ObjectStorageConfigurationError } from "../infrastructure/object-storage/object-storage.js";
 import { createTenantDatabaseCredentialResolver } from "../modules/provisioning/application/tenant-database-credential-resolver.js";
 import { createInMemorySecretStore } from "../modules/provisioning/test-support/in-memory-secret-store.js";
 import { createPgTenantDatabaseConnectionManager } from "../modules/tenant-runtime/infrastructure/pg-tenant-database-connection-manager.js";
@@ -40,6 +42,11 @@ import { bootstrapLocalDevCluster } from "./dev-full-bootstrap.js";
  * fresh `docker compose up -d` + `.env` with no separate manual bootstrap step. Bootstrap
  * connection details come from the `DEV_BOOTSTRAP_CLUSTER_*` env vars (see `.env.example`) —
  * dev-only, read by nothing else.
+ *
+ * Since Prompt 027, this runtime also registers property media upload routes, which require a
+ * real Cloudflare R2 adapter (ADR-006) — `R2_ACCOUNT_ID`/`R2_ACCESS_KEY_ID`/
+ * `R2_SECRET_ACCESS_KEY`/`R2_BUCKET`/`R2_PUBLIC_URL` are now a real requirement to start
+ * `dev:full` (never lazily deferred to the first upload attempt — section 51/52).
  */
 const logger = pino(createLoggerOptions());
 
@@ -70,7 +77,32 @@ const tenantDatabaseConnectionManager = createPgTenantDatabaseConnectionManager(
 
 const workerRuntime = createProvisioningWorkerRuntime(secretStore, logger);
 
-const app = buildApp({ tenantDatabaseConnectionManager });
+// Same eager, fail-fast construction as server.ts (this task, section 52) — dev:full also
+// registers the property media upload routes, so R2 env becomes a real requirement to start
+// this runtime too, not something that only surfaces on the first upload attempt.
+let objectStorage;
+try {
+  objectStorage = createCloudflareR2ObjectStorage({
+    accountId: env.R2_ACCOUNT_ID,
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    bucket: env.R2_BUCKET,
+    publicUrl: env.R2_PUBLIC_URL,
+  });
+} catch (error) {
+  if (error instanceof ObjectStorageConfigurationError) {
+    logger.fatal(
+      { operation: "dev-full.startup", err: error },
+      "Refusing to start: Cloudflare R2 is not fully configured, but this runtime registers " +
+        "property media upload routes that require it. Set R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/" +
+        "R2_SECRET_ACCESS_KEY/R2_BUCKET/R2_PUBLIC_URL — see .env.example and ADR-006.",
+    );
+    process.exit(1);
+  }
+  throw error;
+}
+
+const app = buildApp({ tenantDatabaseConnectionManager, objectStorage });
 
 try {
   await app.listen({ host: env.HOST, port: env.PORT });

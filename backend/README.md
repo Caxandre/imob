@@ -204,6 +204,13 @@ Swagger UI (com pnpm dev:full em execução)
   → Properties → DELETE /api/v1/properties/{id} → Try it out
     → preencher X-Tenant-Id e o id → Execute → conferir 204 (arquivamento, nunca exclusão
       física — GET no mesmo id continua retornando 200 com status "INACTIVE")
+  → Properties → POST /api/v1/properties/{id}/media → Try it out
+    → preencher X-Tenant-Id e o id de um property DRAFT/ACTIVE → escolher um arquivo
+      (multipart, campo "file"; apenas image/jpeg, image/png ou image/webp, até 10MB — MIME
+      validado pelo header e pelos magic bytes do arquivo, nunca só pela extensão) → Execute
+      → conferir 201 (property INACTIVE retorna 409 — arquivar bloqueia novos uploads)
+  → Properties → GET /api/v1/properties/{id}/media → Try it out
+    → preencher X-Tenant-Id e o id → Execute → conferir a galeria (ordenada por position)
 ```
 
 `X-Tenant-Id` é **temporário** — um mecanismo de desenvolvimento/integração enquanto
@@ -216,10 +223,10 @@ tenant provisionado pelo worker separado falha ao resolver a credencial do tenan
 seção "Local development runtime" em `ARCHITECTURE.md`.
 
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST /api/v1/tenants` (tag
-**Tenants**), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`
-(tag **Properties**) — `DELETE` arquiva (`status = INACTIVE`), nunca exclui fisicamente.
-Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o Swagger descreve
-apenas a interface HTTP pública.
+**Tenants**), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`,
+`POST/GET /api/v1/properties/{id}/media` (tag **Properties**) — `DELETE` arquiva
+(`status = INACTIVE`), nunca exclui fisicamente. Nenhuma rota interna de worker/dispatcher/
+provisioning é exposta aqui — o Swagger descreve apenas a interface HTTP pública.
 
 ## Cloudflare R2 (object storage)
 
@@ -230,9 +237,10 @@ Consumido através da porta `ObjectStorage`
 (`createCloudflareR2ObjectStorage`, `src/infrastructure/object-storage/cloudflare-r2-object-storage.ts`)
 usa `@aws-sdk/client-s3` contra a API S3-compatível do R2.
 
-Env vars (ver `.env.example`) — todas opcionais no parse global (nenhum processo hoje exige
-storage para subir), mas exigidas como conjunto completo no momento em que o adapter R2 é
-efetivamente construído:
+Env vars (ver `.env.example`) — todas opcionais no parse global (nenhum outro processo além de
+`pnpm dev`/`pnpm start` exige storage para subir), mas exigidas como conjunto completo desde o
+startup de `pnpm dev:full`/`pnpm start` (Prompt 027: essas rotas registram upload de mídia,
+então R2 incompleto faz o servidor recusar-se a subir, nunca falhar só no primeiro upload):
 
 ```text
 R2_ACCOUNT_ID
@@ -245,8 +253,8 @@ R2_PUBLIC_URL
 - O bucket referenciado por `R2_BUCKET` já deve existir — este código nunca cria um bucket.
 - **Nunca** commitar credenciais reais. `.env` já está no `.gitignore`; `.env.example` nunca
   deve conter valores reais, só os nomes das variáveis.
-- Nenhum endpoint HTTP usa isso ainda — é só a fundação de infraestrutura (Prompt 026).
-  Upload de mídia de imóveis é trabalho futuro.
+- Desde o Prompt 027, `POST /api/v1/properties/{id}/media` é o consumidor real — ver a seção
+  "Testando Properties" acima.
 
 Teste de integração real (opcional, nunca roda em CI): ver
 `src/infrastructure/object-storage/cloudflare-r2-object-storage.integration.test.ts` —

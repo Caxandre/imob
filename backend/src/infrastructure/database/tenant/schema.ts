@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
+  bigint,
   check,
   customType,
   index,
@@ -10,6 +11,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
@@ -176,5 +178,55 @@ export const properties = pgTable(
       sql`${t.parkingSpaces} IS NULL OR ${t.parkingSpaces} >= 0`,
     ),
     check("properties_area_m2_positive", sql`${t.areaM2} IS NULL OR ${t.areaM2} > 0`),
+  ],
+);
+
+/**
+ * Media (photos) attached to a property (Prompt 027). No `tenant_id`, same reasoning as every
+ * other table here (ADR-001). Binaries themselves never touch this database — `object_key`/
+ * `public_url` are references into Cloudflare R2 (ADR-006/ADR-007); this row is metadata only.
+ * `property_id` FK is `RESTRICT` on delete/update — `properties` rows are never physically
+ * deleted in the normal application flow (CLAUDE.md), so a cascading delete of media has no
+ * real trigger today; `RESTRICT` is the conservative choice that never silently deletes media
+ * data out from under a hypothetical future hard-delete path. `UNIQUE(object_key)` — never two
+ * rows pointing at the same R2 object. `UNIQUE(property_id, position)` formalizes gallery order
+ * and doubles as the index `listByProperty()` needs (`WHERE property_id = ... ORDER BY
+ * position`) — no separate index on `property_id` alone (it would be redundant with this
+ * unique index's leading column). `mime_type` is restricted by CHECK to the same three values
+ * `ALLOWED_PROPERTY_MEDIA_MIME_TYPES` (`src/modules/properties/domain/property-media.ts`)
+ * enforces at the HTTP boundary — defense in depth, must be kept in sync manually (Drizzle
+ * schema code cannot import from the http-adjacent domain layer's Zod-facing constants without
+ * inverting the established dependency direction).
+ */
+export const propertyMedia = pgTable(
+  "property_media",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    propertyId: uuid("property_id")
+      .notNull()
+      .references(() => properties.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    objectKey: text("object_key").notNull().unique(),
+    publicUrl: text("public_url").notNull(),
+    mimeType: text("mime_type").notNull(),
+    // bigint/number mode: this task's 10MB per-file limit is nowhere near JS's safe-integer
+    // ceiling, and a plain `number` is simpler to work with than `bigint` throughout the
+    // application layer for a value this small.
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    // Sanitized basename only, never a full path — see `property-media-routes.ts`
+    // (`sanitizeOriginalFilename`). Nullable: a client-supplied filename that sanitizes down to
+    // nothing is stored as absent, never as an empty string.
+    originalFilename: text("original_filename"),
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("property_media_property_id_position_key").on(t.propertyId, t.position),
+    check("property_media_position_non_negative", sql`${t.position} >= 0`),
+    check("property_media_size_bytes_positive", sql`${t.sizeBytes} > 0`),
+    check(
+      "property_media_mime_type_allowed",
+      sql`${t.mimeType} IN ('image/jpeg', 'image/png', 'image/webp')`,
+    ),
   ],
 );

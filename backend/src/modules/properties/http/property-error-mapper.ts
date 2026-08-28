@@ -6,7 +6,7 @@ import {
   TenantDatabaseRuntimeConfigurationError,
   TenantNotReadyError,
 } from "../../tenant-runtime/application/tenant-database-resolver.js";
-import { PropertyNotFoundError } from "../domain/property.js";
+import { PropertyArchivedError, PropertyNotFoundError } from "../domain/property.js";
 
 export interface MappedHttpError {
   statusCode: number;
@@ -28,6 +28,13 @@ export function mapPropertyRouteError(error: unknown): MappedHttpError | undefin
 
   if (error instanceof PropertyNotFoundError) {
     return { statusCode: 404, error: "Not Found", message: error.message };
+  }
+
+  // Property media upload only (Prompt 027, section 42) — an archived property cannot accept
+  // new media. The property itself is real and was found; this is a state conflict, not a
+  // missing-resource 404.
+  if (error instanceof PropertyArchivedError) {
+    return { statusCode: 409, error: "Conflict", message: error.message };
   }
 
   // One uniform status for every reason the tenant itself is unusable right now — including

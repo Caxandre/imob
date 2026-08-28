@@ -627,22 +627,23 @@ seria otimização prematura; permanece uma avaliação futura, não implementad
 demais, foi adicionado propositalmente sem dados de uso reais, porque a coluna que ele cobre
 não serve a nenhum outro propósito.
 
-**Migration**: `drizzle/tenant/0001_fancy_blackheart.sql` (tabela `properties`) e
+**Migration**: `drizzle/tenant/0001_fancy_blackheart.sql` (tabela `properties`),
 `drizzle/tenant/0002_add_property_search_vector.sql` (Prompt 025 — coluna `search_vector` +
-índice GIN), ambas puramente aditivas (nenhuma migration no Control Plane).  `schemaVersion`
-(contagem de `drizzle.__drizzle_migrations`) passa de 1 para 3 em qualquer tenant database
-migrado a partir desta tarefa (2 após o Prompt 023, 3 após o Prompt 025) —
-`runTenantMigrations()`/o provisioner aplicam-nas automaticamente para tenants novos, sem
-nenhuma mudança de lógica.
+índice GIN) e `drizzle/tenant/0003_add_property_media.sql` (Prompt 027 — tabela
+`property_media`), todas puramente aditivas (nenhuma migration no Control Plane).
+`schemaVersion` (contagem de `drizzle.__drizzle_migrations`) passa de 1 para 4 em qualquer
+tenant database migrado a partir desta tarefa (2 após o Prompt 023, 3 após o Prompt 025, 4 após
+o Prompt 027) — `runTenantMigrations()`/o provisioner aplicam-nas automaticamente para tenants
+novos, sem nenhuma mudança de lógica.
 
-**PLANNED** — rollout de migration para tenant databases já existentes antes desta tarefa
-(ficam parados em `schemaVersion = 1`, sem a tabela `properties` nem `search_vector`, até
-serem migrados manualmente) — pendência que cresceu, não diminuiu, com o Prompt 025: um tenant
-que já recebeu `0001` (tem `properties`) mas não `0002` ainda não tem a coluna `search_vector`,
-então `GET /api/v1/properties?q=...` falha com um erro de infraestrutura controlado (nunca um
-fallback silencioso para `ILIKE`) até essa migration ser aplicada a ele. Rodar migrations
-dentro de uma requisição HTTP normal é expressamente proibido (nunca implementado, nem será) —
-ver `TenantDatabaseConnectionManager`, que só abre conexões, nunca aplica DDL. Um mecanismo de
+**PLANNED** — rollout de migration para tenant databases já existentes antes destas tarefas
+(ficam parados em `schemaVersion` antigo, sem `properties`/`search_vector`/`property_media`
+conforme o caso, até serem migrados manualmente) — pendência que cresceu de novo com o Prompt
+027: um tenant sem `0003` não tem `property_media`, então
+`POST/GET /api/v1/properties/:id/media` falha com um erro de infraestrutura controlado (nunca
+um fallback silencioso) até essa migration ser aplicada a ele. Rodar migrations dentro de uma
+requisição HTTP normal é expressamente proibido (nunca implementado, nem será) — ver
+`TenantDatabaseConnectionManager`, que só abre conexões, nunca aplica DDL. Um mecanismo de
 rollout em lote/canário para tenants existentes é trabalho de infraestrutura futuro, fora do
 escopo desta tarefa.
 
@@ -965,18 +966,71 @@ Erros do provider nunca vazam credencial/endpoint/request bruto — mapeados par
 para debug interno.
 
 **Env vars** (`.env.example`) — todas opcionais no parse global de `env.ts` (nenhum processo
-hoje falha por falta de R2), mas exigidas como conjunto completo dentro de
+hoje falha por falta de R2 só por causa disso), mas exigidas como conjunto completo dentro de
 `createCloudflareR2ObjectStorage` (falha explícita em configuração parcial, nunca aceita
 silenciosamente): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
 `R2_PUBLIC_URL`.
 
-**Deliberadamente não wired ainda**: nem `buildApp()` nem `dev-full.ts` constroem um
-`ObjectStorage` — nenhum consumidor real existe nesta tarefa (`property_media`/upload HTTP são
-Prompt 027). Nenhuma rota HTTP nova; Swagger inalterado.
+**IMPLEMENTED** (Prompt 027) — `server.ts`/`dev-full.ts` agora constroem o adapter R2 real
+eagerly, no startup, antes de `app.listen()` — nunca lazily no primeiro upload. Configuração R2
+incompleta/ausente faz esses dois entrypoints se recusarem a subir (`logger.fatal` + `process.exit(1)`,
+confirmado manualmente: mensagem nomeia só os campos ausentes, nunca um valor). `provisioning-worker.ts`/
+`provisioning-dispatcher.ts` continuam inalterados — nunca dependem de R2. Sem guard de
+`NODE_ENV`, ao contrário do `InMemorySecretStore` — R2 é provider real, válido em qualquer
+ambiente já configurado (ADR-006).
 
-**PLANNED** — `property_media` (tabela no Tenant Data Plane, metadados apenas — os binários
-ficam inteiramente no R2), endpoints de upload HTTP, gallery ordering, cover image, delete de
-mídia por propriedade, image resizing/thumbnails, CDN custom domain, signed URLs.
+**IMPLEMENTED** (Prompt 027) — `property_media` (Tenant Data Plane, migration
+`drizzle/tenant/0003_add_property_media.sql`, `schemaVersion` 3→4), metadados apenas — os
+binários ficam inteiramente no R2. Sem `tenant_id` (ADR-001). Colunas: `id`, `property_id` (FK
+→ `properties.id`, `ON DELETE/UPDATE RESTRICT` — properties nunca são fisicamente deletadas,
+então cascade nunca teria gatilho real; RESTRICT é a escolha conservadora), `object_key`
+(`UNIQUE`, nunca exposto na resposta HTTP — detalhe interno), `public_url` (persistido no
+upload, nunca recalculado no GET), `mime_type` (`CHECK` restrito às 3 mesmas mime types
+validadas em `ALLOWED_PROPERTY_MEDIA_MIME_TYPES`), `size_bytes` (`bigint`/modo `number`),
+`original_filename` (nullable, basename sanitizado — nunca um path), `position` (inteiro,
+`UNIQUE(property_id, position)` — formaliza a ordem da galeria e serve `listByProperty()` sem
+índice adicional), timestamps.
+
+```text
+POST /api/v1/properties/:id/media   (multipart/form-data, campo "file", 1 arquivo, ≤10MB)
+    ↓
+validar property existe no tenant + status != INACTIVE (senão 404/409)
+    ↓
+validar MIME declarado (allowlist: image/jpeg, image/png, image/webp)
+    ↓
+validar magic bytes do conteúdo contra o MIME declarado (nunca confia só no header/extensão)
+    ↓
+gerar mediaId (UUID) + object key: tenants/<tenantId>/properties/<propertyId>/<mediaId>.<ext>
+    (IDs técnicos só — nunca filename/título/endereço/nome/email do cliente)
+    ↓
+ObjectStorage.putObject()   ← nunca dentro de uma transação PostgreSQL (CLAUDE.md)
+    ↓
+INSERT property_media, position = MAX(position)+1 dentro de uma transação que faz
+    SELECT ... FOR UPDATE na própria linha de properties (this task, seção 16) — serializa
+    uploads concorrentes para a mesma property sem lock global/advisory separado
+    ↓ (falha)
+compensação best-effort: ObjectStorage.deleteObject() — ver ADR-007 para a estratégia completa
+    de consistência entre R2 e PostgreSQL (sem transação distribuída)
+
+GET /api/v1/properties/:id/media   → position ASC, id ASC; INACTIVE permanece legível
+    (archive nunca esconde mídia)
+```
+
+`@fastify/multipart` registrado escopado dentro do próprio plugin de rotas de properties (nunca
+globalmente em `build-app.ts`) — `limits: { fileSize: 10MB, files: 1 }`. Corpo multipart nunca
+tem `schema.body` no Fastify (AJV validaria `undefined` contra um schema de objeto e rejeitaria
+todo upload real — verificado empiricamente) — documentado via `consumes` + descrição da rota +
+o schema `UploadPropertyMediaRequest` registrado (visível no Swagger, não linkado como
+`requestBody` formal).
+
+Ver [ADR-007](adr/ADR-007-property-media-consistency.md) para a estratégia completa de
+consistência R2/PostgreSQL (upload primeiro, insert depois, compensação best-effort).
+
+**PARTIAL** — gallery ordering: `position` é atribuído e persistido (0, 1, 2, ...), mas
+**PLANNED**: gallery reorder (mudar `position` de uma mídia já existente), cover
+selection (`position = 0` hoje é só a primeira posição, não um contrato formal de capa — seção
+76), delete de mídia por propriedade, image resizing/thumbnails, WebP conversion, CDN custom
+domain, signed URLs, upload multipart-direto browser→R2, múltiplos arquivos por request.
 
 ## Princípios
 

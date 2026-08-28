@@ -154,11 +154,12 @@ describe("Tenant Data Plane — migrations and permissions", () => {
 
     const result = await runTenantMigrations(target);
 
-    expect(result.schemaVersion).toBe(3);
+    expect(result.schemaVersion).toBe(4);
     await expect(listPublicTables(databaseName)).resolves.toEqual([
       "audit_logs",
       "outbox_events",
       "properties",
+      "property_media",
       "users",
     ]);
   });
@@ -188,6 +189,7 @@ describe("Tenant Data Plane — migrations and permissions", () => {
       "audit_logs",
       "outbox_events",
       "properties",
+      "property_media",
       "users",
     ]);
   });

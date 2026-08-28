@@ -3,6 +3,8 @@ import pino from "pino";
 import { buildApp } from "../app/build-app.js";
 import { env } from "../config/env.js";
 import { createLoggerOptions } from "../infrastructure/logger/logger.js";
+import { createCloudflareR2ObjectStorage } from "../infrastructure/object-storage/cloudflare-r2-object-storage.js";
+import { ObjectStorageConfigurationError } from "../infrastructure/object-storage/object-storage.js";
 import { createTenantDatabaseCredentialResolver } from "../modules/provisioning/application/tenant-database-credential-resolver.js";
 import { createInMemorySecretStore } from "../modules/provisioning/test-support/in-memory-secret-store.js";
 import { createPgTenantDatabaseConnectionManager } from "../modules/tenant-runtime/infrastructure/pg-tenant-database-connection-manager.js";
@@ -42,7 +44,35 @@ const tenantDatabaseConnectionManager = createPgTenantDatabaseConnectionManager(
   credentialResolver: createTenantDatabaseCredentialResolver(secretStore),
 });
 
-const app = buildApp({ tenantDatabaseConnectionManager });
+// This server registers property media upload routes (Prompt 027), so a real Cloudflare R2
+// adapter is constructed eagerly, at startup — never lazily on the first upload request. An
+// incomplete R2_* configuration must fail loudly here (this task, section 51), not let the
+// route exist and only fail confusingly on first use. No NODE_ENV guard, unlike the temporary
+// InMemorySecretStore above — R2 is a real provider, valid in every environment once
+// configured (ADR-006, section 45).
+let objectStorage;
+try {
+  objectStorage = createCloudflareR2ObjectStorage({
+    accountId: env.R2_ACCOUNT_ID,
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    bucket: env.R2_BUCKET,
+    publicUrl: env.R2_PUBLIC_URL,
+  });
+} catch (error) {
+  if (error instanceof ObjectStorageConfigurationError) {
+    logger.fatal(
+      { operation: "server.startup", err: error },
+      "Refusing to start: Cloudflare R2 is not fully configured, but this server registers " +
+        "property media upload routes that require it. Set R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/" +
+        "R2_SECRET_ACCESS_KEY/R2_BUCKET/R2_PUBLIC_URL — see .env.example and ADR-006.",
+    );
+    process.exit(1);
+  }
+  throw error;
+}
+
+const app = buildApp({ tenantDatabaseConnectionManager, objectStorage });
 
 try {
   await app.listen({ host: env.HOST, port: env.PORT });

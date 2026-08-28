@@ -1,22 +1,30 @@
+import multipart from "@fastify/multipart";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { resolveTenantContext } from "../../../app/tenant-context.js";
+import type { ObjectStorage } from "../../../infrastructure/object-storage/object-storage.js";
 import type { TenantDatabaseConnectionManager } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
 import type { TenantDatabaseResolver } from "../../tenant-runtime/application/tenant-database-resolver.js";
 import { archiveProperty } from "../application/archive-property.js";
 import { createProperty } from "../application/create-property.js";
 import { getProperty } from "../application/get-property.js";
 import { listProperties } from "../application/list-properties.js";
-import { updateProperty } from "../application/update-property.js";
+import { listPropertyMedia } from "../application/list-property-media.js";
+import { matchesDeclaredMimeType } from "../application/property-media-file-signature.js";
 import type {
   ListPropertiesInput,
   PropertyListFilters,
   PropertySort,
   UpdatePropertyInput,
 } from "../application/property-repository.js";
+import { updateProperty } from "../application/update-property.js";
+import { uploadPropertyMedia } from "../application/upload-property-media.js";
+import { ALLOWED_PROPERTY_MEDIA_MIME_TYPES, isAllowedPropertyMediaMimeType, type PropertyMedia } from "../domain/property-media.js";
 import type { Property } from "../domain/property.js";
+import { createDrizzlePropertyMediaRepository } from "../infrastructure/drizzle-property-media-repository.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
 import { mapPropertyRouteError } from "./property-error-mapper.js";
+import { MAX_MEDIA_FILE_SIZE_BYTES, sanitizeOriginalFilename } from "./property-media-request.schema.js";
 import { tenantIdHeaderSchema } from "./property-openapi.schema.js";
 import {
   createPropertyBodySchema,
@@ -57,6 +65,30 @@ function toPropertyResponse(property: Property) {
   };
 }
 
+/** `object_key` deliberately never appears here — internal storage detail, not public API
+ * contract (this task, section 44). `public_url` is the persisted value from the upload, never
+ * recomputed on read. */
+function toPropertyMediaResponse(media: PropertyMedia) {
+  return {
+    id: media.id,
+    property_id: media.propertyId,
+    public_url: media.publicUrl,
+    mime_type: media.mimeType,
+    size_bytes: media.sizeBytes,
+    original_filename: media.originalFilename,
+    position: media.position,
+    created_at: media.createdAt.toISOString(),
+    updated_at: media.updatedAt.toISOString(),
+  };
+}
+
+/** `@fastify/multipart` errors (`fastify.multipartErrors`/thrown from `request.file()`) all
+ * carry a stable `.code` — matching by code, not `instanceof`, avoids depending on the
+ * decorator being present on every possible request/reply shape this function might see. */
+function isMultipartErrorWithCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && (error as { code: unknown }).code === code;
+}
+
 function badRequest(
   reply: FastifyReply,
   message: string,
@@ -95,6 +127,10 @@ function withMappedErrors(
 export interface PropertyRoutesDependencies {
   tenantDatabaseResolver: TenantDatabaseResolver;
   tenantDatabaseConnectionManager: TenantDatabaseConnectionManager;
+  /** Cloudflare R2 in real deployments (ADR-006), an in-memory fake in tests
+   * (`test-support/in-memory-object-storage.ts`) — the media routes never import an adapter
+   * directly (this task, section 49). */
+  objectStorage: ObjectStorage;
 }
 
 /**
@@ -107,6 +143,17 @@ export interface PropertyRoutesDependencies {
  */
 export function propertyRoutes(deps: PropertyRoutesDependencies) {
   return async function register(app: FastifyInstance) {
+    // Scoped to this plugin context only (this task, section 21) — health/tenant routes,
+    // registered separately in `build-app.ts`, never gain multipart parsing as a side effect.
+    // `files: 1` is the primary mechanism behind "reject a request with more than one file"
+    // (section 22); `fileSize` caps memory use during parsing itself, not only after fully
+    // buffering (section 25) — both limits are re-asserted per `request.file()` call below too,
+    // since @fastify/multipart honors the more specific per-call limits over these registration
+    // defaults.
+    await app.register(multipart, {
+      limits: { fileSize: MAX_MEDIA_FILE_SIZE_BYTES, files: 1 },
+    });
+
     app.post(
       "/properties",
       {
@@ -484,6 +531,183 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
         );
 
         return reply.status(204).send();
+      }),
+    );
+
+    app.post(
+      "/properties/:id/media",
+      {
+        schema: {
+          operationId: "uploadPropertyMedia",
+          summary: "Upload property media",
+          description:
+            "Uploads a single image for a property to Cloudflare R2 and records its metadata " +
+            "in the tenant's own database. multipart/form-data with a single field named " +
+            `"file" (binary), at most ${String(MAX_MEDIA_FILE_SIZE_BYTES / (1024 * 1024))}MB, ` +
+            `one of: ${ALLOWED_PROPERTY_MEDIA_MIME_TYPES.join(", ")} — validated both by the ` +
+            "declared Content-Type and by the file's own magic bytes, never by filename/" +
+            "extension alone. Rejected (409) for an archived (INACTIVE) property. See the " +
+            "UploadPropertyMediaRequest schema for the field contract.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          // Deliberately NO `body` schema here (this task, section 65/69 — verified
+          // empirically before settling on this): `@fastify/multipart` in streaming mode
+          // (no `attachFieldsToBody`) never populates `request.body` at all, so a `body`
+          // schema would make Fastify's AJV validate `undefined` against an object schema and
+          // reject every real multipart upload with 400 before this handler even runs. Swagger
+          // documentation for the multipart contract instead comes from `consumes` plus the
+          // registered `UploadPropertyMediaRequest` component (referenced in the description
+          // below) — file validation itself is fully manual in the handler (presence, MIME
+          // allowlist, magic bytes).
+          consumes: ["multipart/form-data"],
+          params: {
+            type: "object",
+            properties: { id: { type: "string", format: "uuid" } },
+            required: ["id"],
+          },
+          response: {
+            201: { description: "Media uploaded", $ref: "PropertyMedia#" },
+            400: {
+              description: "Invalid id, missing/invalid file, unsupported type, or missing/invalid X-Tenant-Id",
+              $ref: "ErrorResponse#",
+            },
+            404: { description: "Property not found", $ref: "ErrorResponse#" },
+            409: { description: "Tenant is not READY, or the property is archived (INACTIVE)", $ref: "ErrorResponse#" },
+            413: { description: "File exceeds the maximum allowed size", $ref: "ErrorResponse#" },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id", parsedParams.error.issues);
+        }
+
+        let uploadedFile;
+        let buffer: Buffer;
+        try {
+          uploadedFile = await request.file({ limits: { fileSize: MAX_MEDIA_FILE_SIZE_BYTES, files: 1 } });
+          if (!uploadedFile) {
+            return badRequest(reply, 'A file is required (multipart field "file")', []);
+          }
+          buffer = await uploadedFile.toBuffer();
+        } catch (error) {
+          if (isMultipartErrorWithCode(error, "FST_REQ_FILE_TOO_LARGE")) {
+            return reply.status(413).send({
+              statusCode: 413,
+              error: "Payload Too Large",
+              message: `File exceeds the maximum allowed size of ${String(MAX_MEDIA_FILE_SIZE_BYTES)} bytes`,
+            });
+          }
+          if (isMultipartErrorWithCode(error, "FST_FILES_LIMIT")) {
+            return badRequest(reply, "Only one file may be uploaded per request", []);
+          }
+          // Empirically (not just per the library's documented `FilesLimitError`/413 path),
+          // busboy's `filesLimit` cleanup closes the first file's stream mid-read when a
+          // second file part arrives while `toBuffer()` is still consuming it — surfacing as
+          // this Node stream error instead, not a `@fastify/multipart` error class. Also the
+          // honest, generic outcome for a client that genuinely disconnects mid-upload, so the
+          // message stays general rather than presuming "too many files" specifically.
+          if (isMultipartErrorWithCode(error, "ERR_STREAM_PREMATURE_CLOSE")) {
+            return badRequest(reply, "The upload was interrupted, or included more than one file", []);
+          }
+          // Anything else (malformed multipart body, wrong content type, ...) is safely
+          // sanitized into a generic 500 by the global error handler (build-app.ts) — never a
+          // raw parser error surfaced to the client (this task, section 59).
+          throw error;
+        }
+
+        if (uploadedFile.fieldname !== "file") {
+          return badRequest(reply, 'The file field must be named "file"', []);
+        }
+        if (!isAllowedPropertyMediaMimeType(uploadedFile.mimetype)) {
+          return badRequest(
+            reply,
+            `Unsupported file type "${uploadedFile.mimetype}" — allowed: ${ALLOWED_PROPERTY_MEDIA_MIME_TYPES.join(", ")}`,
+            [],
+          );
+        }
+        if (!matchesDeclaredMimeType(uploadedFile.mimetype, buffer)) {
+          return badRequest(reply, "File content does not match its declared type", []);
+        }
+        // Narrowed to `PropertyMediaMimeType` by the `isAllowedPropertyMediaMimeType` check
+        // above — captured into a `const` here because TypeScript does not carry that
+        // narrowing through the closure passed to `withTenantDatabase` below.
+        const mimeType = uploadedFile.mimetype;
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const media = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const propertyRepository = createDrizzlePropertyRepository(db);
+          const propertyMediaRepository = createDrizzlePropertyMediaRepository(db);
+          return uploadPropertyMedia(propertyRepository, propertyMediaRepository, deps.objectStorage, {
+            tenantId: tenantContext.tenantId,
+            propertyId: parsedParams.data.id,
+            mimeType,
+            body: buffer,
+            originalFilename: sanitizeOriginalFilename(uploadedFile.filename),
+          });
+        });
+
+        request.log.info(
+          {
+            operation: "property.media.upload",
+            tenantId: tenantContext.tenantId,
+            propertyId: parsedParams.data.id,
+            mediaId: media.id,
+          },
+          "property media uploaded",
+        );
+
+        return reply.status(201).send(toPropertyMediaResponse(media));
+      }),
+    );
+
+    app.get(
+      "/properties/:id/media",
+      {
+        schema: {
+          operationId: "listPropertyMedia",
+          summary: "List property media",
+          description:
+            "Lists a property's media (photos), ordered position ASC, id ASC. Media of an " +
+            "archived (INACTIVE) property remains listable — archiving never hides media.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          params: {
+            type: "object",
+            properties: { id: { type: "string", format: "uuid" } },
+            required: ["id"],
+          },
+          response: {
+            200: { description: "Property media list", $ref: "PropertyMediaList#" },
+            400: { description: "Invalid id or missing/invalid X-Tenant-Id", $ref: "ErrorResponse#" },
+            404: { description: "Property not found", $ref: "ErrorResponse#" },
+            409: { description: "Tenant is not READY", $ref: "ErrorResponse#" },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id", parsedParams.error.issues);
+        }
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const mediaList = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const propertyRepository = createDrizzlePropertyRepository(db);
+          const propertyMediaRepository = createDrizzlePropertyMediaRepository(db);
+          return listPropertyMedia(propertyRepository, propertyMediaRepository, parsedParams.data.id);
+        });
+
+        return reply.send({ data: mediaList.map(toPropertyMediaResponse) });
       }),
     );
   };

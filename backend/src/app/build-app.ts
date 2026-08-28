@@ -4,12 +4,16 @@ import fastify, { type FastifyError, type FastifyInstance } from "fastify";
 
 import { controlPlaneDb } from "../infrastructure/database/control-plane/client.js";
 import { createLoggerOptions } from "../infrastructure/logger/logger.js";
+import type { ObjectStorage } from "../infrastructure/object-storage/object-storage.js";
 import { propertyRoutes } from "../modules/properties/http/property-routes.js";
 import {
   createPropertyRequestSchema,
   propertyListSchema,
+  propertyMediaListSchema,
+  propertyMediaSchema,
   propertySchema,
   updatePropertyRequestSchema,
+  uploadPropertyMediaRequestSchema,
 } from "../modules/properties/http/property-openapi.schema.js";
 import type { TenantDatabaseConnectionManager } from "../modules/tenant-runtime/application/tenant-database-connection-manager.js";
 import { createDrizzleTenantDatabaseResolver } from "../modules/tenant-runtime/infrastructure/drizzle-tenant-database-resolver.js";
@@ -30,6 +34,15 @@ export interface BuildAppDependencies {
    * pooled tenant connection this instance is holding.
    */
   tenantDatabaseConnectionManager: TenantDatabaseConnectionManager;
+  /**
+   * Owned by the caller, same convention as `tenantDatabaseConnectionManager` — never
+   * constructed inside `buildApp()` (this task, section 50). `server.ts`/`dev-full.ts`
+   * construct the real Cloudflare R2 adapter (failing fast at startup if R2 env is
+   * incomplete); tests construct an in-memory fake
+   * (`object-storage/test-support/in-memory-object-storage.ts`) explicitly — `buildApp()`
+   * itself never falls back to one on its own.
+   */
+  objectStorage: ObjectStorage;
 }
 
 export function buildApp(deps: BuildAppDependencies): FastifyInstance {
@@ -102,6 +115,9 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(updatePropertyRequestSchema);
   app.addSchema(propertySchema);
   app.addSchema(propertyListSchema);
+  app.addSchema(propertyMediaSchema);
+  app.addSchema(propertyMediaListSchema);
+  app.addSchema(uploadPropertyMediaRequestSchema);
 
   void app.register(healthRoute);
 
@@ -113,6 +129,7 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
     propertyRoutes({
       tenantDatabaseResolver,
       tenantDatabaseConnectionManager: deps.tenantDatabaseConnectionManager,
+      objectStorage: deps.objectStorage,
     }),
     { prefix: "/api/v1" },
   );

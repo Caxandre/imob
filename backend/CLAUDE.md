@@ -47,6 +47,15 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   vazar para portas de domínio/aplicação — confine-os inteiramente ao adapter de
   infraestrutura correspondente (ver `src/infrastructure/object-storage/` como exemplo
   aplicado).
+- Object storage externo e escritas no database do tenant não compartilham transação (não há
+  transação distribuída entre PostgreSQL e Cloudflare R2/S3). Todo fluxo que grava nos dois
+  precisa definir explicitamente a ordem das operações e o comportamento de compensação em
+  falha parcial — ver `uploadPropertyMedia` (Prompt 027, ADR-007) como exemplo aplicado: upload
+  no object storage primeiro, insert no banco depois, delete compensatório best-effort se o
+  insert falhar (nunca o inverso — nunca persistir metadata antes do objeto existir de fato).
+- Object keys de mídia devem ser gerados no servidor a partir de IDs técnicos (UUIDs), nunca a
+  partir de filename/título/endereço/nome de cliente/email fornecidos pelo usuário — ver
+  `buildPropertyMediaObjectKey` (Prompt 027) como exemplo aplicado.
 
 ## Multi-tenancy — regra crítica
 

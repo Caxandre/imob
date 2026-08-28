@@ -13,6 +13,7 @@ import {
   tenantDatabases,
   tenants,
 } from "../../../infrastructure/database/control-plane/schema.js";
+import { createInMemoryObjectStorage } from "../../../infrastructure/object-storage/test-support/in-memory-object-storage.js";
 import { createClusterAdminCredentialResolver } from "../../provisioning/application/cluster-admin-credential-resolver.js";
 import { startPendingProvisioningJob } from "../../provisioning/application/process-provisioning-job.js";
 import type {
@@ -213,6 +214,92 @@ async function deleteProperty(app: FastifyInstance, tenantId: string, propertyId
   return app.inject({
     method: "DELETE",
     url: `/api/v1/properties/${propertyId}`,
+    headers: { [TENANT_ID_HEADER]: tenantId },
+  });
+}
+
+// Minimal real magic-byte signatures (matching `property-media-file-signature.ts`) — enough
+// filler after the signature to be a plausible file, never a real decodable image (this task,
+// section 32: no image-processing dependency is needed for these tests either).
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+const WEBP_BYTES = Buffer.concat([
+  Buffer.from("RIFF", "ascii"),
+  Buffer.from([0x00, 0x00, 0x00, 0x00]),
+  Buffer.from("WEBP", "ascii"),
+  Buffer.from([0x00, 0x00, 0x00, 0x00]),
+]);
+const PLAIN_TEXT_BYTES = Buffer.from("this is not an image", "ascii");
+
+/**
+ * Hand-built multipart/form-data body — no extra dependency (`form-data` et al.) just for
+ * tests, and `light-my-request` (behind `app.inject()`) accepts a raw `Buffer` payload with the
+ * matching `content-type` header directly.
+ */
+function buildMultipartUpload(params: {
+  fieldName?: string;
+  filename?: string;
+  contentType?: string;
+  content: Buffer;
+}) {
+  const boundary = `testboundary${randomUUID().replaceAll("-", "")}`;
+  const fieldName = params.fieldName ?? "file";
+  const head = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="${fieldName}"; filename="${params.filename ?? "foto.jpg"}"\r\n` +
+      `Content-Type: ${params.contentType ?? "image/jpeg"}\r\n\r\n`,
+    "utf8",
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+
+  return {
+    contentTypeHeader: `multipart/form-data; boundary=${boundary}`,
+    payload: Buffer.concat([head, params.content, tail]),
+  };
+}
+
+function buildTwoFileMultipartUpload(): { contentTypeHeader: string; payload: Buffer } {
+  const boundary = `testboundary${randomUUID().replaceAll("-", "")}`;
+  const part = (name: string, filename: string, contentType: string, content: Buffer) =>
+    Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n` +
+          `Content-Type: ${contentType}\r\n\r\n`,
+        "utf8",
+      ),
+      content,
+      Buffer.from("\r\n", "utf8"),
+    ]);
+
+  return {
+    contentTypeHeader: `multipart/form-data; boundary=${boundary}`,
+    payload: Buffer.concat([
+      part("file", "one.jpg", "image/jpeg", JPEG_BYTES),
+      part("file", "two.jpg", "image/jpeg", JPEG_BYTES),
+      Buffer.from(`--${boundary}--\r\n`, "utf8"),
+    ]),
+  };
+}
+
+async function uploadPropertyMediaRequest(
+  app: FastifyInstance,
+  tenantId: string,
+  propertyId: string,
+  upload: { contentTypeHeader: string; payload: Buffer },
+) {
+  return app.inject({
+    method: "POST",
+    url: `/api/v1/properties/${propertyId}/media`,
+    headers: { [TENANT_ID_HEADER]: tenantId, "content-type": upload.contentTypeHeader },
+    payload: upload.payload,
+  });
+}
+
+async function listPropertyMediaRequest(app: FastifyInstance, tenantId: string, propertyId: string) {
+  return app.inject({
+    method: "GET",
+    url: `/api/v1/properties/${propertyId}/media`,
     headers: { [TENANT_ID_HEADER]: tenantId },
   });
 }
@@ -1025,6 +1112,401 @@ describe("Properties HTTP routes", () => {
           headers: { [TENANT_ID_HEADER]: tenant.id },
         });
         expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("POST /api/v1/properties/:id/media", () => {
+    it.each([
+      ["JPEG", JPEG_BYTES, "image/jpeg"],
+      ["PNG", PNG_BYTES, "image/png"],
+      ["WebP", WEBP_BYTES, "image/webp"],
+    ] as const)("uploads a valid %s file, returns 201 with metadata, and stores it in ObjectStorage", async (_label, bytes, mimeType) => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-upload", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyId,
+          buildMultipartUpload({ content: bytes, contentType: mimeType, filename: "foto.jpg" }),
+        );
+
+        expect(response.statusCode).toBe(201);
+        const body = response.json();
+        expect(body).toMatchObject({
+          property_id: propertyId,
+          mime_type: mimeType,
+          size_bytes: bytes.length,
+          original_filename: "foto.jpg",
+          position: 0,
+        });
+        expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+        expect(body.object_key).toBeUndefined();
+        expect(typeof body.public_url).toBe("string");
+        expect(Date.parse(body.created_at)).not.toBeNaN();
+        expect(Date.parse(body.updated_at)).not.toBeNaN();
+
+        // Actually persisted through the ObjectStorage port, not merely reported as if it were.
+        expect(objectStorage.has(`tenants/${tenant.id}/properties/${propertyId}/${body.id}.${mimeType === "image/jpeg" ? "jpg" : mimeType.split("/")[1]}`)).toBe(true);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("assigns sequential positions across successive uploads to the same property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-position", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        expect(first.json().position).toBe(0);
+        expect(second.json().position).toBe(1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("sanitizes a path-traversal filename down to its basename", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-filename", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyId,
+          buildMultipartUpload({ content: JPEG_BYTES, filename: "../../foto.jpg" }),
+        );
+
+        expect(response.statusCode).toBe(201);
+        expect(response.json().original_filename).toBe("foto.jpg");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("rejects a declared MIME type outside the allowlist with 400", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-bad-mime", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyId,
+          buildMultipartUpload({ content: PLAIN_TEXT_BYTES, contentType: "image/gif", filename: "a.gif" }),
+        );
+
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("rejects content whose magic bytes do not match the declared MIME type with 400", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-mismatch", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        // Declares image/jpeg, but the bytes are a real PNG signature.
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyId,
+          buildMultipartUpload({ content: PNG_BYTES, contentType: "image/jpeg" }),
+        );
+
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("rejects a request with no file with 400", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-no-file", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const boundary = `testboundary${randomUUID().replaceAll("-", "")}`;
+        // A syntactically valid multipart body with a text field only, no file part.
+        const payload = Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="notes"\r\n\r\nhello\r\n--${boundary}--\r\n`,
+          "utf8",
+        );
+
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/properties/${propertyId}/media`,
+          headers: { [TENANT_ID_HEADER]: tenant.id, "content-type": `multipart/form-data; boundary=${boundary}` },
+          payload,
+        });
+
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("rejects a request with more than one file with 400, never uploading either to ObjectStorage", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-multi-file", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const response = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildTwoFileMultipartUpload());
+
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("rejects a file over the size limit with 413", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-too-large", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const oversized = Buffer.concat([
+          JPEG_BYTES,
+          Buffer.alloc(10 * 1024 * 1024 - JPEG_BYTES.length + 1, 0),
+        ]);
+
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyId,
+          buildMultipartUpload({ content: oversized }),
+        );
+
+        expect(response.statusCode).toBe(413);
+      } finally {
+        await app.close();
+      }
+    }, 20_000);
+
+    it("returns 404 for a well-formed but unknown property id, never touching ObjectStorage", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-404", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          randomUUID(),
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 (never touching ObjectStorage) when the property belongs to a different tenant", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("media-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("media-cross-b", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenantB.id,
+          propertyId,
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 409 for an archived (INACTIVE) property, never touching ObjectStorage", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-archived", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const archived = await deleteProperty(app, tenant.id, propertyId);
+        expect(archived.statusCode).toBe(204);
+
+        const response = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyId,
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+
+        expect(response.statusCode).toBe(409);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("allows upload for DRAFT and ACTIVE properties", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-draft-active", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const draft = await createProperty(app, tenant.id, { status: "DRAFT" });
+        const active = await createProperty(app, tenant.id, { status: "ACTIVE" });
+
+        const draftUpload = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          draft.json().id,
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+        const activeUpload = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          active.json().id,
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+
+        expect(draftUpload.statusCode).toBe(201);
+        expect(activeUpload.statusCode).toBe(201);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("GET /api/v1/properties/:id/media", () => {
+    it("returns an empty list for a property with no media", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-list-empty", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+
+        const response = await listPropertyMediaRequest(app, tenant.id, created.json().id);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ data: [] });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("lists uploaded media ordered position ASC", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-list-order", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: PNG_BYTES, contentType: "image/png" }));
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data.map((m: { id: string }) => m.id)).toEqual([first.json().id, second.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 for a well-formed but unknown property id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-list-404", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const response = await listPropertyMediaRequest(app, tenant.id, randomUUID());
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 when the property belongs to a different tenant", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("media-list-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("media-list-cross-b", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+        await uploadPropertyMediaRequest(app, tenantA.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await listPropertyMediaRequest(app, tenantB.id, propertyId);
+
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("still lists media for an archived (INACTIVE) property — archiving never hides media", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-list-archived", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        await deleteProperty(app, tenant.id, propertyId);
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data.map((m: { id: string }) => m.id)).toEqual([uploaded.json().id]);
       } finally {
         await app.close();
       }
