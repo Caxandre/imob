@@ -1072,34 +1072,95 @@ reconciliação de objetos órfãos no R2 (worker/processo agendado — Prompt 0
 problema em ADR-007 "Delete" e no CLAUDE.md, mas não implementa a reconciliação em si).
 
 **PLANNED / DESIGNED** (Prompt 029) — arquitetura de processamento assíncrono de imagens,
-decidida em [ADR-008](adr/ADR-008-asynchronous-property-image-processing.md), sem nenhuma
-implementação de código nesta tarefa:
+decidida em [ADR-008](adr/ADR-008-asynchronous-property-image-processing.md). Nenhum
+processamento de imagem real existe ainda — `sharp` continua **não instalado**.
+
+**IMPLEMENTED** (Prompt 030) — a infraestrutura persistente que a arquitetura acima depende de,
+sem nenhum resize real:
 
 ```text
-HTTP upload (inalterado) → original no R2 → property_media persistido → enqueue job
-    (BullMQ, fila "media-processing", best-effort, HTTP termina sem esperar)
-        ↓
-Image Processing Worker (processo separado, PLANNED) → download do original → sharp
-    (resize proporcional, withoutEnlargement, sem crop) → variantes WebP (THUMBNAIL 320px,
-    CARD 640px, DETAIL 1280px, quality 82) → upload de cada variante ao R2 (key determinística
-    `.../<mediaId>/<variant>.webp`) → upsert em property_media_variants (PLANNED,
-    UNIQUE(property_media_id, variant), ON DELETE CASCADE) → property_media.status
-    PROCESSING → READY (ou FAILED em erro permanente)
+Property media processing status  = IMPLEMENTED  (property_media.processing_status)
+Property media variants schema    = IMPLEMENTED  (property_media_variants, sem writer ainda)
+Media processing outbox intent    = IMPLEMENTED  (outbox_events, dentro da transação do upload)
+BullMQ media-processing contract  = IMPLEMENTED  (queue/job/payload, sem consumer)
+Media outbox dispatcher           = PLANNED      (ver "Deferred dispatcher design" abaixo)
+Sharp worker                      = PLANNED
 ```
 
-- `sharp` = **PLANNED** — provider de processamento de imagem escolhido, **não instalado**
-  ainda (nenhuma dependência nova nesta tarefa).
-- Property media variants = **PLANNED** — tabela `property_media_variants` modelada
-  conceitualmente na ADR-008, nenhuma migration criada nesta tarefa.
-- Media worker = **PLANNED** — processo BullMQ separado do worker de provisionamento
-  (concorrência própria, CPU-intensivo), entrypoint futuro não decidido como parte automática
-  de `pnpm dev:full`.
+```text
+POST .../media (inalterado desde o Prompt 027/028)
+    ↓
+ObjectStorage.putObject() — original no R2, fora de qualquer transação PostgreSQL (CLAUDE.md)
+    ↓
+transação PostgreSQL única (Tenant Data Plane):
+    INSERT property_media (processing_status = PROCESSING, explícito, nunca o default da coluna)
+    INSERT outbox_events   (aggregate_type=PROPERTY_MEDIA, aggregate_id=mediaId,
+                             event_type=PROPERTY_MEDIA_PROCESSING_REQUESTED,
+                             payload={propertyId, mediaId})
+    ↓ (commit — os dois juntos, ou nenhum dos dois)
+HTTP termina (201) — nenhuma chamada a BullMQ acontece aqui (this task, section 48)
+```
+
+`property_media.processing_status` (enum `PROCESSING`/`READY`/`FAILED`, migration
+`drizzle/tenant/0005_add_media_processing_status_and_variants.sql`, `schemaVersion` 5→6) — nunca
+sobre o original em si (que já é servível via `public_url` em qualquer estado), só sobre suas
+variantes derivadas. Toda mídia nova é inserida como `PROCESSING` explicitamente pelo código de
+aplicação (`upload-property-media.ts`/`drizzle-property-media-repository.ts`); o default da
+coluna (`READY`) existe apenas para o backfill de linhas anteriores a esta migration — mídias já
+válidas sob o modelo anterior, que nunca devem parecer quebradas por não terem variantes ainda
+(provado empiricamente: `tenant-data-plane.test.ts` aplica as migrations 0000-0004, insere uma
+linha crua, depois aplica a 0005 e confirma `processing_status = 'READY'`). `FAILED` é um valor
+alcançável do enum desde já, mas nada nesta tarefa transiciona uma linha para ele — isso é do
+worker futuro.
+
+`property_media_variants` (mesma migration) — colunas `id`/`property_media_id` (FK
+`ON DELETE CASCADE`, diferente do `RESTRICT` de `property_media.property_id` — uma variant não
+tem valor independente, é inteiramente reproduzível a partir do original)/`variant` (enum
+`THUMBNAIL`/`CARD`/`DETAIL`)/`object_key` (`UNIQUE`)/`public_url`/`mime_type` (texto livre,
+deliberadamente não restrito a `image/webp` — seção 14 do Prompt 030)/`width`/`height`
+(`CHECK > 0` ambos)/`size_bytes` (`CHECK > 0`)/timestamps, `UNIQUE(property_media_id, variant)` —
+o mecanismo de idempotência que o futuro worker vai depender (upsert sobre essa constraint, nunca
+um insert simples). Sem `tenant_id` (ADR-001). **Nenhum repository/CRUD existe para esta tabela**
+(deliberado — Prompt 030, seção 57: sem consumidor real ainda, uma abstração aqui seria código
+morto); os testes de constraint (`drizzle-property-media-repository.test.ts`) inserem
+diretamente através do objeto de tabela do Drizzle.
+
+**Media processing outbox intent**: em vez de uma tabela de jobs nova, o upload reaproveita
+`outbox_events` — já existente em todo Tenant Data Plane desde a primeira migration — como a
+intenção persistente e transacional de processar uma mídia (Prompt 030, seções 40/49). Isso
+evita exatamente o problema de dual-write PostgreSQL+Redis que o provisionamento já resolveu de
+outra forma (dispatcher + lease, ADR-002): o upload HTTP nunca chama `queue.add()` diretamente
+— só grava a intenção no mesmo banco/transação da mídia. `outbox_events.processed_at` não é
+marcado por nada nesta tarefa (fica para o futuro dispatcher).
+
+**BullMQ media-processing contract** (`src/infrastructure/queue/media-processing-queue.ts`) —
+fila `media-processing`, job `process-property-media`, payload mínimo validado por Zod
+(`tenantId`/`propertyId`/`mediaId`, todos UUID, `.strict()` — nunca credenciais, URL pública ou
+bytes). `createMediaProcessingQueue()` é só uma factory de `Queue` — **nenhum consumer/`Worker`
+é criado nesta tarefa**.
+
+### Deferred dispatcher design
+
+Uma pendência arquitetural explícita, deliberadamente não resolvida nesta tarefa: `property_media`
+e seu `outbox_events` vivem no Tenant Data Plane — um database físico por tenant (ADR-001) — não
+existe hoje um único lugar para consultar "todas as mídias aguardando processamento em todos os
+tenants". Um dispatcher que varresse ingenuamente todos os tenant databases em loop (conectar a
+cada um, a cada N segundos) foi explicitamente rejeitado (Prompt 030, seções 38/42/70) sem um
+desenho real de descoberta/agendamento — o mesmo tipo de problema que o dispatcher de
+provisionamento já resolveu, mas para um domínio (Control Plane, um database só) estruturalmente
+mais simples que este. Prompt(s) futuro(s) precisam decidir como consumir outboxes de múltiplos
+tenant databases antes que o worker de `sharp` real (Prompt 031/032?) possa ser ligado de ponta
+a ponta — ver ADR-008 para a arquitetura de processamento em si, que continua válida e
+inalterada.
+
 - Original sempre preservado no R2, indefinidamente — reprocessamento futuro (nova qualidade,
   novo preset, correção de algoritmo) não exige novo upload do usuário.
-- Nenhuma mudança de comportamento HTTP nesta tarefa: `POST .../media` continua exatamente como
-  no Prompt 027/028; `property_media.object_key` de mídia já existente (formato
-  `.../<mediaId>.<ext>`, sem subpasta) permanece válido — variantes futuras usam o prefixo
-  `.../<mediaId>/`, sem exigir reorganização de keys existentes.
+- Nenhuma mudança de comportamento HTTP nesta tarefa além do novo campo `processing_status` na
+  resposta de `PropertyMedia`: `POST .../media` continua exatamente como no Prompt 027/028;
+  `property_media.object_key` de mídia já existente (formato `.../<mediaId>.<ext>`, sem
+  subpasta) permanece válido — variantes futuras usam o prefixo `.../<mediaId>/`, sem exigir
+  reorganização de keys existentes. Nenhuma rota nova; `property_media_variants` não é exposta
+  em nenhuma resposta HTTP ainda.
 
 ## Princípios
 

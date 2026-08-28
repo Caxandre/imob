@@ -184,6 +184,17 @@ describe("OpenAPI specification", () => {
     );
   });
 
+  it("documents PropertyMedia.processing_status as a required PROCESSING/READY/FAILED enum", () => {
+    const spec = getSpec();
+
+    const propertyMedia = spec.components?.schemas?.PropertyMedia as
+      | { properties?: Record<string, { enum?: string[] }>; required?: string[] }
+      | undefined;
+
+    expect(propertyMedia?.properties?.processing_status?.enum).toEqual(["PROCESSING", "READY", "FAILED"]);
+    expect(propertyMedia?.required).toContain("processing_status");
+  });
+
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
     const spec = getSpec();
 

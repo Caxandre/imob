@@ -68,7 +68,16 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   dentro de uma requisição HTTP normal de upload; transformações de mídia rodam de forma
   assíncrona, a partir do original preservado — ver
   [ADR-008](docs/architecture/adr/ADR-008-asynchronous-property-image-processing.md) (Prompt
-  029, arquitetura definida, ainda não implementada).
+  029, arquitetura definida; Prompt 030, fundação persistente implementada — sharp/worker/
+  dispatcher ainda não).
+- Fluxos HTTP nunca devem fazer dual-write direto entre o PostgreSQL do tenant e o BullMQ
+  (`INSERT` seguido de `queue.add()` como duas escritas independentes) quando um outbox durável
+  no próprio Tenant Data Plane puder representar a intenção assíncrona de forma atômica — grave
+  a intenção (`outbox_events`) na mesma transação do dado que a originou; publicar o job real no
+  BullMQ a partir desse evento é responsabilidade de um dispatcher separado, nunca do handler
+  HTTP em si. Ver `uploadPropertyMedia`/`drizzle-property-media-repository.ts` (Prompt 030,
+  ADR-008 "Queue and worker") como exemplo aplicado: o upload nunca chama `queue.add()`
+  diretamente.
 
 ## Multi-tenancy — regra crítica
 

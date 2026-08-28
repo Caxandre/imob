@@ -36,6 +36,13 @@
       "when": 1787951901334,
       "tag": "0004_add_property_media_cover",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787955899664,
+      "tag": "0005_add_media_processing_status_and_variants",
+      "breakpoints": true
     }
   ]
 }

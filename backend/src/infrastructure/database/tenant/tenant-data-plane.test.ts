@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { Client, escapeIdentifier } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { Client, Pool, escapeIdentifier } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createClusterAdminCredentialResolver } from "../../../modules/provisioning/application/cluster-admin-credential-resolver.js";
@@ -11,8 +16,49 @@ import { createPostgresTenantDatabaseProvisioner } from "../../../modules/provis
 import { createPostgresTenantRoleProvisioner } from "../../../modules/provisioning/infrastructure/postgres-tenant-role-provisioner.js";
 import { createInMemorySecretStore } from "../../../modules/provisioning/test-support/in-memory-secret-store.js";
 import { runTenantMigrations } from "./migrate.js";
+import { TENANT_MIGRATIONS_FOLDER } from "./migrations-folder.js";
 import { grantTenantApplicationPrivileges } from "./permissions.js";
 import type { TenantMigrationTarget } from "./migrate.js";
+
+interface MigrationJournalEntry {
+  idx: number;
+  version: string;
+  when: number;
+  tag: string;
+  breakpoints: boolean;
+}
+
+/**
+ * Builds a temporary migrations folder containing only the migrations strictly before `tag`
+ * (Prompt 030, section 6/58) — used exactly once, to prove the real guarantee a `NOT NULL
+ * DEFAULT` column addition gives in PostgreSQL: a row inserted under the *old* schema (before
+ * `processing_status` existed) is still present, unaffected in every other column, once the
+ * migration that adds it actually runs. `migrate()` only needs `.sql` files plus a matching
+ * `meta/_journal.json` — the `meta/*_snapshot.json` files are a `drizzle-kit generate`-time
+ * concern, never read by the migration runner itself.
+ */
+function buildMigrationsFolderBefore(tag: string): string {
+  const journalPath = join(TENANT_MIGRATIONS_FOLDER, "meta", "_journal.json");
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+    version: string;
+    dialect: string;
+    entries: MigrationJournalEntry[];
+  };
+  const cutoffIndex = journal.entries.findIndex((entry) => entry.tag === tag);
+  if (cutoffIndex === -1) {
+    throw new Error(`migration tag "${tag}" not found in journal`);
+  }
+  const entries = journal.entries.slice(0, cutoffIndex);
+
+  const dir = mkdtempSync(join(tmpdir(), "imob-tenant-migrations-"));
+  mkdirSync(join(dir, "meta"));
+  writeFileSync(join(dir, "meta", "_journal.json"), JSON.stringify({ ...journal, entries }));
+  for (const entry of entries) {
+    const sqlFileName = `${entry.tag}.sql`;
+    writeFileSync(join(dir, sqlFileName), readFileSync(join(TENANT_MIGRATIONS_FOLDER, sqlFileName)));
+  }
+  return dir;
+}
 
 /**
  * Real `postgres-tenants` (Docker Compose), not a mock — migrations, GRANT/ALTER DEFAULT
@@ -154,12 +200,13 @@ describe("Tenant Data Plane — migrations and permissions", () => {
 
     const result = await runTenantMigrations(target);
 
-    expect(result.schemaVersion).toBe(5);
+    expect(result.schemaVersion).toBe(6);
     await expect(listPublicTables(databaseName)).resolves.toEqual([
       "audit_logs",
       "outbox_events",
       "properties",
       "property_media",
+      "property_media_variants",
       "users",
     ]);
   });
@@ -190,6 +237,7 @@ describe("Tenant Data Plane — migrations and permissions", () => {
       "outbox_events",
       "properties",
       "property_media",
+      "property_media_variants",
       "users",
     ]);
   });
@@ -266,5 +314,57 @@ describe("Tenant Data Plane — migrations and permissions", () => {
 
     expect(usersInA.rows.map((row: { email: string }) => row.email)).toEqual([emailA]);
     expect(usersInB.rows.map((row: { email: string }) => row.email)).toEqual([emailB]);
+  });
+
+  it("backfills property_media rows that existed before processing_status to READY (Prompt 030, section 6)", async () => {
+    const { secretStore } = buildDeps();
+    await seedAdminSecret(secretStore);
+    const tenantId = freshTenantId();
+    const { target } = await provisionTenant(secretStore, tenantId);
+
+    // Simulate a tenant database migrated up through 0004 (property_media exists, but with no
+    // processing_status column yet) — exactly the real-world state of any tenant provisioned
+    // before this task.
+    const preMigrationFolder = buildMigrationsFolderBefore("0005_add_media_processing_status_and_variants");
+    try {
+      const pool = new Pool(target);
+      try {
+        await migrate(drizzle(pool), { migrationsFolder: preMigrationFolder });
+      } finally {
+        await pool.end();
+      }
+    } finally {
+      rmSync(preMigrationFolder, { recursive: true, force: true });
+    }
+
+    const propertyId = randomUUID();
+    const mediaId = randomUUID();
+    const adminConfig = { database: target.database, user: ADMIN_USERNAME, password: ADMIN_PASSWORD };
+    await withClient(adminConfig, async (client) => {
+      await client.query(
+        `INSERT INTO properties (id, title, property_type, transaction_type, status, price)
+         VALUES ($1, 'Existing property', 'APARTMENT', 'SALE', 'ACTIVE', 100000.00)`,
+        [propertyId],
+      );
+      await client.query(
+        `INSERT INTO property_media (id, property_id, object_key, public_url, mime_type, size_bytes, position)
+         VALUES ($1, $2, $3, 'https://example.test/existing.jpg', 'image/jpeg', 100, 0)`,
+        [mediaId, propertyId, `tenants/existing-tenant/properties/${propertyId}/${mediaId}.jpg`],
+      );
+    });
+
+    // The migration this task adds (0005) now runs against a database that already has a
+    // property_media row from before processing_status existed.
+    await runTenantMigrations(target);
+
+    await withClient(adminConfig, async (client) => {
+      const result = await client.query<{ processing_status: string }>(
+        "SELECT processing_status FROM property_media WHERE id = $1",
+        [mediaId],
+      );
+      // READY here means "original operational under the previous model," never "variants
+      // exist" — no variant was generated by this migration (this task, section 6).
+      expect(result.rows[0]?.processing_status).toBe("READY");
+    });
   });
 });

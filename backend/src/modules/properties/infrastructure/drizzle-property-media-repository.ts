@@ -1,7 +1,12 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 
-import { properties, propertyMedia } from "../../../infrastructure/database/tenant/schema.js";
+import { outboxEvents, properties, propertyMedia } from "../../../infrastructure/database/tenant/schema.js";
 import type { TenantDatabase } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
+import {
+  PROPERTY_MEDIA_AGGREGATE_TYPE,
+  PROPERTY_MEDIA_PROCESSING_REQUESTED_EVENT_TYPE,
+  type PropertyMediaProcessingRequestedPayload,
+} from "../domain/property-media-processing-event.js";
 import { PropertyMediaNotFoundError, PropertyMediaReorderMismatchError, type PropertyMedia, type PropertyMediaMimeType } from "../domain/property-media.js";
 import type {
   CreatePropertyMediaInput,
@@ -24,6 +29,7 @@ function toPropertyMedia(row: typeof propertyMedia.$inferSelect): PropertyMedia 
     originalFilename: row.originalFilename,
     position: row.position,
     isCover: row.isCover,
+    processingStatus: row.processingStatus,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -68,12 +74,35 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
 
         const [inserted] = await tx
           .insert(propertyMedia)
-          .values({ ...input, position: nextPosition, isCover })
+          // `processingStatus` is always explicit here, never left to the column's own default
+          // (Prompt 030, ADR-008, section 5) — the DB default (`READY`) exists purely to
+          // backfill rows from before this column existed (section 6), never as the value a new
+          // upload should silently fall back to.
+          .values({ ...input, position: nextPosition, isCover, processingStatus: "PROCESSING" })
           .returning();
 
         if (!inserted) {
           throw new Error("property_media insert returned no row");
         }
+
+        // Same transaction as the insert above (this task, section 45/48): the durable intent
+        // to process this media's variants is recorded atomically with the media row itself —
+        // if either write fails, both roll back together, and no separate BullMQ call ever runs
+        // inside (or depends on) this transaction. Reuses the Tenant Data Plane's existing
+        // `outbox_events` table (section 49) rather than a new media-specific jobs table.
+        // `occurredAt` uses the database's own `now()` (matching `updatedAt` elsewhere in this
+        // file), never `new Date()` from the application.
+        const payload: PropertyMediaProcessingRequestedPayload = {
+          propertyId: input.propertyId,
+          mediaId: inserted.id,
+        };
+        await tx.insert(outboxEvents).values({
+          aggregateType: PROPERTY_MEDIA_AGGREGATE_TYPE,
+          aggregateId: inserted.id,
+          eventType: PROPERTY_MEDIA_PROCESSING_REQUESTED_EVENT_TYPE,
+          payload,
+          occurredAt: sql`now()`,
+        });
 
         return inserted;
       });

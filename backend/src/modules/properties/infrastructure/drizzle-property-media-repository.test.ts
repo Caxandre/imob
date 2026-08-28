@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Client, Pool, escapeIdentifier } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
@@ -167,6 +168,59 @@ describe("createDrizzlePropertyMediaRepository", () => {
       // The partial unique index (`property_media_one_cover_per_property`) guarantees this even
       // under real concurrency — the row lock on the property serializes the decision.
       expect(results.filter((media) => media.isCover)).toHaveLength(1);
+    });
+
+    it("new media is always inserted as PROCESSING (Prompt 030, section 5)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+
+      expect(media.processingStatus).toBe("PROCESSING");
+    });
+
+    it("inserts a PROPERTY_MEDIA_PROCESSING_REQUESTED outbox event atomically with the media row (Prompt 030, section 40/45)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+
+      const events = await db
+        .select()
+        .from(tenantSchema.outboxEvents)
+        .where(eq(tenantSchema.outboxEvents.aggregateId, media.id));
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        aggregateType: "PROPERTY_MEDIA",
+        aggregateId: media.id,
+        eventType: "PROPERTY_MEDIA_PROCESSING_REQUESTED",
+        payload: { propertyId: property.id, mediaId: media.id },
+        processedAt: null,
+      });
+      expect(events[0]?.occurredAt).toBeInstanceOf(Date);
+    });
+
+    it("each upload produces exactly one outbox event — never one per property, never duplicated", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+
+      const first = await mediaRepository.create(sampleMediaInput(property.id));
+      const second = await mediaRepository.create(sampleMediaInput(property.id));
+
+      const events = await db
+        .select()
+        .from(tenantSchema.outboxEvents)
+        .where(eq(tenantSchema.outboxEvents.aggregateType, "PROPERTY_MEDIA"));
+
+      expect(events).toHaveLength(2);
+      expect(events.map((event) => event.aggregateId).sort()).toEqual([first.id, second.id].sort());
     });
   });
 
@@ -479,5 +533,106 @@ describe("createDrizzlePropertyMediaRepository", () => {
       );
       await expect(mediaRepository.listByProperty(propertyB.id)).resolves.toHaveLength(1);
     });
+  });
+});
+
+/**
+ * `property_media_variants` has no repository yet (Prompt 030, section 57 — deliberately: no
+ * consumer exists to write to it until the future processing worker does). These tests insert
+ * directly through the Drizzle table object to prove the schema itself (constraints, cascade,
+ * isolation) — the same level the migration operates at — without inventing CRUD code nothing
+ * calls.
+ */
+describe("property_media_variants schema (Prompt 030)", () => {
+  function sampleVariantInput(
+    propertyMediaId: string,
+    overrides: Partial<typeof tenantSchema.propertyMediaVariants.$inferInsert> = {},
+  ) {
+    const suffix = randomUUID();
+    return {
+      propertyMediaId,
+      variant: "THUMBNAIL" as const,
+      objectKey: `tenants/test-tenant/properties/prop/${propertyMediaId}/thumbnail-${suffix}.webp`,
+      publicUrl: `https://public-base.example/${suffix}.webp`,
+      mimeType: "image/webp",
+      width: 320,
+      height: 200,
+      sizeBytes: 4096,
+      ...overrides,
+    };
+  }
+
+  it("inserts a variant row referencing a real property_media id", async () => {
+    const db = await createMigratedTenantDatabase();
+    const propertyRepository = createDrizzlePropertyRepository(db);
+    const mediaRepository = createDrizzlePropertyMediaRepository(db);
+    const property = await propertyRepository.create(samplePropertyInput());
+    const media = await mediaRepository.create(sampleMediaInput(property.id));
+
+    const [inserted] = await db
+      .insert(tenantSchema.propertyMediaVariants)
+      .values(sampleVariantInput(media.id))
+      .returning();
+
+    expect(inserted?.variant).toBe("THUMBNAIL");
+    expect(inserted?.propertyMediaId).toBe(media.id);
+  });
+
+  it("rejects a second row for the same (property_media_id, variant) — UNIQUE(property_media_id, variant)", async () => {
+    const db = await createMigratedTenantDatabase();
+    const propertyRepository = createDrizzlePropertyRepository(db);
+    const mediaRepository = createDrizzlePropertyMediaRepository(db);
+    const property = await propertyRepository.create(samplePropertyInput());
+    const media = await mediaRepository.create(sampleMediaInput(property.id));
+    await db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(media.id));
+
+    await expect(db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(media.id))).rejects.toThrow();
+  });
+
+  it("cascades on delete when the parent property_media row is removed (ON DELETE CASCADE)", async () => {
+    const db = await createMigratedTenantDatabase();
+    const propertyRepository = createDrizzlePropertyRepository(db);
+    const mediaRepository = createDrizzlePropertyMediaRepository(db);
+    const property = await propertyRepository.create(samplePropertyInput());
+    const media = await mediaRepository.create(sampleMediaInput(property.id));
+    await db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(media.id));
+
+    // Prompt 028's real delete path — a genuine, physical DELETE of the property_media row,
+    // exercising the FK's cascade for real rather than a raw DELETE this test invents itself.
+    await mediaRepository.delete(property.id, media.id);
+
+    const remaining = await db
+      .select()
+      .from(tenantSchema.propertyMediaVariants)
+      .where(eq(tenantSchema.propertyMediaVariants.propertyMediaId, media.id));
+    expect(remaining).toHaveLength(0);
+  });
+
+  it.each([
+    ["width", { width: 0 }],
+    ["height", { height: 0 }],
+    ["size_bytes", { sizeBytes: 0 }],
+  ] as const)("rejects a non-positive %s — CHECK constraint", async (_label, overrides) => {
+    const db = await createMigratedTenantDatabase();
+    const propertyRepository = createDrizzlePropertyRepository(db);
+    const mediaRepository = createDrizzlePropertyMediaRepository(db);
+    const property = await propertyRepository.create(samplePropertyInput());
+    const media = await mediaRepository.create(sampleMediaInput(property.id));
+
+    await expect(
+      db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(media.id, overrides)),
+    ).rejects.toThrow();
+  });
+
+  it("has no tenant_id column (ADR-001) — isolation stays the physical database boundary", async () => {
+    const db = await createMigratedTenantDatabase();
+
+    const result = await db.execute(sql`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'property_media_variants'
+    `);
+    const columnNames = result.rows.map((row) => (row as { column_name: string }).column_name);
+
+    expect(columnNames).not.toContain("tenant_id");
   });
 });

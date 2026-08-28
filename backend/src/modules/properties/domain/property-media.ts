@@ -22,9 +22,20 @@ export interface PropertyMedia {
    * application logic. `false` for every row of a property with no cover selected yet.
    */
   isCover: boolean;
+  /**
+   * Lifecycle of this media's *derived variants* (Prompt 030, ADR-008) — never about the
+   * original itself, which is already usable via `publicUrl` regardless of this value. New
+   * uploads are always inserted as `PROCESSING` (this task, section 5); existing media from
+   * before this field existed were backfilled to `READY` by the migration (section 6) — meaning
+   * "original operational under the previous model," not "variants exist." Nothing in this
+   * codebase transitions a row to `FAILED` yet — that belongs to the future processing worker.
+   */
+  processingStatus: PropertyMediaProcessingStatus;
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type PropertyMediaProcessingStatus = "PROCESSING" | "READY" | "FAILED";
 
 /** Raised when a media id does not exist, or exists but belongs to a different property/tenant
  * — the two cases are deliberately indistinguishable to the caller (404 either way, this task,

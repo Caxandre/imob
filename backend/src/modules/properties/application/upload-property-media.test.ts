@@ -40,6 +40,7 @@ const FAKE_MEDIA: PropertyMedia = {
   originalFilename: "foto.jpg",
   position: 0,
   isCover: true,
+  processingStatus: "PROCESSING",
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 };

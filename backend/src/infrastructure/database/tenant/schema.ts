@@ -82,6 +82,12 @@ export const outboxEvents = pgTable("outbox_events", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Prompt 030 (ADR-008) — lifecycle of a media's derived variants; see `propertyMedia.processingStatus`.
+export const mediaProcessingStatus = pgEnum("media_processing_status", ["PROCESSING", "READY", "FAILED"]);
+
+// Prompt 030 (ADR-008) — the three initial variant presets, names matching the ADR exactly.
+export const propertyMediaVariant = pgEnum("property_media_variant", ["THUMBNAIL", "CARD", "DETAIL"]);
+
 export const propertyType = pgEnum("property_type", ["HOUSE", "APARTMENT", "LAND", "COMMERCIAL", "OTHER"]);
 
 export const transactionType = pgEnum("transaction_type", ["SALE", "RENT"]);
@@ -225,6 +231,18 @@ export const propertyMedia = pgTable(
     // logic picks a cover retroactively (section 10); "first upload becomes cover" is a rule
     // for new uploads only (`upload-property-media.ts`).
     isCover: boolean("is_cover").notNull().default(false),
+    /**
+     * Prompt 030 (ADR-008): lifecycle of this media's *derived variants* — never about the
+     * original itself, which is already usable via `public_url` in every state. New uploads are
+     * always inserted as `PROCESSING` explicitly by application code
+     * (`upload-property-media.ts`) — the column default below (`READY`) exists only to backfill
+     * rows that existed before this column did (this task, section 6): a media that was already
+     * valid under the pre-variant model must never look broken/stuck after this migration, even
+     * though it has zero variants. `FAILED` is a reachable enum value from day one, but nothing
+     * in this codebase transitions a row into it yet — that belongs to the future worker
+     * (ADR-008), not this task.
+     */
+    processingStatus: mediaProcessingStatus("processing_status").notNull().default("READY"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -243,5 +261,45 @@ export const propertyMedia = pgTable(
       "property_media_mime_type_allowed",
       sql`${t.mimeType} IN ('image/jpeg', 'image/png', 'image/webp')`,
     ),
+  ],
+);
+
+/**
+ * Derived, disposable renditions of one `property_media` original (Prompt 030, ADR-008) — never
+ * has independent value of its own: fully reproducible from the original at any time, so
+ * `ON DELETE CASCADE` is the correct FK action here (contrast `property_media.property_id`,
+ * `RESTRICT` above, where the referenced row genuinely has standalone value/history that must
+ * never silently disappear). No `tenant_id`, same as every table in this schema (ADR-001). No
+ * repository/CRUD exists for this table yet (this task, section 57) — it exists so the future
+ * processing worker (ADR-008) has somewhere to write to; nothing in this codebase inserts into
+ * it yet. `UNIQUE(property_media_id, variant)` is the idempotency mechanism that future worker
+ * depends on (ADR-008 "Idempotency") — an upsert on this constraint is what makes a retried job
+ * converge instead of duplicating. `mime_type` is deliberately plain `text`, not constrained by
+ * CHECK to `image/webp` only (this task, section 14) — ADR-008 prefers WebP today, but
+ * coupling the schema to that single format choice would be premature for a table with no
+ * writer yet.
+ */
+export const propertyMediaVariants = pgTable(
+  "property_media_variants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    propertyMediaId: uuid("property_media_id")
+      .notNull()
+      .references(() => propertyMedia.id, { onDelete: "cascade", onUpdate: "restrict" }),
+    variant: propertyMediaVariant("variant").notNull(),
+    objectKey: text("object_key").notNull().unique(),
+    publicUrl: text("public_url").notNull(),
+    mimeType: text("mime_type").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("property_media_variants_media_id_variant_key").on(t.propertyMediaId, t.variant),
+    check("property_media_variants_width_positive", sql`${t.width} > 0`),
+    check("property_media_variants_height_positive", sql`${t.height} > 0`),
+    check("property_media_variants_size_bytes_positive", sql`${t.sizeBytes} > 0`),
   ],
 );
