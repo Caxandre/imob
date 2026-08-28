@@ -43,6 +43,21 @@ const envSchema = z
     DEV_BOOTSTRAP_CLUSTER_PORT: z.coerce.number().int().positive().default(5433),
     DEV_BOOTSTRAP_CLUSTER_ADMIN_USERNAME: z.string().default("postgres"),
     DEV_BOOTSTRAP_CLUSTER_ADMIN_PASSWORD: z.string().default("postgres"),
+
+    // Cloudflare R2 (Prompt 026, ADR-006) — every field is optional here, deliberately: no
+    // entrypoint that doesn't touch object storage should fail to start just because R2 isn't
+    // configured yet (server.ts/provisioning-worker.ts/provisioning-dispatcher.ts never read
+    // these today — no consumer is wired in this task). Presence is validated where the R2
+    // adapter is actually constructed (`createCloudflareR2ObjectStorage`), which requires the
+    // full set or throws `ObjectStorageConfigurationError` — never a partial config accepted
+    // silently. Format IS still validated here for whatever is actually set, so a malformed
+    // value fails fast at process startup rather than surfacing later as a confusing runtime
+    // error from the R2 adapter.
+    R2_ACCOUNT_ID: z.string().min(1, "R2_ACCOUNT_ID must be a non-empty string").optional(),
+    R2_ACCESS_KEY_ID: z.string().min(1, "R2_ACCESS_KEY_ID must be a non-empty string").optional(),
+    R2_SECRET_ACCESS_KEY: z.string().min(1, "R2_SECRET_ACCESS_KEY must be a non-empty string").optional(),
+    R2_BUCKET: z.string().min(1, "R2_BUCKET must be a non-empty string").optional(),
+    R2_PUBLIC_URL: z.string().url("R2_PUBLIC_URL must be a valid URL").optional(),
   })
   .refine(
     (data) =>

@@ -929,11 +929,54 @@ Padrão planejado para publicar eventos de forma confiável a partir de operaç�
 transacionais (ex.: mudanças de estado que precisam disparar jobs assíncronos). Ainda não
 implementado.
 
-## Storage S3-compatible **(futuro)**
+## Object Storage — Cloudflare R2
 
-Armazenamento de arquivos (ex.: fotos de imóveis, documentos) via um storage
-S3-compatible. Ainda não implementado — nenhuma integração de storage existe no código
-atual.
+**Object storage provider: Cloudflare R2** (ver
+[ADR-006](adr/ADR-006-cloudflare-r2-object-storage.md)).
+
+**IMPLEMENTED** (Prompt 026) — `ObjectStorage` port
+(`src/infrastructure/object-storage/object-storage.ts`): `putObject`/`deleteObject`, tipos
+independentes de provider (`PutObjectInput`/`StoredObject`), e `validateObjectKey` (rejeita key
+vazia, começando com `/`, ou com um segmento `..`) — compartilhado por qualquer adapter futuro,
+não só o do R2. Domínio/aplicação dependem só desta porta; `@aws-sdk/client-s3` nunca vaza para
+fora do adapter.
+
+**IMPLEMENTED** (Prompt 026) — adapter real
+(`createCloudflareR2ObjectStorage`, `src/infrastructure/object-storage/cloudflare-r2-object-storage.ts`),
+via `@aws-sdk/client-s3`:
+
+```text
+config (accountId/accessKeyId/secretAccessKey/bucket/publicUrl)
+    ↓
+resolveConfig (Zod) — todos os 5 campos obrigatórios aqui, mesmo sendo opcionais em env.ts
+    → incompleto/inválido → ObjectStorageConfigurationError (nomeia só os campos, nunca valores)
+    ↓
+S3Client({ region: "auto", endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+           credentials, forcePathStyle: false })
+    ↓
+putObject → PutObjectCommand (Bucket/Key/Body/ContentType/ContentLength, nunca ACL)
+deleteObject → DeleteObjectCommand (idempotente por semântica nativa do S3)
+```
+
+`publicUrl` retornado por `putObject` é `R2_PUBLIC_URL` + key, com normalização de barra (nunca
+`//` nem barra ausente) — nunca descoberto via API da Cloudflare, sempre a base configurada.
+Erros do provider nunca vazam credencial/endpoint/request bruto — mapeados para
+`ObjectStorageUploadError`/`ObjectStorageDeleteError`, causa original preservada só em `.cause`
+para debug interno.
+
+**Env vars** (`.env.example`) — todas opcionais no parse global de `env.ts` (nenhum processo
+hoje falha por falta de R2), mas exigidas como conjunto completo dentro de
+`createCloudflareR2ObjectStorage` (falha explícita em configuração parcial, nunca aceita
+silenciosamente): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`,
+`R2_PUBLIC_URL`.
+
+**Deliberadamente não wired ainda**: nem `buildApp()` nem `dev-full.ts` constroem um
+`ObjectStorage` — nenhum consumidor real existe nesta tarefa (`property_media`/upload HTTP são
+Prompt 027). Nenhuma rota HTTP nova; Swagger inalterado.
+
+**PLANNED** — `property_media` (tabela no Tenant Data Plane, metadados apenas — os binários
+ficam inteiramente no R2), endpoints de upload HTTP, gallery ordering, cover image, delete de
+mídia por propriedade, image resizing/thumbnails, CDN custom domain, signed URLs.
 
 ## Princípios
 
