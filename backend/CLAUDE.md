@@ -40,6 +40,13 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   padrão; prefira um estado de ciclo de vida explícito (ex.: `status = INACTIVE`) a menos que
   uma funcionalidade concreta exija exclusão real. Ver `properties` (Prompt 022) como exemplo
   aplicado: `DELETE /api/v1/properties/:id` nunca executa `DELETE FROM properties`.
+- Mídia binária nunca deve ser persistida no PostgreSQL; grave objetos através de
+  `ObjectStorage` (ADR-006) e mantenha apenas metadados/referências (ex.: key, URL pública) nas
+  tabelas do Tenant Data Plane.
+- Tipos de SDK de provider externo (Cloudflare/AWS, `@aws-sdk/client-s3` incluído) nunca devem
+  vazar para portas de domínio/aplicação — confine-os inteiramente ao adapter de
+  infraestrutura correspondente (ver `src/infrastructure/object-storage/` como exemplo
+  aplicado).
 
 ## Multi-tenancy — regra crítica
 
