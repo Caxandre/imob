@@ -13,6 +13,7 @@ import {
   tenantDatabases,
   tenants,
 } from "../../../infrastructure/database/control-plane/schema.js";
+import type { InMemoryObjectStorage } from "../../../infrastructure/object-storage/test-support/in-memory-object-storage.js";
 import { createInMemoryObjectStorage } from "../../../infrastructure/object-storage/test-support/in-memory-object-storage.js";
 import { createClusterAdminCredentialResolver } from "../../provisioning/application/cluster-admin-credential-resolver.js";
 import { startPendingProvisioningJob } from "../../provisioning/application/process-provisioning-job.js";
@@ -302,6 +303,65 @@ async function listPropertyMediaRequest(app: FastifyInstance, tenantId: string, 
     url: `/api/v1/properties/${propertyId}/media`,
     headers: { [TENANT_ID_HEADER]: tenantId },
   });
+}
+
+async function reorderPropertyMediaRequest(
+  app: FastifyInstance,
+  tenantId: string,
+  propertyId: string,
+  mediaIds: unknown[],
+) {
+  return app.inject({
+    method: "PUT",
+    url: `/api/v1/properties/${propertyId}/media/order`,
+    headers: { [TENANT_ID_HEADER]: tenantId },
+    payload: { media_ids: mediaIds },
+  });
+}
+
+async function setPropertyMediaCoverRequest(app: FastifyInstance, tenantId: string, propertyId: string, mediaId: string) {
+  return app.inject({
+    method: "PATCH",
+    url: `/api/v1/properties/${propertyId}/media/${mediaId}/cover`,
+    headers: { [TENANT_ID_HEADER]: tenantId },
+  });
+}
+
+async function deletePropertyMediaRequest(app: FastifyInstance, tenantId: string, propertyId: string, mediaId: string) {
+  return app.inject({
+    method: "DELETE",
+    url: `/api/v1/properties/${propertyId}/media/${mediaId}`,
+    headers: { [TENANT_ID_HEADER]: tenantId },
+  });
+}
+
+/** Wraps a real in-memory `ObjectStorage` fake so `deleteObject` fails on demand (Prompt 028) —
+ * used to prove the HTTP layer still returns 204 (ADR-007 "Delete": metadata removal already
+ * committed, R2 cleanup is best-effort) instead of surfacing the failure as a 5xx. */
+function withFailingDeleteObject(base: InMemoryObjectStorage): InMemoryObjectStorage & { deleteCalls: string[] } {
+  const deleteCalls: string[] = [];
+  return {
+    ...base,
+    deleteCalls,
+    async deleteObject(key: string) {
+      deleteCalls.push(key);
+      throw new Error("simulated object storage failure");
+    },
+  };
+}
+
+/** Wraps a real in-memory `ObjectStorage` fake purely to record which keys `deleteObject` was
+ * called with — used to assert R2 is never touched on a 4xx before the metadata delete commits. */
+function withRecordedDeletes(base: InMemoryObjectStorage): InMemoryObjectStorage & { deleteCalls: string[] } {
+  const deleteCalls: string[] = [];
+  return {
+    ...base,
+    deleteCalls,
+    async deleteObject(key: string) {
+      deleteCalls.push(key);
+      return base.deleteObject(key);
+    },
+  };
 }
 
 describe("Properties HTTP routes", () => {
@@ -1507,6 +1567,579 @@ describe("Properties HTTP routes", () => {
 
         expect(response.statusCode).toBe(200);
         expect(response.json().data.map((m: { id: string }) => m.id)).toEqual([uploaded.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("PUT /api/v1/properties/:id/media/order", () => {
+    it("reorders the gallery and returns 200 with the new order, never changing is_cover", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const third = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await reorderPropertyMediaRequest(app, tenant.id, propertyId, [
+          third.json().id,
+          first.json().id,
+          second.json().id,
+        ]);
+
+        expect(response.statusCode).toBe(200);
+        const body = response.json();
+        expect(body.data.map((m: { id: string; position: number }) => [m.id, m.position])).toEqual([
+          [third.json().id, 0],
+          [first.json().id, 1],
+          [second.json().id, 2],
+        ]);
+        // First upload became the cover (this task's own rule) — reorder must not disturb it.
+        expect(body.data.find((m: { id: string }) => m.id === first.json().id).is_cover).toBe(true);
+        expect(body.data.find((m: { id: string }) => m.id !== first.json().id).is_cover).toBe(false);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("accepts an empty array as a no-op when the property currently has zero media", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-empty-noop", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+
+        const response = await reorderPropertyMediaRequest(app, tenant.id, created.json().id, []);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ data: [] });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 409 for an empty array when the property already has media", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-empty-conflict", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await reorderPropertyMediaRequest(app, tenant.id, propertyId, []);
+
+        expect(response.statusCode).toBe(409);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 409 when media_ids omits an id that belongs to the current gallery", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-missing", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await reorderPropertyMediaRequest(app, tenant.id, propertyId, [first.json().id]);
+
+        expect(response.statusCode).toBe(409);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 when media_ids includes an id that does not belong to the property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-unknown", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await reorderPropertyMediaRequest(app, tenant.id, propertyId, [first.json().id, randomUUID()]);
+
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it.each([
+      ["duplicate ids", true],
+      ["a malformed uuid", false],
+    ])("rejects media_ids with %s with 400", async (label, useDuplicate) => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant(`reorder-bad-body-${label === "duplicate ids" ? "dup" : "malformed"}`, secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const mediaIds = useDuplicate ? [first.json().id, first.json().id] : ["not-a-uuid"];
+        const response = await reorderPropertyMediaRequest(app, tenant.id, propertyId, mediaIds);
+
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 400 for a malformed property id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-bad-id", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const response = await reorderPropertyMediaRequest(app, tenant.id, "not-a-uuid", []);
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 for a well-formed but unknown property id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-404", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const response = await reorderPropertyMediaRequest(app, tenant.id, randomUUID(), []);
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 when the property belongs to a different tenant, that tenant's gallery untouched", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("reorder-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("reorder-cross-b", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenantA.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenantA.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await reorderPropertyMediaRequest(app, tenantB.id, propertyId, [second.json().id, first.json().id]);
+        expect(response.statusCode).toBe(404);
+
+        const listA = await listPropertyMediaRequest(app, tenantA.id, propertyId);
+        expect(listA.json().data.map((m: { id: string }) => m.id)).toEqual([first.json().id, second.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("is allowed for an archived (INACTIVE) property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("reorder-archived", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        await deleteProperty(app, tenant.id, propertyId);
+
+        const response = await reorderPropertyMediaRequest(app, tenant.id, propertyId, [second.json().id, first.json().id]);
+
+        expect(response.statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("PATCH /api/v1/properties/:id/media/:mediaId/cover", () => {
+    it("sets a media as cover, unsetting the previous one", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-set", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        expect(first.json().is_cover).toBe(true);
+
+        const response = await setPropertyMediaCoverRequest(app, tenant.id, propertyId, second.json().id);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().is_cover).toBe(true);
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const byId = new Map(list.json().data.map((m: { id: string; is_cover: boolean }) => [m.id, m.is_cover]));
+        expect(byId.get(first.json().id)).toBe(false);
+        expect(byId.get(second.json().id)).toBe(true);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("is idempotent — selecting the current cover again still returns 200", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-idempotent", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await setPropertyMediaCoverRequest(app, tenant.id, propertyId, first.json().id);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().is_cover).toBe(true);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("never results in more than one cover under real concurrent cover-setting requests", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-concurrent", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const results = await Promise.allSettled([
+          setPropertyMediaCoverRequest(app, tenant.id, propertyId, first.json().id),
+          setPropertyMediaCoverRequest(app, tenant.id, propertyId, second.json().id),
+        ]);
+        for (const result of results) {
+          expect(result.status).toBe("fulfilled");
+          if (result.status === "fulfilled") {
+            expect(result.value.statusCode).toBe(200);
+          }
+        }
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const covers = list.json().data.filter((m: { is_cover: boolean }) => m.is_cover);
+        expect(covers).toHaveLength(1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 400 for a malformed property id or media id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-bad-id", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const response = await setPropertyMediaCoverRequest(app, tenant.id, "not-a-uuid", randomUUID());
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 for a well-formed but unknown property id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-404-property", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const response = await setPropertyMediaCoverRequest(app, tenant.id, randomUUID(), randomUUID());
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 when the media does not belong to the property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-404-media", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const propertyA = await createProperty(app, tenant.id);
+        const propertyB = await createProperty(app, tenant.id);
+        const mediaOfB = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyB.json().id,
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+
+        const response = await setPropertyMediaCoverRequest(app, tenant.id, propertyA.json().id, mediaOfB.json().id);
+
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 when the property belongs to a different tenant", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("cover-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("cover-cross-b", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+        const media = await uploadPropertyMediaRequest(app, tenantA.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await setPropertyMediaCoverRequest(app, tenantB.id, propertyId, media.json().id);
+
+        expect(response.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("is allowed for an archived (INACTIVE) property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("cover-archived", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        await deleteProperty(app, tenant.id, propertyId);
+
+        const response = await setPropertyMediaCoverRequest(app, tenant.id, propertyId, second.json().id);
+
+        expect(response.statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("DELETE /api/v1/properties/:id/media/:mediaId", () => {
+    it("deletes media, returns 204, and removes it from ObjectStorage and the listing, reindexing gaplessly", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete", secretStore);
+      const objectStorage = createInMemoryObjectStorage();
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const third = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyId, second.json().id);
+
+        expect(response.statusCode).toBe(204);
+        expect(response.body).toBe("");
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        expect(list.json().data.map((m: { id: string; position: number }) => [m.id, m.position])).toEqual([
+          [first.json().id, 0],
+          [third.json().id, 1],
+        ]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("promotes the new position-0 media to cover when the deleted media was the cover", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-cover", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        expect(first.json().is_cover).toBe(true);
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyId, first.json().id);
+        expect(response.statusCode).toBe(204);
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        expect(list.json().data).toEqual([expect.objectContaining({ id: second.json().id, position: 0, is_cover: true })]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("leaves the current cover untouched when the deleted media was not the cover", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-noncover", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyId, second.json().id);
+        expect(response.statusCode).toBe(204);
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        expect(list.json().data).toEqual([expect.objectContaining({ id: first.json().id, position: 0, is_cover: true })]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("leaves the gallery empty with no cover after deleting the only media", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-last", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const only = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyId, only.json().id);
+        expect(response.statusCode).toBe(204);
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        expect(list.json().data).toEqual([]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("still returns 204 when the R2 delete fails — metadata removal already committed", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-r2-fail", secretStore);
+      const objectStorage = withFailingDeleteObject(createInMemoryObjectStorage());
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const media = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyId, media.json().id);
+
+        expect(response.statusCode).toBe(204);
+        expect(objectStorage.deleteCalls).toHaveLength(1);
+
+        const list = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        expect(list.json().data).toEqual([]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 400 for a malformed property id or media id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-bad-id", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const response = await deletePropertyMediaRequest(app, tenant.id, "not-a-uuid", randomUUID());
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 (never touching ObjectStorage) for a well-formed but unknown property id", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-404-property", secretStore);
+      const objectStorage = withRecordedDeletes(createInMemoryObjectStorage());
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const response = await deletePropertyMediaRequest(app, tenant.id, randomUUID(), randomUUID());
+        expect(response.statusCode).toBe(404);
+        expect(objectStorage.deleteCalls).toHaveLength(0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 (never touching ObjectStorage) when the media does not belong to the property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-404-media", secretStore);
+      const objectStorage = withRecordedDeletes(createInMemoryObjectStorage());
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const propertyA = await createProperty(app, tenant.id);
+        const propertyB = await createProperty(app, tenant.id);
+        const mediaOfB = await uploadPropertyMediaRequest(
+          app,
+          tenant.id,
+          propertyB.json().id,
+          buildMultipartUpload({ content: JPEG_BYTES }),
+        );
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyA.json().id, mediaOfB.json().id);
+
+        expect(response.statusCode).toBe(404);
+        expect(objectStorage.deleteCalls).toHaveLength(0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns 404 (never touching ObjectStorage) when the property belongs to a different tenant", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("media-delete-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("media-delete-cross-b", secretStore);
+      const objectStorage = withRecordedDeletes(createInMemoryObjectStorage());
+      const app = buildTestApp(secretStore, objectStorage);
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+        const media = await uploadPropertyMediaRequest(app, tenantA.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await deletePropertyMediaRequest(app, tenantB.id, propertyId, media.json().id);
+        expect(response.statusCode).toBe(404);
+        expect(objectStorage.deleteCalls).toHaveLength(0);
+
+        const listA = await listPropertyMediaRequest(app, tenantA.id, propertyId);
+        expect(listA.json().data.map((m: { id: string }) => m.id)).toEqual([media.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("is allowed for an archived (INACTIVE) property", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-delete-archived", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const media = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        await deleteProperty(app, tenant.id, propertyId);
+
+        const response = await deletePropertyMediaRequest(app, tenant.id, propertyId, media.json().id);
+
+        expect(response.statusCode).toBe(204);
       } finally {
         await app.close();
       }

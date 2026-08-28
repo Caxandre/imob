@@ -242,6 +242,7 @@ const EXAMPLE_PROPERTY_MEDIA = {
   size_bytes: 245_760,
   original_filename: "foto-sala.jpg",
   position: 0,
+  is_cover: true,
   created_at: "2026-08-28T12:00:00.000Z",
   updated_at: "2026-08-28T12:00:00.000Z",
 } as const;
@@ -249,7 +250,9 @@ const EXAMPLE_PROPERTY_MEDIA = {
 /**
  * Deliberately never includes `object_key` (this task, section 44) — it is an internal storage
  * detail, not part of the public contract. `public_url` is the persisted value from the upload
- * (`ObjectStorage.putObject()`), never recomputed on read (section 8).
+ * (`ObjectStorage.putObject()`), never recomputed on read (section 8). `is_cover` (Prompt 028):
+ * at most one `true` per property, enforced by a database partial unique index — never only an
+ * application convention.
  */
 export const propertyMediaSchema = {
   $id: "PropertyMedia",
@@ -264,6 +267,7 @@ export const propertyMediaSchema = {
     size_bytes: { type: "integer", minimum: 1 },
     original_filename: { type: "string", nullable: true },
     position: { type: "integer", minimum: 0 },
+    is_cover: { type: "boolean", description: "At most one media per property has this set to true." },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
   },
@@ -275,6 +279,7 @@ export const propertyMediaSchema = {
     "size_bytes",
     "original_filename",
     "position",
+    "is_cover",
     "created_at",
     "updated_at",
   ],
@@ -313,4 +318,32 @@ export const uploadPropertyMediaRequestSchema = {
   properties: {
     file: { type: "string", format: "binary", description: "The image file." },
   },
+} as const;
+
+/**
+ * `PUT /api/v1/properties/{id}/media/order` request body (Prompt 028, section 71). Loose on
+ * purpose, same reasoning already documented on `CreatePropertyRequest`/
+ * `UploadPropertyMediaRequest` above — `reorderPropertyMediaBodySchema` (Zod) is the real
+ * validation; this stays undemanding so AJV never rejects a request before Zod's own
+ * `{statusCode, error, message, details}` envelope gets a chance to run.
+ */
+export const reorderPropertyMediaRequestSchema = {
+  $id: "ReorderPropertyMediaRequest",
+  title: "ReorderPropertyMediaRequest",
+  type: "object",
+  description:
+    "The complete new gallery order, as an array of every media id the property currently " +
+    "has — media_ids[0] becomes position 0, media_ids[1] becomes position 1, and so on. Must " +
+    "contain exactly the property's current media ids (no fewer, no more, no duplicates).",
+  properties: {
+    media_ids: { type: "array", items: { type: "string", format: "uuid" } },
+  },
+  examples: [
+    {
+      media_ids: [
+        "3b1f6e2a-8c9d-4f7a-9e3b-2d1a5c8f0e11",
+        "7c2e5a1b-4d6f-4a8c-b3e7-1f9a2d5c8e40",
+      ],
+    },
+  ],
 } as const;

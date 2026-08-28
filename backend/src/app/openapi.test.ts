@@ -63,6 +63,9 @@ describe("OpenAPI specification", () => {
         "/api/v1/properties",
         "/api/v1/properties/{id}",
         "/api/v1/properties/{id}/media",
+        "/api/v1/properties/{id}/media/order",
+        "/api/v1/properties/{id}/media/{mediaId}/cover",
+        "/api/v1/properties/{id}/media/{mediaId}",
       ]),
     );
   });
@@ -157,6 +160,28 @@ describe("OpenAPI specification", () => {
     expect(Object.keys(listMedia?.responses ?? {})).toEqual(
       expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
     );
+
+    const reorderMedia = spec.paths["/api/v1/properties/{id}/media/order"]?.put;
+    expect(reorderMedia?.operationId).toBe("reorderPropertyMedia");
+    expect(reorderMedia?.tags).toEqual(["Properties"]);
+    expect(reorderMedia?.requestBody).toBeDefined();
+    expect(Object.keys(reorderMedia?.responses ?? {})).toEqual(
+      expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
+    );
+
+    const setCover = spec.paths["/api/v1/properties/{id}/media/{mediaId}/cover"]?.patch;
+    expect(setCover?.operationId).toBe("setPropertyMediaCover");
+    expect(setCover?.tags).toEqual(["Properties"]);
+    expect(Object.keys(setCover?.responses ?? {})).toEqual(
+      expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
+    );
+
+    const deleteMedia = spec.paths["/api/v1/properties/{id}/media/{mediaId}"]?.delete;
+    expect(deleteMedia?.operationId).toBe("deletePropertyMedia");
+    expect(deleteMedia?.tags).toEqual(["Properties"]);
+    expect(Object.keys(deleteMedia?.responses ?? {})).toEqual(
+      expect.arrayContaining(["204", "400", "404", "409", "503", "500"]),
+    );
   });
 
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
@@ -174,6 +199,7 @@ describe("OpenAPI specification", () => {
         "PropertyList",
         "PropertyMedia",
         "PropertyMediaList",
+        "ReorderPropertyMediaRequest",
       ]),
     );
   });

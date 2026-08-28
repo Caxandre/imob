@@ -1,0 +1,2 @@
+ALTER TABLE "property_media" ADD COLUMN "is_cover" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "property_media_one_cover_per_property" ON "property_media" USING btree ("property_id") WHERE "property_media"."is_cover" = true;

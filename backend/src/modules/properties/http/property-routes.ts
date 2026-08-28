@@ -7,6 +7,7 @@ import type { TenantDatabaseConnectionManager } from "../../tenant-runtime/appli
 import type { TenantDatabaseResolver } from "../../tenant-runtime/application/tenant-database-resolver.js";
 import { archiveProperty } from "../application/archive-property.js";
 import { createProperty } from "../application/create-property.js";
+import { deletePropertyMedia } from "../application/delete-property-media.js";
 import { getProperty } from "../application/get-property.js";
 import { listProperties } from "../application/list-properties.js";
 import { listPropertyMedia } from "../application/list-property-media.js";
@@ -17,6 +18,8 @@ import type {
   PropertySort,
   UpdatePropertyInput,
 } from "../application/property-repository.js";
+import { reorderPropertyMedia } from "../application/reorder-property-media.js";
+import { setPropertyMediaCover } from "../application/set-property-media-cover.js";
 import { updateProperty } from "../application/update-property.js";
 import { uploadPropertyMedia } from "../application/upload-property-media.js";
 import { ALLOWED_PROPERTY_MEDIA_MIME_TYPES, isAllowedPropertyMediaMimeType, type PropertyMedia } from "../domain/property-media.js";
@@ -24,7 +27,12 @@ import type { Property } from "../domain/property.js";
 import { createDrizzlePropertyMediaRepository } from "../infrastructure/drizzle-property-media-repository.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
 import { mapPropertyRouteError } from "./property-error-mapper.js";
-import { MAX_MEDIA_FILE_SIZE_BYTES, sanitizeOriginalFilename } from "./property-media-request.schema.js";
+import {
+  MAX_MEDIA_FILE_SIZE_BYTES,
+  propertyMediaIdParamsSchema,
+  reorderPropertyMediaBodySchema,
+  sanitizeOriginalFilename,
+} from "./property-media-request.schema.js";
 import { tenantIdHeaderSchema } from "./property-openapi.schema.js";
 import {
   createPropertyBodySchema,
@@ -77,6 +85,7 @@ function toPropertyMediaResponse(media: PropertyMedia) {
     size_bytes: media.sizeBytes,
     original_filename: media.originalFilename,
     position: media.position,
+    is_cover: media.isCover,
     created_at: media.createdAt.toISOString(),
     updated_at: media.updatedAt.toISOString(),
   };
@@ -708,6 +717,220 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
         });
 
         return reply.send({ data: mediaList.map(toPropertyMediaResponse) });
+      }),
+    );
+
+    app.put(
+      "/properties/:id/media/order",
+      {
+        schema: {
+          operationId: "reorderPropertyMedia",
+          summary: "Reorder property media gallery",
+          description:
+            "Replaces a property's entire gallery order. media_ids must contain exactly the " +
+            "property's current media ids (no fewer, no more, no duplicates) — media_ids[0] " +
+            "becomes position 0, and so on. An empty array is only accepted as a no-op when " +
+            "the property currently has zero media; otherwise it is rejected as a mismatch. " +
+            "Never changes which media is the cover. Allowed for an archived (INACTIVE) " +
+            "property — this is gallery maintenance, not adding new content.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          params: {
+            type: "object",
+            properties: { id: { type: "string", format: "uuid" } },
+            required: ["id"],
+          },
+          body: { $ref: "ReorderPropertyMediaRequest#" },
+          response: {
+            200: { description: "Gallery reordered", $ref: "PropertyMediaList#" },
+            400: {
+              description: "Invalid id, invalid/duplicate media ids, or missing/invalid X-Tenant-Id",
+              $ref: "ErrorResponse#",
+            },
+            404: {
+              description: "Property not found, or a submitted media id does not belong to it",
+              $ref: "ErrorResponse#",
+            },
+            409: {
+              description: "Tenant is not READY, or media_ids does not exactly match the current gallery",
+              $ref: "ErrorResponse#",
+            },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id", parsedParams.error.issues);
+        }
+
+        const parsedBody = reorderPropertyMediaBodySchema.safeParse(request.body);
+        if (!parsedBody.success) {
+          return badRequest(reply, "Invalid request payload", parsedBody.error.issues);
+        }
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const mediaList = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const propertyRepository = createDrizzlePropertyRepository(db);
+          const propertyMediaRepository = createDrizzlePropertyMediaRepository(db);
+          return reorderPropertyMedia(propertyRepository, propertyMediaRepository, parsedParams.data.id, parsedBody.data.media_ids);
+        });
+
+        request.log.info(
+          { operation: "property.media.reorder", tenantId: tenantContext.tenantId, propertyId: parsedParams.data.id },
+          "property media reordered",
+        );
+
+        return reply.send({ data: mediaList.map(toPropertyMediaResponse) });
+      }),
+    );
+
+    app.patch(
+      "/properties/:id/media/:mediaId/cover",
+      {
+        schema: {
+          operationId: "setPropertyMediaCover",
+          summary: "Set property media cover",
+          description:
+            "Sets one media as the property's cover, unsetting any previous one. Idempotent — " +
+            "selecting the media that is already the cover still returns 200. Allowed for an " +
+            "archived (INACTIVE) property — this is gallery maintenance, not adding new content.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          params: {
+            type: "object",
+            properties: {
+              id: { type: "string", format: "uuid" },
+              mediaId: { type: "string", format: "uuid" },
+            },
+            required: ["id", "mediaId"],
+          },
+          response: {
+            200: { description: "Cover set", $ref: "PropertyMedia#" },
+            400: { description: "Invalid id/mediaId or missing/invalid X-Tenant-Id", $ref: "ErrorResponse#" },
+            404: { description: "Property not found, or media does not belong to it", $ref: "ErrorResponse#" },
+            409: { description: "Tenant is not READY", $ref: "ErrorResponse#" },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyMediaIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id or media id", parsedParams.error.issues);
+        }
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const media = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const propertyRepository = createDrizzlePropertyRepository(db);
+          const propertyMediaRepository = createDrizzlePropertyMediaRepository(db);
+          return setPropertyMediaCover(propertyRepository, propertyMediaRepository, parsedParams.data.id, parsedParams.data.mediaId);
+        });
+
+        request.log.info(
+          {
+            operation: "property.media.setCover",
+            tenantId: tenantContext.tenantId,
+            propertyId: parsedParams.data.id,
+            mediaId: parsedParams.data.mediaId,
+          },
+          "property media cover set",
+        );
+
+        return reply.send(toPropertyMediaResponse(media));
+      }),
+    );
+
+    app.delete(
+      "/properties/:id/media/:mediaId",
+      {
+        schema: {
+          operationId: "deletePropertyMedia",
+          summary: "Delete property media",
+          description:
+            "Removes one media from a property's gallery. The tenant database metadata is " +
+            "removed first, remaining positions are reindexed to a gapless 0..N-1, and — if the " +
+            "deleted media was the cover and others remain — the new position-0 media " +
+            "automatically becomes the new cover. Only after that database transaction commits " +
+            "is the underlying Cloudflare R2 object deleted, on a best-effort basis: a failure " +
+            "there does not fail the request (it is logged server-side; the object may remain " +
+            "as an orphan for future reconciliation). Allowed for an archived (INACTIVE) " +
+            "property — this is gallery maintenance, not adding new content.",
+          tags: ["Properties"],
+          headers: tenantIdHeaderSchema,
+          params: {
+            type: "object",
+            properties: {
+              id: { type: "string", format: "uuid" },
+              mediaId: { type: "string", format: "uuid" },
+            },
+            required: ["id", "mediaId"],
+          },
+          response: {
+            204: { description: "Media deleted" },
+            400: { description: "Invalid id/mediaId or missing/invalid X-Tenant-Id", $ref: "ErrorResponse#" },
+            404: { description: "Property not found, or media does not belong to it", $ref: "ErrorResponse#" },
+            409: { description: "Tenant is not READY", $ref: "ErrorResponse#" },
+            503: { description: "Tenant infrastructure is not currently available", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      withMappedErrors(async (request, reply) => {
+        const tenantContext = resolveTenantContext(request);
+
+        const parsedParams = propertyMediaIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return badRequest(reply, "Invalid property id or media id", parsedParams.error.issues);
+        }
+
+        const target = await deps.tenantDatabaseResolver.resolve(tenantContext.tenantId);
+        const outcome = await deps.tenantDatabaseConnectionManager.withTenantDatabase(target, async (db) => {
+          const propertyRepository = createDrizzlePropertyRepository(db);
+          const propertyMediaRepository = createDrizzlePropertyMediaRepository(db);
+          return deletePropertyMedia(
+            propertyRepository,
+            propertyMediaRepository,
+            deps.objectStorage,
+            parsedParams.data.id,
+            parsedParams.data.mediaId,
+          );
+        });
+
+        if (!outcome.objectStorageDeleted) {
+          // Metadata removal already committed — this is a best-effort cleanup failure, never
+          // a reason to fail the request (ADR-007 "Delete"). Never logs a secret; only the
+          // identifiers needed to find/reconcile the orphaned object later.
+          request.log.warn(
+            {
+              operation: "property.media.delete.objectStorageFailed",
+              tenantId: tenantContext.tenantId,
+              propertyId: parsedParams.data.id,
+              mediaId: parsedParams.data.mediaId,
+              objectKey: outcome.objectKey,
+            },
+            "property media metadata deleted, but the object storage delete failed — object may be orphaned",
+          );
+        }
+
+        request.log.info(
+          {
+            operation: "property.media.delete",
+            tenantId: tenantContext.tenantId,
+            propertyId: parsedParams.data.id,
+            mediaId: parsedParams.data.mediaId,
+          },
+          "property media deleted",
+        );
+
+        return reply.status(204).send();
       }),
     );
   };

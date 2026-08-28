@@ -16,8 +16,44 @@ export interface PropertyMedia {
   sizeBytes: number;
   originalFilename: string | null;
   position: number;
+  /**
+   * At most one `true` per property (Prompt 028) — enforced by a partial unique index
+   * (`property_media_one_cover_per_property`, `WHERE is_cover = true`), never only by
+   * application logic. `false` for every row of a property with no cover selected yet.
+   */
+  isCover: boolean;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** Raised when a media id does not exist, or exists but belongs to a different property/tenant
+ * — the two cases are deliberately indistinguishable to the caller (404 either way, this task,
+ * section 18/28), for the same cross-tenant-enumeration reason `PropertyNotFoundError` already
+ * follows. */
+export class PropertyMediaNotFoundError extends Error {
+  readonly mediaId: string;
+
+  constructor(mediaId: string) {
+    super(`Property media "${mediaId}" was not found`);
+    this.name = "PropertyMediaNotFoundError";
+    this.mediaId = mediaId;
+  }
+}
+
+/**
+ * Raised by `reorder` when the submitted `media_ids` — after confirming every id genuinely
+ * belongs to the property (else `PropertyMediaNotFoundError`, 404) — does not cover the
+ * property's entire current gallery (this task, section 17/20). Maps to `409 Conflict`: the
+ * submitted state conflicts with the gallery's actual current state, not a malformed request.
+ */
+export class PropertyMediaReorderMismatchError extends Error {
+  readonly propertyId: string;
+
+  constructor(propertyId: string) {
+    super(`media_ids must contain exactly the property's current gallery (property "${propertyId}")`);
+    this.name = "PropertyMediaReorderMismatchError";
+    this.propertyId = propertyId;
+  }
 }
 
 export type PropertyMediaMimeType = "image/jpeg" | "image/png" | "image/webp";

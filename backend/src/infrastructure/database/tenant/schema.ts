@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
   bigint,
+  boolean,
   check,
   customType,
   index,
@@ -12,6 +13,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
@@ -217,11 +219,24 @@ export const propertyMedia = pgTable(
     // nothing is stored as absent, never as an empty string.
     originalFilename: text("original_filename"),
     position: integer("position").notNull(),
+    // Prompt 028: at most one `true` per property, enforced below by a partial unique index —
+    // never only by application logic (this task, section 6). Existing rows from before this
+    // column existed default to `false` via the column default itself — no backfill migration
+    // logic picks a cover retroactively (section 10); "first upload becomes cover" is a rule
+    // for new uploads only (`upload-property-media.ts`).
+    isCover: boolean("is_cover").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     unique("property_media_property_id_position_key").on(t.propertyId, t.position),
+    // Partial unique index — `WHERE is_cover = true` — is what actually makes "at most one
+    // cover per property" a database invariant, not just an application-level convention
+    // (section 6). A property with zero `is_cover = true` rows satisfies it trivially (no rows
+    // to conflict), which is exactly "cover = none" (section 8).
+    uniqueIndex("property_media_one_cover_per_property")
+      .on(t.propertyId)
+      .where(sql`${t.isCover} = true`),
     check("property_media_position_non_negative", sql`${t.position} >= 0`),
     check("property_media_size_bytes_positive", sql`${t.sizeBytes} > 0`),
     check(

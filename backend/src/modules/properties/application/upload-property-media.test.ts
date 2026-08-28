@@ -39,6 +39,7 @@ const FAKE_MEDIA: PropertyMedia = {
   sizeBytes: 5,
   originalFilename: "foto.jpg",
   position: 0,
+  isCover: true,
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 };
@@ -58,6 +59,9 @@ function fakePropertyMediaRepository(overrides: Partial<PropertyMediaRepository>
   return {
     create: async () => FAKE_MEDIA,
     listByProperty: async () => [FAKE_MEDIA],
+    reorder: async () => [FAKE_MEDIA],
+    setCover: async () => FAKE_MEDIA,
+    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey }),
     ...overrides,
   };
 }

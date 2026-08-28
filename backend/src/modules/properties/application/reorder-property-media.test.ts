@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PropertyMedia } from "../domain/property-media.js";
 import { PropertyNotFoundError, type Property } from "../domain/property.js";
-import { listPropertyMedia } from "./list-property-media.js";
+import { reorderPropertyMedia } from "./reorder-property-media.js";
 import type { PropertyMediaRepository } from "./property-media-repository.js";
 import type { PropertyRepository } from "./property-repository.js";
 
@@ -12,7 +12,7 @@ const FAKE_PROPERTY: Property = {
   description: null,
   propertyType: "APARTMENT",
   transactionType: "SALE",
-  status: "INACTIVE",
+  status: "ACTIVE",
   price: "450000.00",
   bedrooms: null,
   bathrooms: null,
@@ -65,35 +65,50 @@ function fakePropertyMediaRepository(overrides: Partial<PropertyMediaRepository>
   };
 }
 
-describe("listPropertyMedia", () => {
-  it("returns the media list from the repository", async () => {
+describe("reorderPropertyMedia", () => {
+  it("delegates to the repository and returns the reordered gallery", async () => {
     await expect(
-      listPropertyMedia(fakePropertyRepository(), fakePropertyMediaRepository(), FAKE_PROPERTY.id),
+      reorderPropertyMedia(fakePropertyRepository(), fakePropertyMediaRepository(), FAKE_PROPERTY.id, [FAKE_MEDIA.id]),
     ).resolves.toEqual([FAKE_MEDIA]);
   });
 
   it("throws PropertyNotFoundError when the property does not exist, never calling the media repository", async () => {
-    const listCalls: string[] = [];
+    const reorderCalls: string[] = [];
     const mediaRepository = fakePropertyMediaRepository({
-      listByProperty: async (propertyId) => {
-        listCalls.push(propertyId);
+      reorder: async (propertyId) => {
+        reorderCalls.push(propertyId);
         return [FAKE_MEDIA];
       },
     });
 
     await expect(
-      listPropertyMedia(fakePropertyRepository({ findById: async () => undefined }), mediaRepository, "missing-id"),
+      reorderPropertyMedia(fakePropertyRepository({ findById: async () => undefined }), mediaRepository, "missing-id", []),
     ).rejects.toBeInstanceOf(PropertyNotFoundError);
-    expect(listCalls).toHaveLength(0);
+    expect(reorderCalls).toHaveLength(0);
   });
 
-  it("allows listing media for an INACTIVE (archived) property — archiving never hides media", async () => {
+  it("allows reordering for an INACTIVE (archived) property", async () => {
     await expect(
-      listPropertyMedia(
+      reorderPropertyMedia(
         fakePropertyRepository({ findById: async () => ({ ...FAKE_PROPERTY, status: "INACTIVE" }) }),
         fakePropertyMediaRepository(),
         FAKE_PROPERTY.id,
+        [FAKE_MEDIA.id],
       ),
     ).resolves.toEqual([FAKE_MEDIA]);
+  });
+
+  it("passes mediaIds through to the repository unchanged", async () => {
+    const received: string[][] = [];
+    const mediaRepository = fakePropertyMediaRepository({
+      reorder: async (_propertyId, mediaIds) => {
+        received.push(mediaIds);
+        return [FAKE_MEDIA];
+      },
+    });
+
+    await reorderPropertyMedia(fakePropertyRepository(), mediaRepository, FAKE_PROPERTY.id, ["a", "b", "c"]);
+
+    expect(received).toEqual([["a", "b", "c"]]);
   });
 });
