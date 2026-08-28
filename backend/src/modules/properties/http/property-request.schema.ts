@@ -23,7 +23,9 @@ export const PROPERTY_STATUSES = ["DRAFT", "ACTIVE", "INACTIVE"] as const;
 export const PROPERTY_SORT_FIELDS = ["created_at", "updated_at", "price", "area_m2", "bedrooms"] as const;
 export const SORT_ORDERS = ["asc", "desc"] as const;
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Exported for reuse by `property-media-request.schema.ts` (Prompt 028) — one canonical UUID
+// shape check, never duplicated.
+export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Plain digits with an optional 2-decimal-place fraction — matches this schema's NUMERIC(*, 2)
 // columns exactly, and deliberately rejects scientific notation or extra precision that a

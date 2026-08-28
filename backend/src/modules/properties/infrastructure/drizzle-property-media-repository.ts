@@ -1,9 +1,13 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 import { properties, propertyMedia } from "../../../infrastructure/database/tenant/schema.js";
 import type { TenantDatabase } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
-import type { PropertyMedia, PropertyMediaMimeType } from "../domain/property-media.js";
-import type { CreatePropertyMediaInput, PropertyMediaRepository } from "../application/property-media-repository.js";
+import { PropertyMediaNotFoundError, PropertyMediaReorderMismatchError, type PropertyMedia, type PropertyMediaMimeType } from "../domain/property-media.js";
+import type {
+  CreatePropertyMediaInput,
+  DeletePropertyMediaResult,
+  PropertyMediaRepository,
+} from "../application/property-media-repository.js";
 
 function toPropertyMedia(row: typeof propertyMedia.$inferSelect): PropertyMedia {
   return {
@@ -19,9 +23,20 @@ function toPropertyMedia(row: typeof propertyMedia.$inferSelect): PropertyMedia 
     sizeBytes: row.sizeBytes,
     originalFilename: row.originalFilename,
     position: row.position,
+    isCover: row.isCover,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/** Row-locks the parent property — every mutating method below starts with this, inside its own
+ * transaction, so concurrent calls for the same property always serialize (Prompt 028, sections
+ * 14/16/21/27/43). The row is assumed to exist: the application layer
+ * (`upload-property-media.ts`/`reorder-property-media.ts`/etc.) already confirmed it via
+ * `PropertyRepository.findById()` before any repository here is called, and properties are
+ * never physically deleted (CLAUDE.md) — so no "not found" handling is needed on this lock. */
+async function lockProperty(tx: TenantDatabase, propertyId: string): Promise<void> {
+  await tx.select({ id: properties.id }).from(properties).where(eq(properties.id, propertyId)).for("update");
 }
 
 /**
@@ -37,22 +52,23 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
         // the same property serializes on this lock before computing the next position, so two
         // concurrent transactions can never compute the same MAX(position)+1. Locking the
         // property's own row (rather than a separate advisory lock hashed from its id) reuses a
-        // lock PostgreSQL already gives us for free, with no extra bookkeeping. The row is
-        // known to exist — the application layer (`uploadPropertyMedia`) already confirmed it
-        // via `PropertyRepository.findById()` before this repository is ever called, and
-        // properties are never physically deleted (CLAUDE.md) — so no "not found" handling is
-        // needed here.
-        await tx.select({ id: properties.id }).from(properties).where(eq(properties.id, input.propertyId)).for("update");
+        // lock PostgreSQL already gives us for free, with no extra bookkeeping.
+        await lockProperty(tx, input.propertyId);
 
         const [positionRow] = await tx
           .select({ nextPosition: sql<number>`coalesce(max(${propertyMedia.position}), -1) + 1` })
           .from(propertyMedia)
           .where(eq(propertyMedia.propertyId, input.propertyId));
         const nextPosition = positionRow?.nextPosition ?? 0;
+        // Same locked read decides the cover (Prompt 028, sections 7/13/14): the first media
+        // for a property (nextPosition === 0, i.e. no existing rows) becomes its cover; every
+        // later upload does not. Computed from the exact same count as `position` — no second,
+        // separate query that could race against a concurrent upload.
+        const isCover = nextPosition === 0;
 
         const [inserted] = await tx
           .insert(propertyMedia)
-          .values({ ...input, position: nextPosition })
+          .values({ ...input, position: nextPosition, isCover })
           .returning();
 
         if (!inserted) {
@@ -75,6 +91,160 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
         .orderBy(asc(propertyMedia.position), asc(propertyMedia.id));
 
       return rows.map(toPropertyMedia);
+    },
+
+    async reorder(propertyId: string, mediaIds: string[]): Promise<PropertyMedia[]> {
+      const rows = await db.transaction(async (tx) => {
+        await lockProperty(tx, propertyId);
+
+        const currentRows = await tx
+          .select({ id: propertyMedia.id })
+          .from(propertyMedia)
+          .where(eq(propertyMedia.propertyId, propertyId));
+        const currentIds = new Set(currentRows.map((row) => row.id));
+
+        // Every submitted id must genuinely belong to this property — checked before the count
+        // comparison below, so an unknown/foreign id always reports 404, never 409 (this task,
+        // section 18; duplicates within `mediaIds` are already rejected at the HTTP boundary,
+        // Zod, before this repository is ever called — section 19).
+        for (const id of mediaIds) {
+          if (!currentIds.has(id)) {
+            throw new PropertyMediaNotFoundError(id);
+          }
+        }
+        // Every id provided is confirmed valid at this point — a length mismatch can only mean
+        // the submission is missing some of the property's current media (section 17/20).
+        if (mediaIds.length !== currentIds.size) {
+          throw new PropertyMediaReorderMismatchError(propertyId);
+        }
+
+        if (mediaIds.length > 0) {
+          // Two-phase offset (this task, section 22): shifting every row for this property by
+          // +N first guarantees no intermediate UNIQUE(property_id, position) collision — old
+          // positions are a permutation of 0..N-1, so old+N never collides with a not-yet-
+          // shifted row's old value (always < N) or with another already-shifted row (shift is
+          // injective). Phase two then assigns each id its final 0..N-1 target one at a time;
+          // targets are unique by construction (mediaIds has no duplicates) and never collide
+          // with any row still sitting in the N..2N-1 range from phase one.
+          const n = mediaIds.length;
+          await tx
+            .update(propertyMedia)
+            .set({ position: sql`${propertyMedia.position} + ${n}`, updatedAt: sql`now()` })
+            .where(eq(propertyMedia.propertyId, propertyId));
+
+          for (let index = 0; index < mediaIds.length; index += 1) {
+            await tx
+              .update(propertyMedia)
+              .set({ position: index, updatedAt: sql`now()` })
+              .where(eq(propertyMedia.id, mediaIds[index]!));
+          }
+        }
+
+        // `isCover` is never touched here (this task, section 23) — reorder only.
+        return tx
+          .select()
+          .from(propertyMedia)
+          .where(eq(propertyMedia.propertyId, propertyId))
+          .orderBy(asc(propertyMedia.position), asc(propertyMedia.id));
+      });
+
+      return rows.map(toPropertyMedia);
+    },
+
+    async setCover(propertyId: string, mediaId: string): Promise<PropertyMedia> {
+      const row = await db.transaction(async (tx) => {
+        await lockProperty(tx, propertyId);
+
+        const [media] = await tx
+          .select({ id: propertyMedia.id })
+          .from(propertyMedia)
+          .where(and(eq(propertyMedia.id, mediaId), eq(propertyMedia.propertyId, propertyId)));
+        if (!media) {
+          throw new PropertyMediaNotFoundError(mediaId);
+        }
+
+        // Idempotent by convergence (this task, section 26), same pattern already used by
+        // `archive()` in `drizzle-property-repository.ts`: unset whatever is currently the
+        // cover (including `mediaId` itself, if it already is), then set `mediaId` — never a
+        // read-before-write short circuit for "already the cover".
+        await tx
+          .update(propertyMedia)
+          .set({ isCover: false, updatedAt: sql`now()` })
+          .where(and(eq(propertyMedia.propertyId, propertyId), eq(propertyMedia.isCover, true)));
+
+        const [updated] = await tx
+          .update(propertyMedia)
+          .set({ isCover: true, updatedAt: sql`now()` })
+          .where(eq(propertyMedia.id, mediaId))
+          .returning();
+
+        if (!updated) {
+          throw new Error("property_media update returned no row");
+        }
+        return updated;
+      });
+
+      return toPropertyMedia(row);
+    },
+
+    async delete(propertyId: string, mediaId: string): Promise<DeletePropertyMediaResult> {
+      return db.transaction(async (tx) => {
+        await lockProperty(tx, propertyId);
+
+        const [media] = await tx
+          .select()
+          .from(propertyMedia)
+          .where(and(eq(propertyMedia.id, mediaId), eq(propertyMedia.propertyId, propertyId)));
+        if (!media) {
+          throw new PropertyMediaNotFoundError(mediaId);
+        }
+
+        await tx.delete(propertyMedia).where(eq(propertyMedia.id, mediaId));
+
+        // Old positions (pre-reindex) still correctly reflect relative order — deleting one row
+        // only leaves a gap, it never reorders the others.
+        const remaining = await tx
+          .select({ id: propertyMedia.id })
+          .from(propertyMedia)
+          .where(eq(propertyMedia.propertyId, propertyId))
+          .orderBy(asc(propertyMedia.position), asc(propertyMedia.id));
+
+        if (remaining.length > 0) {
+          // Same two-phase offset strategy as `reorder()` — see its comment for why this never
+          // collides with UNIQUE(property_id, position) (this task, section 42/43). The offset
+          // must be `remaining.length + 1` here, not `remaining.length`: unlike `reorder()`
+          // (where nothing is removed, so old positions are already the contiguous set
+          // `0..N-1`), the just-deleted row leaves a *gap* — remaining old positions are a
+          // subset of `0..remaining.length` (inclusive), so the offset needs to clear that
+          // wider range to guarantee no collision.
+          const n = remaining.length + 1;
+          await tx
+            .update(propertyMedia)
+            .set({ position: sql`${propertyMedia.position} + ${n}`, updatedAt: sql`now()` })
+            .where(eq(propertyMedia.propertyId, propertyId));
+
+          for (let index = 0; index < remaining.length; index += 1) {
+            await tx
+              .update(propertyMedia)
+              .set({ position: index, updatedAt: sql`now()` })
+              .where(eq(propertyMedia.id, remaining[index]!.id));
+          }
+
+          // The deleted media was the cover and others remain: the new position-0 media
+          // becomes the new cover (this task, section 39). Not the cover → untouched (section
+          // 41). None remain → nothing to do, gallery has no cover (section 40).
+          if (media.isCover) {
+            await tx
+              .update(propertyMedia)
+              .set({ isCover: true, updatedAt: sql`now()` })
+              .where(eq(propertyMedia.id, remaining[0]!.id));
+          }
+        }
+
+        // Real Cloudflare R2 deletion is the caller's job, strictly after this transaction
+        // commits (ADR-007 "Delete") — this repository never touches ObjectStorage itself.
+        return { objectKey: media.objectKey };
+      });
     },
   };
 }

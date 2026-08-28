@@ -2,8 +2,10 @@
 
 ## Status
 
-Aceito. Implementação: **IMPLEMENTED** (Prompt 027) — `uploadPropertyMedia`
-(`src/modules/properties/application/upload-property-media.ts`).
+Aceito. Implementação: **IMPLEMENTED** (Prompt 027 — upload; Prompt 028 — delete) —
+`uploadPropertyMedia`/`deletePropertyMedia`
+(`src/modules/properties/application/upload-property-media.ts`,
+`src/modules/properties/application/delete-property-media.ts`).
 
 ## Context
 
@@ -65,6 +67,45 @@ falha **e** a compensação também falha.
   `property_media` ou sobre "compensação" como conceito.
 - Nenhuma tentativa de retry automático do insert existe nesta tarefa — uma falha de insert
   propaga imediatamente após a tentativa de compensação, como `PropertyMediaPersistError` (500).
+
+## Delete (Prompt 028)
+
+`DELETE /api/v1/properties/:id/media/:mediaId` também grava nos dois sistemas — mas na **ordem
+oposta** ao upload, deliberadamente.
+
+```text
+lock property (SELECT ... FOR UPDATE)
+    ↓
+DELETE property_media + reindex posições + promoção de capa   ← metadados removem primeiro,
+    ↓ (commit da transação)                                      tudo em uma transação
+ObjectStorage.deleteObject()   (best-effort, nunca refeito)    ← objeto real remove depois
+```
+
+Aqui a assimetria com o upload é a decisão central, não um detalhe: no upload, o pior cenário
+tolerável é um objeto órfão em R2 (sem row) — por isso o objeto é escrito primeiro. Na exclusão,
+o pior cenário tolerável é exatamente o mesmo tipo de órfão, só que alcançado pelo caminho
+inverso: **remover a row primeiro, depois tentar remover o objeto**, porque a alternativa —
+apagar o objeto primeiro e só depois a row — arrisca deixar `property_media` apontando para um
+arquivo que já não existe caso a segunda etapa falhe. Uma row órfã apontando para nada é pior do
+que um objeto órfão sem row: a primeira quebra imediatamente qualquer leitor (`GET .../media`,
+qualquer front-end servindo `public_url`); a segunda é só desperdício de armazenamento, invisível
+para qualquer consumidor da API.
+
+Consequências específicas da exclusão, em paralelo às já registradas acima para o upload:
+
+- Se a transação PostgreSQL falhar (media inexistente/de outra propriedade, tenant não
+  encontrado, etc.), `ObjectStorage.deleteObject()` **nunca é chamado** — o erro propaga direto
+  de `PropertyMediaRepository.delete()`, antes de a camada de aplicação sequer tentar tocar o R2.
+- Se a transação commitar mas `ObjectStorage.deleteObject()` falhar, a requisição HTTP ainda
+  retorna **204** — nunca 503/500 por causa disso. A falha é logada de forma segura (bucket
+  implícito no adapter, `objectKey`, `mediaId` — nunca segredos) para permitir reconciliação
+  futura; o objeto órfão resultante cai na mesma categoria "Future → Reconciliação de órfãos" já
+  prevista abaixo, agora alimentada por dois caminhos (insert-falhou-e-compensação-falhou no
+  upload, e delete-do-objeto-falhou aqui) em vez de um só.
+- A remoção da row, o reindex gapless de `position` (`0..N-1`) e a eventual promoção de uma nova
+  capa acontecem todos dentro da mesma transação (protegida pelo lock de linha em `properties`
+  já usado por `create`/`reorder`/`setCover`) — nunca como passos separados que poderiam
+  observar um estado intermediário inconsistente.
 
 ## Future
 

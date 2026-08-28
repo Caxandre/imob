@@ -53,6 +53,14 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   falha parcial — ver `uploadPropertyMedia` (Prompt 027, ADR-007) como exemplo aplicado: upload
   no object storage primeiro, insert no banco depois, delete compensatório best-effort se o
   insert falhar (nunca o inverso — nunca persistir metadata antes do objeto existir de fato).
+- Excluir mídia é a ordem oposta do upload, deliberadamente: remova a metadata no Tenant Data
+  Plane primeiro (dentro de uma transação com lock de linha na propriedade), só então tente
+  remover o objeto real no object storage, como operação best-effort — nunca o inverso. Uma
+  falha no delete do objeto após o commit da metadata nunca deve falhar a requisição HTTP (nunca
+  503/500 só por isso); registre a falha via log estruturado (chave/mediaId, nunca segredos) e
+  trate como órfão para reconciliação futura — ver `deletePropertyMedia` (Prompt 028, ADR-007
+  "Delete") como exemplo aplicado. Um objeto órfão no object storage é sempre preferível a uma
+  metadata persistida apontando para um objeto ausente.
 - Object keys de mídia devem ser gerados no servidor a partir de IDs técnicos (UUIDs), nunca a
   partir de filename/título/endereço/nome de cliente/email fornecidos pelo usuário — ver
   `buildPropertyMediaObjectKey` (Prompt 027) como exemplo aplicado.

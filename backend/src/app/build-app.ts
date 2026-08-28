@@ -12,6 +12,7 @@ import {
   propertyMediaListSchema,
   propertyMediaSchema,
   propertySchema,
+  reorderPropertyMediaRequestSchema,
   updatePropertyRequestSchema,
   uploadPropertyMediaRequestSchema,
 } from "../modules/properties/http/property-openapi.schema.js";
@@ -118,6 +119,7 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(propertyMediaSchema);
   app.addSchema(propertyMediaListSchema);
   app.addSchema(uploadPropertyMediaRequestSchema);
+  app.addSchema(reorderPropertyMediaRequestSchema);
 
   void app.register(healthRoute);
 

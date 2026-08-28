@@ -202,13 +202,13 @@ describe("End-to-end tenant database runtime", () => {
         tenantId: tenantA.id,
         databaseName: namesA.databaseName,
         secretReference: namesA.secretReference,
-        schemaVersion: 4,
+        schemaVersion: 5,
       });
       expect(targetB).toMatchObject({
         tenantId: tenantB.id,
         databaseName: namesB.databaseName,
         secretReference: namesB.secretReference,
-        schemaVersion: 4,
+        schemaVersion: 5,
       });
 
       // Real, typed Drizzle queries against the actual Tenant Data Plane schema (users) —

@@ -211,6 +211,17 @@ Swagger UI (com pnpm dev:full em execução)
       → conferir 201 (property INACTIVE retorna 409 — arquivar bloqueia novos uploads)
   → Properties → GET /api/v1/properties/{id}/media → Try it out
     → preencher X-Tenant-Id e o id → Execute → conferir a galeria (ordenada por position)
+  → Properties → PUT /api/v1/properties/{id}/media/order → Try it out
+    → preencher X-Tenant-Id e o id → body {"media_ids": ["<id2>", "<id1>"]} com exatamente os
+      ids da galeria atual, na nova ordem → Execute → conferir 200 com a galeria reordenada
+      (id desconhecido/de outra propriedade → 404; contagem não bate → 409)
+  → Properties → PATCH /api/v1/properties/{id}/media/{mediaId}/cover → Try it out
+    → preencher X-Tenant-Id, o id e o mediaId (sem corpo) → Execute → conferir 200 com
+      "is_cover": true (repetir a mesma chamada continua retornando 200 — idempotente)
+  → Properties → DELETE /api/v1/properties/{id}/media/{mediaId} → Try it out
+    → preencher X-Tenant-Id, o id e o mediaId (sem corpo) → Execute → conferir 204; GET na
+      galeria mostra as posições restantes reindexadas sem buracos, e — se a mídia removida era
+      a capa — a nova posição 0 vira a nova capa automaticamente
 ```
 
 `X-Tenant-Id` é **temporário** — um mecanismo de desenvolvimento/integração enquanto
@@ -224,8 +235,14 @@ seção "Local development runtime" em `ARCHITECTURE.md`.
 
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST /api/v1/tenants` (tag
 **Tenants**), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`,
-`POST/GET /api/v1/properties/{id}/media` (tag **Properties**) — `DELETE` arquiva
-(`status = INACTIVE`), nunca exclui fisicamente. Nenhuma rota interna de worker/dispatcher/
+`POST/GET /api/v1/properties/{id}/media`, `PUT /api/v1/properties/{id}/media/order`,
+`PATCH /api/v1/properties/{id}/media/{mediaId}/cover`,
+`DELETE /api/v1/properties/{id}/media/{mediaId}` (tag **Properties**) — `DELETE /properties/{id}`
+arquiva (`status = INACTIVE`), nunca exclui fisicamente; `DELETE .../media/{mediaId}` remove
+fisicamente um único item da galeria (metadata primeiro, objeto no R2 depois, best-effort — ver
+[ADR-007](docs/architecture/adr/ADR-007-property-media-consistency.md)). As três rotas de
+galeria (reorder/capa/exclusão) continuam permitidas mesmo com a propriedade arquivada — só o
+upload de mídia nova é bloqueado por arquivamento. Nenhuma rota interna de worker/dispatcher/
 provisioning é exposta aqui — o Swagger descreve apenas a interface HTTP pública.
 
 ## Cloudflare R2 (object storage)

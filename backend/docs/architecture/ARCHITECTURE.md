@@ -989,7 +989,13 @@ upload, nunca recalculado no GET), `mime_type` (`CHECK` restrito às 3 mesmas mi
 validadas em `ALLOWED_PROPERTY_MEDIA_MIME_TYPES`), `size_bytes` (`bigint`/modo `number`),
 `original_filename` (nullable, basename sanitizado — nunca um path), `position` (inteiro,
 `UNIQUE(property_id, position)` — formaliza a ordem da galeria e serve `listByProperty()` sem
-índice adicional), timestamps.
+índice adicional), `is_cover` (boolean, `NOT NULL DEFAULT false`; Prompt 028, migration
+`drizzle/tenant/0004_add_property_media_cover.sql`, `schemaVersion` 4→5) — no máximo uma capa
+por propriedade, garantido por um índice único parcial
+(`property_media_one_cover_per_property`, `UNIQUE(property_id) WHERE is_cover = true`), nunca só
+por lógica de aplicação; a primeira mídia enviada para uma propriedade vira capa automaticamente,
+decidido dentro da mesma transação/lock que calcula `position` — nunca uma segunda query
+separada que poderia correr, timestamps.
 
 ```text
 POST /api/v1/properties/:id/media   (multipart/form-data, campo "file", 1 arquivo, ≤10MB)
@@ -1026,11 +1032,44 @@ o schema `UploadPropertyMediaRequest` registrado (visível no Swagger, não link
 Ver [ADR-007](adr/ADR-007-property-media-consistency.md) para a estratégia completa de
 consistência R2/PostgreSQL (upload primeiro, insert depois, compensação best-effort).
 
-**PARTIAL** — gallery ordering: `position` é atribuído e persistido (0, 1, 2, ...), mas
-**PLANNED**: gallery reorder (mudar `position` de uma mídia já existente), cover
-selection (`position = 0` hoje é só a primeira posição, não um contrato formal de capa — seção
-76), delete de mídia por propriedade, image resizing/thumbnails, WebP conversion, CDN custom
-domain, signed URLs, upload multipart-direto browser→R2, múltiplos arquivos por request.
+**IMPLEMENTED** (Prompt 028) — gerenciamento da galeria sobre a fundação do Prompt 027:
+
+```text
+PUT /api/v1/properties/:id/media/order   {media_ids: [uuid, ...]}
+    ↓
+lock property (SELECT ... FOR UPDATE), depois substitui a ordem inteira da galeria — media_ids
+    precisa ser exatamente o conjunto atual de mídias da propriedade (nem menos, nem mais, sem
+    duplicatas); id desconhecido/de outra propriedade → 404, contagem não bate → 409, lista
+    vazia só é aceita como no-op se a propriedade já não tem mídia (senão 409). Reindexação usa
+    um offset temporário dentro da transação (soma N a todas as posições, depois atribui os
+    valores finais 0..N-1 um a um) para nunca colidir com `UNIQUE(property_id, position)`
+    durante a operação. Nunca altera `is_cover`.
+
+PATCH /api/v1/properties/:id/media/:mediaId/cover   (sem corpo)
+    ↓
+lock property → valida que a mídia pertence à propriedade (senão 404) → remove is_cover=true de
+    quem tinha antes → marca a nova, tudo em uma transação. Idempotente: selecionar a capa atual
+    de novo ainda retorna 200.
+
+DELETE /api/v1/properties/:id/media/:mediaId   (sem corpo)
+    ↓
+ordem oposta ao upload (ver ADR-007 "Delete"): remove a metadata primeiro, dentro de uma
+    transação com lock de linha, reindexa as posições restantes para 0..N-1 gapless e promove a
+    mídia da nova posição 0 a capa (só se a mídia removida era a capa e ainda restam outras);
+    só depois do commit tenta remover o objeto real em R2, best-effort — uma falha aí nunca
+    derruba a resposta HTTP (sempre 204), é logada com segurança (bucket/key/mediaId, nunca
+    segredo) e vira preocupação de reconciliação futura, nunca implementada nesta tarefa. Se a
+    transação PostgreSQL falhar, `ObjectStorage.deleteObject()` nunca chega a ser chamado.
+```
+
+Todas as três rotas continuam permitidas para propriedades arquivadas (`INACTIVE`) — só o
+upload de mídia nova é bloqueado por arquivamento; reorder/capa/exclusão são manutenção da
+galeria existente. `object_key` continua nunca exposto em nenhuma resposta HTTP.
+
+**PLANNED** (fora do escopo até aqui): image resizing/thumbnails, compressão, conversão
+WebP/AVIF, CDN custom domain, signed URLs, upload multipart-direto browser→R2, upload em lote,
+reconciliação de objetos órfãos no R2 (worker/processo agendado — Prompt 028 documenta o
+problema em ADR-007 "Delete" e no CLAUDE.md, mas não implementa a reconciliação em si).
 
 ## Princípios
 

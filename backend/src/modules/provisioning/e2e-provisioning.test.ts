@@ -191,7 +191,7 @@ describe("End-to-end tenant provisioning", () => {
       clusterId,
       databaseName: expectedNames.databaseName,
       secretReference: expectedNames.secretReference,
-      schemaVersion: 4,
+      schemaVersion: 5,
       status: "READY",
     });
 
@@ -225,7 +225,7 @@ describe("End-to-end tenant provisioning", () => {
       const migrations = await tenantClient.query<{ count: string }>(
         "SELECT count(*) AS count FROM drizzle.__drizzle_migrations",
       );
-      expect(Number(migrations.rows[0]?.count)).toBe(4);
+      expect(Number(migrations.rows[0]?.count)).toBe(5);
     } finally {
       await tenantClient.end();
     }

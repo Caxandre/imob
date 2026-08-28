@@ -6,6 +6,7 @@ import {
   TenantDatabaseRuntimeConfigurationError,
   TenantNotReadyError,
 } from "../../tenant-runtime/application/tenant-database-resolver.js";
+import { PropertyMediaNotFoundError, PropertyMediaReorderMismatchError } from "../domain/property-media.js";
 import { PropertyArchivedError, PropertyNotFoundError } from "../domain/property.js";
 
 export interface MappedHttpError {
@@ -28,6 +29,19 @@ export function mapPropertyRouteError(error: unknown): MappedHttpError | undefin
 
   if (error instanceof PropertyNotFoundError) {
     return { statusCode: 404, error: "Not Found", message: error.message };
+  }
+
+  // Media that doesn't exist, or belongs to a different property/tenant — same 404 either way
+  // (Prompt 028, section 18/28), for the same cross-tenant-enumeration reason as
+  // `PropertyNotFoundError` above.
+  if (error instanceof PropertyMediaNotFoundError) {
+    return { statusCode: 404, error: "Not Found", message: error.message };
+  }
+
+  // `media_ids` doesn't exactly match the property's current gallery (Prompt 028, section
+  // 17/20) — a state conflict, not a malformed request or a missing resource.
+  if (error instanceof PropertyMediaReorderMismatchError) {
+    return { statusCode: 409, error: "Conflict", message: error.message };
   }
 
   // Property media upload only (Prompt 027, section 42) — an archived property cannot accept
