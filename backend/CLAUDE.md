@@ -64,6 +64,11 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
 - Object keys de mídia devem ser gerados no servidor a partir de IDs técnicos (UUIDs), nunca a
   partir de filename/título/endereço/nome de cliente/email fornecidos pelo usuário — ver
   `buildPropertyMediaObjectKey` (Prompt 027) como exemplo aplicado.
+- Derivação de imagem (resize, geração de variantes) nunca deve executar de forma síncrona
+  dentro de uma requisição HTTP normal de upload; transformações de mídia rodam de forma
+  assíncrona, a partir do original preservado — ver
+  [ADR-008](docs/architecture/adr/ADR-008-asynchronous-property-image-processing.md) (Prompt
+  029, arquitetura definida, ainda não implementada).
 
 ## Multi-tenancy — regra crítica
 

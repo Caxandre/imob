@@ -272,6 +272,10 @@ R2_PUBLIC_URL
   deve conter valores reais, só os nomes das variáveis.
 - Desde o Prompt 027, `POST /api/v1/properties/{id}/media` é o consumidor real — ver a seção
   "Testando Properties" acima.
+- Processamento assíncrono de imagem (thumbnails/variantes via `sharp` + BullMQ) tem sua
+  arquitetura definida em
+  [ADR-008](docs/architecture/adr/ADR-008-asynchronous-property-image-processing.md) — ainda
+  **não implementado** (nenhuma variante é gerada hoje).
 
 Teste de integração real (opcional, nunca roda em CI): ver
 `src/infrastructure/object-storage/cloudflare-r2-object-storage.integration.test.ts` —
