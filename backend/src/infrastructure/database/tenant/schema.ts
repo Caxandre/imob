@@ -1,6 +1,7 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import {
   check,
+  customType,
   index,
   integer,
   jsonb,
@@ -12,6 +13,19 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+
+/**
+ * `tsvector` has no built-in Drizzle column type (this task, Prompt 025, section 39) — modeled
+ * via `customType` purely so the TypeScript schema accurately reflects the real column
+ * (`properties.searchVector` below). Selected only incidentally (`select()` never explicitly
+ * picks it); `data: string` is never meant to be constructed by application code — the column
+ * is always `GENERATED ALWAYS AS (...) STORED`, so nothing ever writes to it directly.
+ */
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 /**
  * Tenant Data Plane schema (ADR-001/ADR-003). Applied once per tenant database, never shared
@@ -113,6 +127,34 @@ export const properties = pgTable(
     postalCode: text("postal_code"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Full-text search vector (Prompt 025) — `GENERATED ALWAYS AS (...) STORED`, so PostgreSQL
+     * recomputes it automatically on every INSERT/UPDATE (never written to by application
+     * code, never present in `CreatePropertyInput`/`UpdatePropertyInput`). `'portuguese'`
+     * config confirmed present on this project's PostgreSQL image (`pg_ts_config`) before
+     * writing this. Built from `title`/`neighborhood`/`city`/`street`/`description` only —
+     * `price`/`postal_code`/`state`/`property_type`/`transaction_type`/`status` already have
+     * structured filters and are poor FTS candidates (section 5). `coalesce(..., '')` so a
+     * `NULL` field contributes nothing rather than nulling the whole vector. `setweight()`
+     * ranks a match in `title` (A) above `neighborhood`/`city` (B), above `street` (C), above
+     * `description` (D) — deliberately simple, no further relevance tuning (section 10). The
+     * callback form (`(): SQL => ...`) is required, not stylistic: it closes over the `properties`
+     * table binding below, which does not exist yet while this config object is being built —
+     * Drizzle defers evaluation until introspection/migration-generation time, by which point
+     * `properties` is fully assigned (the documented pattern for a generated column that
+     * references sibling columns of the same table).
+     */
+    searchVector: tsvector("search_vector")
+      .notNull()
+      .generatedAlwaysAs(
+        (): SQL => sql`
+          setweight(to_tsvector('portuguese', coalesce(${properties.title}, '')), 'A') ||
+          setweight(to_tsvector('portuguese', coalesce(${properties.neighborhood}, '')), 'B') ||
+          setweight(to_tsvector('portuguese', coalesce(${properties.city}, '')), 'B') ||
+          setweight(to_tsvector('portuguese', coalesce(${properties.street}, '')), 'C') ||
+          setweight(to_tsvector('portuguese', coalesce(${properties.description}, '')), 'D')
+        `,
+      ),
   },
   (t) => [
     // Serves the only query this task's listing needs — ORDER BY created_at DESC, id DESC —
@@ -121,6 +163,11 @@ export const properties = pgTable(
     // queries would be speculative (CLAUDE.md: avoid abstractions without a concrete
     // consumer) — add one if/when a filtered listing is actually built.
     index("properties_created_at_id_idx").on(t.createdAt.desc(), t.id.desc()),
+    // GIN over the generated tsvector — this is the one case in this schema (Prompt 025,
+    // section 11) where an index is added ahead of a real usage pattern, because the column it
+    // covers exists for exactly one purpose (search_vector @@ websearch_to_tsquery(...)) and is
+    // useless without it.
+    index("properties_search_vector_idx").using("gin", t.searchVector),
     check("properties_price_positive", sql`${t.price} > 0`),
     check("properties_bedrooms_non_negative", sql`${t.bedrooms} IS NULL OR ${t.bedrooms} >= 0`),
     check("properties_bathrooms_non_negative", sql`${t.bathrooms} IS NULL OR ${t.bathrooms} >= 0`),

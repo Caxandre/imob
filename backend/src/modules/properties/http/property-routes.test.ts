@@ -564,6 +564,116 @@ describe("Properties HTTP routes", () => {
       }
     });
 
+    it("q finds a matching property by title and reports the filtered total", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("q-search", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const match = await createProperty(app, tenant.id, { title: "Apartamento no Centro" });
+        // samplePayload()'s own default description ("Apartamento com boa localização.") and
+        // neighborhood ("Centro") would otherwise still contain "apartamento" — override both
+        // so this control property genuinely has no match for the query term.
+        await createProperty(app, tenant.id, {
+          title: "Casa na Praia",
+          description: "Excelente vista para o mar",
+          neighborhood: null,
+        });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?q=apartamento",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const body = response.json();
+        expect(body.data.map((p: { id: string }) => p.id)).toEqual([match.json().id]);
+        expect(body.pagination.total).toBe(1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("q combines with structured filters using AND", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("q-filters", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const match = await createProperty(app, tenant.id, { title: "Apartamento no Centro", status: "ACTIVE" });
+        await createProperty(app, tenant.id, { title: "Apartamento no Centro", status: "DRAFT" });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?q=apartamento&status=ACTIVE",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.json().data.map((p: { id: string }) => p.id)).toEqual([match.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("without an explicit sort, q orders by relevance (title match ranks above description-only match)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("q-relevance", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const titleMatch = await createProperty(app, tenant.id, {
+          title: "Apartamento no Centro",
+          description: "Excelente custo-benefício",
+          neighborhood: null,
+          city: null,
+        });
+        const descriptionMatch = await createProperty(app, tenant.id, {
+          title: "Apartamento residencial",
+          description: "Próximo ao centro comercial",
+          neighborhood: null,
+          city: null,
+        });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?q=centro",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.json().data.map((p: { id: string }) => p.id)).toEqual([
+          titleMatch.json().id,
+          descriptionMatch.json().id,
+        ]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("an explicit sort overrides relevance ordering even with q present", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("q-explicit-sort", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const cheap = await createProperty(app, tenant.id, { title: "Apartamento Centro", price: "200000.00" });
+        const expensive = await createProperty(app, tenant.id, { title: "Apartamento Centro", price: "900000.00" });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?q=apartamento&sort=price&order=asc",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.json().data.map((p: { id: string }) => p.id)).toEqual([
+          cheap.json().id,
+          expensive.json().id,
+        ]);
+      } finally {
+        await app.close();
+      }
+    });
+
     it.each([
       ["price_min greater than price_max", "price_min=600000.00&price_max=300000.00"],
       ["area_min greater than area_max", "area_min=100.00&area_max=50.00"],
@@ -571,6 +681,11 @@ describe("Properties HTTP routes", () => {
       ["invalid sort", "sort=title"],
       ["invalid order", "order=sideways"],
       ["unknown query parameter", "prcie_min=100000"],
+      ["q is empty", "q="],
+      ["q is whitespace-only (empty after trim)", "q=" + encodeURIComponent("   ")],
+      ["q too short", "q=a"],
+      ["q too long", "q=" + "a".repeat(121)],
+      ["sort=relevance is not a client-selectable value", "sort=relevance"],
     ])("rejects an invalid query (%s) with 400", async (_label, queryString) => {
       const { secretStore } = await setupCluster();
       const tenant = await provisionReadyTenant("query-validation", secretStore);
@@ -1014,6 +1129,29 @@ describe("Properties HTTP routes", () => {
         const responseA = await app.inject({
           method: "GET",
           url: "/api/v1/properties?status=ACTIVE&property_type=APARTMENT&city=S%C3%A3o%20Paulo",
+          headers: { [TENANT_ID_HEADER]: tenantA.id },
+        });
+
+        expect(responseA.json().data.map((p: { id: string }) => p.id)).toEqual([propertyA.json().id]);
+        expect(responseA.json().pagination.total).toBe(1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("a q search in A never returns or counts B's matching rows, even with identical text", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("isolation-q-a", secretStore);
+      const tenantB = await provisionReadyTenant("isolation-q-b", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const propertyA = await createProperty(app, tenantA.id, { title: "Apartamento no Centro" });
+        await createProperty(app, tenantB.id, { title: "Apartamento no Centro" });
+
+        const responseA = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?q=apartamento",
           headers: { [TENANT_ID_HEADER]: tenantA.id },
         });
 

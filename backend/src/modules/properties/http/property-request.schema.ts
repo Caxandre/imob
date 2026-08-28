@@ -7,6 +7,8 @@ export const NUMBER_MAX_LENGTH = 20;
 export const POSTAL_CODE_MAX_LENGTH = 20;
 export const DEFAULT_PAGE_LIMIT = 20;
 export const MAX_PAGE_LIMIT = 100;
+export const Q_MIN_LENGTH = 2;
+export const Q_MAX_LENGTH = 120;
 
 export const PROPERTY_TYPES = ["HOUSE", "APARTMENT", "LAND", "COMMERCIAL", "OTHER"] as const;
 export const TRANSACTION_TYPES = ["SALE", "RENT"] as const;
@@ -124,7 +126,16 @@ function optionalNonNegativeIntQueryParam() {
  * maintained list of valid values (section 6/60). `price_min`/`price_max`/`area_min`/`area_max`
  * reuse `positiveDecimalString`, so they carry the exact same decimal-string format and `> 0`
  * constraint as `price`/`area_m2` on create (sections 11/16), and stay strings end to end —
- * never round-tripped through JS `number` (section 32).
+ * never round-tripped through JS `number` (section 32). `q` (Prompt 025, full-text search) is
+ * trimmed and length-bounded here — an empty-after-trim value fails `.min()` and is rejected
+ * with `400`, deliberately never treated as "absent" (this task, section 14: an explicit empty
+ * `q` is a client error, not silently ignored).
+ *
+ * `sort` is deliberately **not** `.default("created_at")` here (unlike `page`/`limit`/`order`,
+ * which keep their unconditional defaults) — the HTTP route handler needs to tell "the client
+ * left `sort` out" apart from "the client asked for `created_at`" to decide whether `q` gets to
+ * drive the default ordering (relevance) or `created_at DESC` wins as before (sections 19/20).
+ * `PropertySort`/`"relevance"` in `property-repository.ts` has the full resolution rule.
  */
 export const listPropertiesQuerySchema = z
   .object({
@@ -144,7 +155,13 @@ export const listPropertiesQuerySchema = z
     parking_spaces_min: optionalNonNegativeIntQueryParam(),
     area_min: positiveDecimalString("area_min").optional(),
     area_max: positiveDecimalString("area_max").optional(),
-    sort: z.enum(PROPERTY_SORT_FIELDS).default("created_at"),
+    q: z
+      .string()
+      .trim()
+      .min(Q_MIN_LENGTH, `q must be at least ${Q_MIN_LENGTH} characters`)
+      .max(Q_MAX_LENGTH, `q must be at most ${Q_MAX_LENGTH} characters`)
+      .optional(),
+    sort: z.enum(PROPERTY_SORT_FIELDS).optional(),
     order: z.enum(SORT_ORDERS).default("desc"),
   })
   .strict()

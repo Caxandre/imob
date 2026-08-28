@@ -23,7 +23,10 @@ export interface ListPropertiesOutput {
  * (predicate/order-by construction). `totalPages` is computed here, not by the repository, since
  * it is pure arithmetic over `total`/`limit` with no need for another round trip to the
  * database. With no filters, default sort (`created_at DESC, id DESC`) preserves the previous
- * unfiltered behavior exactly.
+ * unfiltered behavior exactly. `filters.query` (Prompt 025, full-text search) is likewise
+ * already trimmed/length-validated and never parsed here — this use case has no idea whether
+ * `input.sort` is a real column or the internal `"relevance"` value the HTTP layer resolves when
+ * `q` is present without an explicit `sort` (see `PropertySort` in `property-repository.ts`).
  */
 export async function listProperties(
   repository: PropertyRepository,

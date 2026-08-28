@@ -418,6 +418,166 @@ describe("createDrizzlePropertyRepository", () => {
     });
   });
 
+  describe("full-text search (q)", () => {
+    it("finds a property by a term in title", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const match = await repository.create(sampleInput({ title: "Apartamento no Centro" }));
+      await repository.create(sampleInput({ title: "Casa na Praia" }));
+
+      const result = await repository.list(listInput({ filters: { query: "apartamento" }, sort: "relevance" }));
+
+      expect(result.data.map((p) => p.id)).toEqual([match.id]);
+      expect(result.total).toBe(1);
+    });
+
+    it("finds a property by a term that only occurs in description", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const match = await repository.create(
+        sampleInput({ title: "Imóvel disponível", description: "Reformado recentemente, vista panorâmica" }),
+      );
+      await repository.create(sampleInput({ title: "Outro imóvel", description: "Sem reforma" }));
+
+      const result = await repository.list(listInput({ filters: { query: "panorâmica" }, sort: "relevance" }));
+
+      expect(result.data.map((p) => p.id)).toEqual([match.id]);
+    });
+
+    it("finds a property by a term in neighborhood", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const match = await repository.create(sampleInput({ title: "Cobertura", neighborhood: "Moema" }));
+      await repository.create(sampleInput({ title: "Outra cobertura", neighborhood: "Pinheiros" }));
+
+      const result = await repository.list(listInput({ filters: { query: "moema" }, sort: "relevance" }));
+
+      expect(result.data.map((p) => p.id)).toEqual([match.id]);
+    });
+
+    it("ranks a match in title above the same term occurring only in description", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      // neighborhood/city overridden to null on both — sampleInput()'s own default
+      // neighborhood is "Centro", which would otherwise contribute an equal weight-B match to
+      // both properties and muddy this specific title-vs-description comparison.
+      const titleMatch = await repository.create(
+        sampleInput({
+          title: "Apartamento no Centro",
+          description: "Excelente custo-benefício",
+          neighborhood: null,
+          city: null,
+        }),
+      );
+      const descriptionMatch = await repository.create(
+        sampleInput({
+          title: "Apartamento residencial",
+          description: "Próximo ao centro comercial",
+          neighborhood: null,
+          city: null,
+        }),
+      );
+
+      const result = await repository.list(listInput({ filters: { query: "centro" }, sort: "relevance" }));
+
+      expect(result.data.map((p) => p.id)).toEqual([titleMatch.id, descriptionMatch.id]);
+    });
+
+    it("combines q with structured filters using AND", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const match = await repository.create(
+        sampleInput({ title: "Apartamento no Centro", status: "ACTIVE", transactionType: "SALE" }),
+      );
+      // Same text, wrong status.
+      await repository.create(
+        sampleInput({ title: "Apartamento no Centro", status: "DRAFT", transactionType: "SALE" }),
+      );
+      // Same text, wrong transaction type.
+      await repository.create(
+        sampleInput({ title: "Apartamento no Centro", status: "ACTIVE", transactionType: "RENT" }),
+      );
+
+      const result = await repository.list(
+        listInput({
+          filters: { query: "apartamento centro", status: "ACTIVE", transactionType: "SALE" },
+          sort: "relevance",
+        }),
+      );
+
+      expect(result.data.map((p) => p.id)).toEqual([match.id]);
+      expect(result.total).toBe(1);
+    });
+
+    it("reports the q-filtered total and paginates correctly", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      for (let i = 0; i < 5; i += 1) {
+        await repository.create(sampleInput({ title: `Apartamento ${i} no Centro` }));
+      }
+      await repository.create(sampleInput({ title: "Casa na Praia" }));
+
+      const firstPage = await repository.list(
+        listInput({ page: 1, limit: 2, filters: { query: "apartamento" }, sort: "relevance" }),
+      );
+      const secondPage = await repository.list(
+        listInput({ page: 2, limit: 2, filters: { query: "apartamento" }, sort: "relevance" }),
+      );
+
+      expect(firstPage.data).toHaveLength(2);
+      expect(secondPage.data).toHaveLength(2);
+      expect(firstPage.total).toBe(5);
+      expect(secondPage.total).toBe(5);
+    });
+
+    it("respects an explicit sort over q, ordering by the requested column instead of relevance", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const cheap = await repository.create(sampleInput({ title: "Apartamento Centro", price: "200000.00" }));
+      const expensive = await repository.create(sampleInput({ title: "Apartamento Centro", price: "900000.00" }));
+
+      const result = await repository.list(
+        listInput({ filters: { query: "apartamento" }, sort: "price", order: "asc" }),
+      );
+
+      expect(result.data.map((p) => p.id)).toEqual([cheap.id, expensive.id]);
+    });
+
+    it("proves the generated search_vector updates automatically on title change", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      // neighborhood/city overridden to null — sampleInput()'s own default neighborhood is
+      // "Centro", which would otherwise keep matching "centro" after the title change below and
+      // defeat the point of this test.
+      const created = await repository.create(
+        sampleInput({ title: "Apartamento no Centro", neighborhood: null, city: null }),
+      );
+
+      const beforeUpdate = await repository.list(listInput({ filters: { query: "centro" }, sort: "relevance" }));
+      expect(beforeUpdate.data.map((p) => p.id)).toContain(created.id);
+
+      await repository.update(created.id, { title: "Casa nos Jardins" });
+
+      const afterUpdateOldTerm = await repository.list(
+        listInput({ filters: { query: "centro" }, sort: "relevance" }),
+      );
+      const afterUpdateNewTerm = await repository.list(
+        listInput({ filters: { query: "jardins" }, sort: "relevance" }),
+      );
+
+      expect(afterUpdateOldTerm.data.map((p) => p.id)).not.toContain(created.id);
+      expect(afterUpdateNewTerm.data.map((p) => p.id)).toContain(created.id);
+    });
+  });
+
   describe("update", () => {
     it("changes only the provided fields, preserves the rest, and bumps updated_at without touching created_at", async () => {
       const db = await createMigratedTenantDatabase();
