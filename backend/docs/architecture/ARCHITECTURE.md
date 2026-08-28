@@ -622,19 +622,29 @@ presente). Índice único: `(created_at DESC, id DESC)`. `GET /api/v1/properties
 estruturados e ordenação no Prompt 023 (ver seção "Properties" abaixo), mas nenhum índice novo
 foi adicionado por conta disso — sem dados/`EXPLAIN` reais de uso, adicionar índices por filtro
 seria otimização prematura; permanece uma avaliação futura, não implementada nesta tarefa.
+`search_vector` `tsvector` (Prompt 025 — ver seção "Properties full-text search" abaixo),
+`GENERATED ALWAYS AS (...) STORED`, com índice `GIN` dedicado — esse índice, ao contrário dos
+demais, foi adicionado propositalmente sem dados de uso reais, porque a coluna que ele cobre
+não serve a nenhum outro propósito.
 
-**Migration**: `drizzle/tenant/0001_fancy_blackheart.sql`, puramente aditiva (nenhuma
-migration no Control Plane). `schemaVersion` (contagem de `drizzle.__drizzle_migrations`)
-passa de 1 para 2 em qualquer tenant database migrado a partir desta tarefa —
-`runTenantMigrations()`/o provisioner aplicam-na automaticamente para tenants novos, sem
+**Migration**: `drizzle/tenant/0001_fancy_blackheart.sql` (tabela `properties`) e
+`drizzle/tenant/0002_add_property_search_vector.sql` (Prompt 025 — coluna `search_vector` +
+índice GIN), ambas puramente aditivas (nenhuma migration no Control Plane).  `schemaVersion`
+(contagem de `drizzle.__drizzle_migrations`) passa de 1 para 3 em qualquer tenant database
+migrado a partir desta tarefa (2 após o Prompt 023, 3 após o Prompt 025) —
+`runTenantMigrations()`/o provisioner aplicam-nas automaticamente para tenants novos, sem
 nenhuma mudança de lógica.
 
 **PLANNED** — rollout de migration para tenant databases já existentes antes desta tarefa
-(ficam parados em `schemaVersion = 1`, sem a tabela `properties`, até serem migrados
-manualmente). Rodar migrations dentro de uma requisição HTTP normal é expressamente proibido
-(nunca implementado, nem será) — ver `TenantDatabaseConnectionManager`, que só abre conexões,
-nunca aplica DDL. Um mecanismo de rollout em lote/canário para tenants existentes é trabalho
-de infraestrutura futuro, fora do escopo desta tarefa.
+(ficam parados em `schemaVersion = 1`, sem a tabela `properties` nem `search_vector`, até
+serem migrados manualmente) — pendência que cresceu, não diminuiu, com o Prompt 025: um tenant
+que já recebeu `0001` (tem `properties`) mas não `0002` ainda não tem a coluna `search_vector`,
+então `GET /api/v1/properties?q=...` falha com um erro de infraestrutura controlado (nunca um
+fallback silencioso para `ILIKE`) até essa migration ser aplicada a ele. Rodar migrations
+dentro de uma requisição HTTP normal é expressamente proibido (nunca implementado, nem será) —
+ver `TenantDatabaseConnectionManager`, que só abre conexões, nunca aplica DDL. Um mecanismo de
+rollout em lote/canário para tenants existentes é trabalho de infraestrutura futuro, fora do
+escopo desta tarefa.
 
 **Money contract HTTP**: `price`/`area_m2` trafegam como **string decimal** (ex.: `"450000.00"`),
 nunca `number` — evita perda de precisão do JavaScript sobre valores arbitrariamente grandes.
@@ -730,8 +740,71 @@ tenant — a mesma função que constrói os predicados WHERE alimenta a query d
 `count(*)`, para as duas nunca divergirem (`drizzle-property-repository.ts`). Sem migration nesta
 tarefa: o índice existente (`created_at DESC, id DESC`) já bastava para a fase atual; índices
 adicionais por filtro ficam como avaliação futura, sem dados reais de uso para justificá-los
-agora. Busca full-text (`q`/substring arbitrária) e busca por proximidade/geolocalização
-continuam **PLANNED**, deliberadamente fora do escopo desta tarefa.
+agora. Busca full-text (`q`) foi **IMPLEMENTED** no Prompt 025, logo abaixo; busca por
+proximidade/geolocalização continua **PLANNED**.
+
+**IMPLEMENTED** (Prompt 025) — `GET /api/v1/properties?q=` — busca textual via PostgreSQL Full
+Text Search, nunca um serviço de busca externo (Elasticsearch/OpenSearch — ver
+[ADR-005](adr/ADR-005-postgresql-full-text-search.md)).
+
+```text
+q (query string, trimmed, 2-120 caracteres — vazio/curto/longo demais → 400)
+    ↓
+property-request.schema.ts (Zod) — validação/normalização, nunca no repository
+    ↓
+PropertyListFilters.query (property-repository.ts)
+    ↓
+drizzle-property-repository.ts:
+    WHERE search_vector @@ websearch_to_tsquery('portuguese', $1)   — AND com os demais filtros
+    ORDER BY ts_rank(search_vector, websearch_to_tsquery('portuguese', $1)) DESC, id DESC
+        (somente quando `sort` não foi enviado explicitamente — ver "Ranking" abaixo)
+```
+
+**Search vector**: `properties.search_vector tsvector`, `GENERATED ALWAYS AS (...) STORED`
+(`infrastructure/database/tenant/schema.ts`) — PostgreSQL recalcula automaticamente em todo
+`INSERT`/`UPDATE`, nunca escrito por código de aplicação (`CreatePropertyInput`/
+`UpdatePropertyInput` não têm nem podem ter esse campo). Modelado via `customType` do Drizzle
+(`tsvector` não tem tipo de coluna nativo) — a expressão geradora referencia as próprias
+colunas da tabela através de um callback (`(): SQL => sql\`...${properties.title}...\``), o
+padrão documentado do Drizzle para colunas geradas que dependem de colunas irmãs. Construído a
+partir de `title`/`neighborhood`/`city`/`street`/`description` (`coalesce(..., '')` para
+colunas nullable) — nunca `price`/`postal_code`/`state`/`property_type`/`transaction_type`/
+`status`, que já têm filtro estruturado ou não são bons candidatos a FTS. Pesos via
+`setweight()`: `title` (A) > `neighborhood`/`city` (B) > `street` (C) > `description` (D) — uma
+ocorrência no título ranqueia acima da mesma palavra só na descrição. Índice `GIN` dedicado
+sobre `search_vector` (seção "Schema" acima). Config `'portuguese'` confirmada disponível na
+imagem `postgres:17-alpine` usada por este projeto (`SELECT cfgname FROM pg_ts_config WHERE
+cfgname = 'portuguese'`) antes de escrever qualquer código.
+
+**Query parsing**: sempre `websearch_to_tsquery('portuguese', $1)`, nunca `to_tsquery` bruto —
+aceita input natural (`apartamento centro`, `"vista mar"`, `apartamento -reforma`) sem exigir
+sintaxe de tsquery do usuário, e nunca lança erro de sintaxe para input arbitrário (ao contrário
+de `to_tsquery`). O texto de `q` é sempre um parâmetro Drizzle (`sql\`...${query}...\``), nunca
+concatenado na string SQL — nenhuma superfície de SQL injection nova.
+
+**Ranking**: sem `sort` explícito, `q` presente → `PropertySort` interno resolve para
+`"relevance"` (`query.sort ?? (query.q !== undefined ? "relevance" : "created_at")` em
+`property-routes.ts`) — `"relevance"` nunca é um valor que o cliente pode enviar em `?sort=`
+(fora de `PROPERTY_SORT_FIELDS`/o enum Zod), só um resultado interno dessa resolução. Ordena por
+`ts_rank(...) DESC, id DESC` — `order` não tem efeito nesse modo (uma única ordenação
+determinística, não uma direção configurável sobre relevância). Um `sort` explícito
+(`sort=price`, por exemplo) sempre vence sobre relevância, mesmo com `q` presente — `q` continua
+filtrando via `WHERE`, só deixa de controlar a ordenação. O valor numérico do rank nunca é
+exposto na resposta HTTP — detalhe interno de ordenação.
+
+**Limitações conhecidas, verificadas empiricamente** (nunca resolvidas silenciosamente nesta
+tarefa — CLAUDE.md/seção 64 do Prompt 025):
+- **Acentuação**: o dicionário `portuguese` do PostgreSQL não normaliza acentos por padrão —
+  `q=panoramica` (sem acento) **não** encontra um texto com "panorâmica" (testado manualmente
+  contra um tenant real). A extensão `unaccent` resolveria isso, mas não foi adicionada nesta
+  tarefa (decisão explícita, não uma omissão).
+- **Stemming**: funciona para variações morfológicas reais do português — `q=reforma` encontra
+  um texto contendo "Reformado" (testado manualmente).
+
+**Permissions**: nenhuma alteração em `grantTenantApplicationPrivileges`
+(`infrastructure/database/tenant/permissions.ts`) — `GRANT SELECT/INSERT/UPDATE/DELETE ON ALL
+TABLES` já cobre a tabela inteira, incluindo a coluna gerada; nem a coluna `tsvector` nem o
+índice `GIN` são objetos com ACL própria além do nível de tabela.
 
 **IMPLEMENTED** — isolamento A/B provado em nível HTTP
 (`src/modules/properties/http/property-routes.test.ts`): tenant A cria, tenant A vê na

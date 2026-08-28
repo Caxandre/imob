@@ -44,6 +44,15 @@ export interface PropertyListFilters {
   parkingSpacesMin?: number;
   areaMin?: string;
   areaMax?: string;
+  /**
+   * Full-text search term (Prompt 025) — combined with every other present filter using AND,
+   * same as the rest of this interface. Matched against `properties.search_vector` (generated
+   * column over `title`/`neighborhood`/`city`/`street`/`description`, see
+   * `infrastructure/database/tenant/schema.ts`) via `websearch_to_tsquery('portuguese', ...)`,
+   * never `ILIKE '%...%'`. Already trimmed/length-validated by the HTTP boundary — the
+   * repository only ever receives a non-empty string here.
+   */
+  query?: string;
 }
 
 /**
@@ -53,8 +62,14 @@ export interface PropertyListFilters {
  * `property-request.schema.ts` (http layer) manually, the same domain/http duplication already
  * used for `PropertyType`/`TransactionType`/`PropertyStatus` in this codebase — the application
  * layer never imports Zod/http types.
+ *
+ * `"relevance"` (Prompt 025) is deliberately **not** part of `PROPERTY_SORT_FIELDS` — it is
+ * never a value a client can pass as `?sort=`. The HTTP layer resolves it internally
+ * (`property-routes.ts`) exactly when `q` is present and `sort` was *not* explicitly provided
+ * (this task, sections 19-20): `query.sort ?? (query.q !== undefined ? "relevance" : "created_at")`.
+ * An explicit `sort` always wins over relevance, even with `q` present.
  */
-export type PropertySort = "created_at" | "updated_at" | "price" | "area_m2" | "bedrooms";
+export type PropertySort = "created_at" | "updated_at" | "price" | "area_m2" | "bedrooms" | "relevance";
 
 export type SortOrder = "asc" | "desc";
 

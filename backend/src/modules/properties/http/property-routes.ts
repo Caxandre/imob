@@ -8,7 +8,12 @@ import { createProperty } from "../application/create-property.js";
 import { getProperty } from "../application/get-property.js";
 import { listProperties } from "../application/list-properties.js";
 import { updateProperty } from "../application/update-property.js";
-import type { ListPropertiesInput, PropertyListFilters, UpdatePropertyInput } from "../application/property-repository.js";
+import type {
+  ListPropertiesInput,
+  PropertyListFilters,
+  PropertySort,
+  UpdatePropertyInput,
+} from "../application/property-repository.js";
 import type { Property } from "../domain/property.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
 import { mapPropertyRouteError } from "./property-error-mapper.js";
@@ -20,6 +25,8 @@ import {
   PROPERTY_STATUSES,
   PROPERTY_TYPES,
   propertyIdParamsSchema,
+  Q_MAX_LENGTH,
+  Q_MIN_LENGTH,
   SORT_ORDERS,
   TRANSACTION_TYPES,
   updatePropertyBodySchema,
@@ -170,11 +177,18 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
           summary: "List properties",
           description:
             "Lists properties in the tenant's own database, with optional structured filters " +
-            "(AND-combined) and sorting. With no parameters, defaults to created_at DESC, id " +
-            "DESC — the same behavior as before filters/sorting existed. Unknown query " +
-            "parameters are rejected with 400. Examples:\n" +
+            "(AND-combined), full-text search (q), and sorting. With no parameters, defaults " +
+            "to created_at DESC, id DESC — the same behavior as before filters/sorting " +
+            "existed. `q` performs a PostgreSQL Full Text Search (websearch_to_tsquery, " +
+            "'portuguese' config) over title, description, street, neighborhood and city — " +
+            "never ILIKE. Without an explicit `sort`, a query with `q` orders results by " +
+            "relevance (best match first); an explicit `sort` always overrides relevance " +
+            "ordering, even with `q` present. Unknown query parameters are rejected with 400. " +
+            "Examples:\n" +
             "`/api/v1/properties?status=ACTIVE&property_type=APARTMENT&city=S%C3%A3o%20Paulo`\n" +
-            "`/api/v1/properties?price_min=300000.00&price_max=600000.00&sort=price&order=asc`",
+            "`/api/v1/properties?price_min=300000.00&price_max=600000.00&sort=price&order=asc`\n" +
+            "`/api/v1/properties?q=apartamento+centro`\n" +
+            "`/api/v1/properties?q=centro&status=ACTIVE&sort=price&order=asc`",
           tags: ["Properties"],
           headers: tenantIdHeaderSchema,
           querystring: {
@@ -206,16 +220,33 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
                 type: "string",
                 description: "Decimal string, > 0, must be >= area_min (e.g. \"120.00\").",
               },
+              q: {
+                type: "string",
+                description:
+                  "Full-text search over title, description, street, neighborhood and city " +
+                  `(PostgreSQL websearch_to_tsquery, 'portuguese' config). ${String(Q_MIN_LENGTH)}-` +
+                  `${String(Q_MAX_LENGTH)} characters after trim; supports natural input like ` +
+                  "\"apartamento centro\", quoted phrases, and -exclusions.",
+              },
               sort: {
                 type: "string",
                 enum: [...PROPERTY_SORT_FIELDS],
-                description: "Defaults to created_at. Always tie-broken by id for stable pagination.",
+                description:
+                  "Defaults to created_at — unless q is present and sort is omitted, in which " +
+                  "case results are ordered by full-text relevance instead. Always tie-broken " +
+                  "by id for stable pagination.",
               },
-              order: { type: "string", enum: [...SORT_ORDERS], description: "Defaults to desc." },
+              order: {
+                type: "string",
+                enum: [...SORT_ORDERS],
+                description: "Defaults to desc. Has no effect on relevance ordering (q without an explicit sort).",
+              },
             },
             examples: [
               { status: "ACTIVE", property_type: "APARTMENT", city: "São Paulo", price_max: "600000.00" },
               { price_min: "300000.00", price_max: "600000.00", sort: "price", order: "asc" },
+              { q: "apartamento centro" },
+              { q: "centro", status: "ACTIVE", sort: "price", order: "asc" },
             ],
           },
           response: {
@@ -252,12 +283,19 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
           parkingSpacesMin: query.parking_spaces_min,
           areaMin: query.area_min,
           areaMax: query.area_max,
+          query: query.q,
         };
+        // `sort` has no Zod default (unlike `order`) specifically so this can tell "omitted"
+        // apart from "explicitly created_at" — with `q` present and `sort` omitted, relevance
+        // wins; an explicit `sort` (any of the 5 allowlisted columns) always overrides it, even
+        // with `q` present (this task, sections 19/20). "relevance" itself is never a value a
+        // client can send — it is not part of `PROPERTY_SORT_FIELDS`/the querystring enum.
+        const sort: PropertySort = query.sort ?? (query.q !== undefined ? "relevance" : "created_at");
         const listInput: ListPropertiesInput = {
           page: query.page,
           limit: query.limit,
           filters,
-          sort: query.sort,
+          sort,
           order: query.order,
         };
 

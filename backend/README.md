@@ -193,6 +193,9 @@ Swagger UI (com pnpm dev:full em execução)
       city=São Paulo&price_min=300000.00&price_max=600000.00&sort=price&order=asc
       (parâmetros desconhecidos retornam 400 — ver a descrição da rota no Swagger para a
       lista completa)
+    → opcional: testar busca textual, ex. GET /properties?q=apartamento+centro (PostgreSQL
+      Full Text Search sobre title/description/street/neighborhood/city — nunca ILIKE; sem
+      sort explícito, resultados com q vêm ordenados por relevância)
   → Properties → GET /api/v1/properties/{id} → Try it out
     → preencher X-Tenant-Id e o id retornado pelo POST → Execute → conferir 200
   → Properties → PATCH /api/v1/properties/{id} → Try it out

@@ -15,6 +15,21 @@ import type {
 } from "../application/property-repository.js";
 
 /**
+ * `filters.query` → a parameterized `websearch_to_tsquery('portuguese', ...)` expression, built
+ * once and shared between the `WHERE` condition (`buildPropertyListConditions`) and the
+ * relevance `ORDER BY` (`buildPropertyOrderBy`) — both must rank/filter against the exact same
+ * parsed query, never two independently-built ones that could drift (this task, section 18/24).
+ * The `q` text is always passed as a Drizzle `sql` template parameter, never concatenated into
+ * the query string (section 16) — `websearch_to_tsquery` itself is what turns natural input
+ * (`"vista mar"`, `apartamento -reforma`) into a safe, structured tsquery; PostgreSQL rejects
+ * malformed input by raising an error (mapped to a controlled response like any other unexpected
+ * error, never a leaked raw SQL/query string — section 52), not by ever executing raw SQL.
+ */
+function buildSearchQuery(query: string): SQL {
+  return sql`websearch_to_tsquery('portuguese', ${query})`;
+}
+
+/**
  * `PropertyListFilters` → Drizzle `WHERE` conditions, one function shared by both the data query
  * and the count query in `list()` below (this task, section 35) — there is exactly one place
  * that knows how a filter maps to SQL, so the two queries can never drift apart. Every condition
@@ -46,6 +61,11 @@ function buildPropertyListConditions(filters: PropertyListFilters): SQL[] {
   }
   if (filters.areaMin !== undefined) conditions.push(gte(properties.areaM2, filters.areaMin));
   if (filters.areaMax !== undefined) conditions.push(lte(properties.areaM2, filters.areaMax));
+  // Full-text search (this task) — matched against the generated `search_vector` column
+  // (`infrastructure/database/tenant/schema.ts`), never `ILIKE '%...%'`.
+  if (filters.query !== undefined) {
+    conditions.push(sql`${properties.searchVector} @@ ${buildSearchQuery(filters.query)}`);
+  }
 
   return conditions;
 }
@@ -59,13 +79,29 @@ const NULLABLE_SORT_FIELDS: ReadonlySet<PropertySort> = new Set(["area_m2", "bed
 /**
  * `sort`/`order` → Drizzle `ORDER BY` clauses, always through this fixed mapping — the raw query
  * values are never interpolated into SQL (this task, section 26). Every ordering ends with `id`
- * in the same direction as the primary sort as a tie-breaker (section 25), so pagination is
- * never unstable even when many rows share the same value on the primary column. Nullable
- * columns always sort `NULLS LAST`, in both directions (section 27), via an explicit `sql`
- * fragment — Drizzle's `asc`/`desc` helpers have no built-in NULLS LAST/FIRST modifier.
+ * DESC as a tie-breaker, so pagination is never unstable even when many rows share the same
+ * value on the primary column. Nullable columns always sort `NULLS LAST`, in both directions
+ * (section 27), via an explicit `sql` fragment — Drizzle's `asc`/`desc` helpers have no built-in
+ * NULLS LAST/FIRST modifier.
+ *
+ * `sort === "relevance"` (Prompt 025) is the one case `order` never applies to — it is always
+ * `ts_rank(...) DESC, id DESC` (this task, section 19: one deterministic ordering, not a
+ * user-configurable direction on top of relevance). The HTTP layer only ever produces this value
+ * when `filters.query` is set (see `PropertySort` in `property-repository.ts`); the check below
+ * is a defensive guard against that invariant being violated, not a real runtime path.
  */
-function buildPropertyOrderBy(sort: PropertySort, order: SortOrder): SQL[] {
-  const idOrder = order === "asc" ? asc(properties.id) : desc(properties.id);
+function buildPropertyOrderBy(sort: PropertySort, order: SortOrder, filters: PropertyListFilters): SQL[] {
+  const idDesc = desc(properties.id);
+
+  if (sort === "relevance") {
+    if (filters.query === undefined) {
+      throw new Error('buildPropertyOrderBy: sort "relevance" requires filters.query to be set');
+    }
+    const rank = sql`ts_rank(${properties.searchVector}, ${buildSearchQuery(filters.query)})`;
+    return [desc(rank), idDesc];
+  }
+
+  const idOrder = order === "asc" ? asc(properties.id) : idDesc;
 
   if (NULLABLE_SORT_FIELDS.has(sort)) {
     const column = sort === "area_m2" ? properties.areaM2 : properties.bedrooms;
@@ -126,7 +162,7 @@ export function createDrizzlePropertyRepository(db: TenantDatabase): PropertyRep
       // Same `conditions` array feeds both queries below — the total this reports is always
       // the filtered total, never the tenant's overall count (this task, sections 20/35).
       const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-      const orderBy = buildPropertyOrderBy(input.sort, input.order);
+      const orderBy = buildPropertyOrderBy(input.sort, input.order, input.filters);
 
       const [data, totalRows] = await Promise.all([
         db.select().from(properties).where(whereClause).orderBy(...orderBy).limit(input.limit).offset(offset),

@@ -115,6 +115,7 @@ describe("OpenAPI specification", () => {
         "city",
         "price_min",
         "price_max",
+        "q",
         "sort",
         "order",
       ]),
