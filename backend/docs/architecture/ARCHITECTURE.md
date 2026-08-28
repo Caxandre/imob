@@ -1071,6 +1071,36 @@ WebP/AVIF, CDN custom domain, signed URLs, upload multipart-direto browser→R2,
 reconciliação de objetos órfãos no R2 (worker/processo agendado — Prompt 028 documenta o
 problema em ADR-007 "Delete" e no CLAUDE.md, mas não implementa a reconciliação em si).
 
+**PLANNED / DESIGNED** (Prompt 029) — arquitetura de processamento assíncrono de imagens,
+decidida em [ADR-008](adr/ADR-008-asynchronous-property-image-processing.md), sem nenhuma
+implementação de código nesta tarefa:
+
+```text
+HTTP upload (inalterado) → original no R2 → property_media persistido → enqueue job
+    (BullMQ, fila "media-processing", best-effort, HTTP termina sem esperar)
+        ↓
+Image Processing Worker (processo separado, PLANNED) → download do original → sharp
+    (resize proporcional, withoutEnlargement, sem crop) → variantes WebP (THUMBNAIL 320px,
+    CARD 640px, DETAIL 1280px, quality 82) → upload de cada variante ao R2 (key determinística
+    `.../<mediaId>/<variant>.webp`) → upsert em property_media_variants (PLANNED,
+    UNIQUE(property_media_id, variant), ON DELETE CASCADE) → property_media.status
+    PROCESSING → READY (ou FAILED em erro permanente)
+```
+
+- `sharp` = **PLANNED** — provider de processamento de imagem escolhido, **não instalado**
+  ainda (nenhuma dependência nova nesta tarefa).
+- Property media variants = **PLANNED** — tabela `property_media_variants` modelada
+  conceitualmente na ADR-008, nenhuma migration criada nesta tarefa.
+- Media worker = **PLANNED** — processo BullMQ separado do worker de provisionamento
+  (concorrência própria, CPU-intensivo), entrypoint futuro não decidido como parte automática
+  de `pnpm dev:full`.
+- Original sempre preservado no R2, indefinidamente — reprocessamento futuro (nova qualidade,
+  novo preset, correção de algoritmo) não exige novo upload do usuário.
+- Nenhuma mudança de comportamento HTTP nesta tarefa: `POST .../media` continua exatamente como
+  no Prompt 027/028; `property_media.object_key` de mídia já existente (formato
+  `.../<mediaId>.<ext>`, sem subpasta) permanece válido — variantes futuras usam o prefixo
+  `.../<mediaId>/`, sem exigir reorganização de keys existentes.
+
 ## Princípios
 
 - Simplicidade: sem abstrações antecipadas, sem microserviços, sem event sourcing/CQRS sem
