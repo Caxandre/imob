@@ -102,9 +102,11 @@ real usada em produção. **Limitação conhecida**: `pnpm dev` e `pnpm dev:prov
 não compartilham `SecretStore` entre si (cada um tem sua própria instância em memória, vazia
 no início) — um secret de tenant escrito pelo worker durante o provisioning não fica visível
 para a API rodando neste modo. Isso é esperado até existir um `SecretStore` de produção real
-(ADR-004) ou outro mecanismo de compartilhamento seguro. Use o modo integrado abaixo para
-testar rotas de domínio (`/api/v1/properties`) manualmente contra um tenant provisionado
-localmente.
+(ADR-004) ou outro mecanismo de compartilhamento seguro. Neste modo, tanto a linha em
+`database_clusters` quanto o secret administrativo do cluster continuam exigindo bootstrap
+manual (nenhum bootstrap automático existe fora de `pnpm dev:full`, ver abaixo). Use o modo
+integrado abaixo para testar rotas de domínio (`/api/v1/properties`) manualmente contra um
+tenant provisionado localmente.
 
 ### Desenvolvimento integrado (só para testes manuais locais)
 
@@ -118,6 +120,13 @@ pnpm dev:dispatcher     # continua processo separado
 recusa-se a iniciar sob `NODE_ENV=production`. Ver
 [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md#local-development-runtime--o-gap-de-secretstore-entre-processos)
 para os detalhes completos.
+
+Ao iniciar, `pnpm dev:full` também faz o bootstrap idempotente da linha `database_clusters`
+apontada por `TENANT_DATABASE_DEFAULT_CLUSTER` e semeia o secret administrativo do cluster no
+seu `SecretStore` em memória — não é mais necessário nenhum passo manual só para este modo.
+Ajustável via `DEV_BOOTSTRAP_CLUSTER_HOST`/`_PORT`/`_ADMIN_USERNAME`/`_ADMIN_PASSWORD`
+(opcionais — ver `.env.example`; os defaults já apontam para o serviço `postgres-tenants` do
+Docker Compose).
 
 Servidor sobe em `http://localhost:3000` (ajustável via `PORT`) em qualquer um dos dois modos.
 

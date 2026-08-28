@@ -32,6 +32,17 @@ const envSchema = z
     TENANT_DATABASE_DEFAULT_CLUSTER: z
       .string()
       .min(1, "TENANT_DATABASE_DEFAULT_CLUSTER must name an ACTIVE database_clusters row"),
+
+    // DEV-ONLY (Prompt 024): consumed exclusively by src/main/dev-full.ts, to idempotently
+    // bootstrap the local database_clusters row (named TENANT_DATABASE_DEFAULT_CLUSTER) and
+    // seed its admin credential into the in-memory SecretStore on startup. server.ts,
+    // provisioning-worker.ts and provisioning-dispatcher.ts never read these — this changes
+    // nothing about their behavior. Defaults match docker-compose.yml's postgres-tenants
+    // service.
+    DEV_BOOTSTRAP_CLUSTER_HOST: z.string().default("localhost"),
+    DEV_BOOTSTRAP_CLUSTER_PORT: z.coerce.number().int().positive().default(5433),
+    DEV_BOOTSTRAP_CLUSTER_ADMIN_USERNAME: z.string().default("postgres"),
+    DEV_BOOTSTRAP_CLUSTER_ADMIN_PASSWORD: z.string().default("postgres"),
   })
   .refine(
     (data) =>
