@@ -16,21 +16,25 @@ function fakeRepository(result: ListPropertiesResult): PropertyRepository {
   };
 }
 
+function sampleInput(overrides: Partial<ListPropertiesInput> = {}): ListPropertiesInput {
+  return { page: 1, limit: 20, filters: {}, sort: "created_at", order: "desc", ...overrides };
+}
+
 describe("listProperties", () => {
   it("computes totalPages from total/limit — never a separate database round trip", async () => {
     const data: Property[] = [];
-    const output = await listProperties(fakeRepository({ data, total: 45 }), { page: 2, limit: 20 });
+    const output = await listProperties(fakeRepository({ data, total: 45 }), sampleInput({ page: 2, limit: 20 }));
 
     expect(output).toEqual({ data, pagination: { page: 2, limit: 20, total: 45, totalPages: 3 } });
   });
 
   it("reports 0 total pages when there is nothing to list", async () => {
-    const output = await listProperties(fakeRepository({ data: [], total: 0 }), { page: 1, limit: 20 });
+    const output = await listProperties(fakeRepository({ data: [], total: 0 }), sampleInput({ page: 1, limit: 20 }));
 
     expect(output.pagination.totalPages).toBe(0);
   });
 
-  it("passes page/limit through to the repository unchanged", async () => {
+  it("passes page/limit/filters/sort/order through to the repository unchanged", async () => {
     const received: ListPropertiesInput[] = [];
     const repository: PropertyRepository = {
       create: async () => {
@@ -45,8 +49,16 @@ describe("listProperties", () => {
       archive: async () => undefined,
     };
 
-    await listProperties(repository, { page: 3, limit: 50 });
+    const input = sampleInput({
+      page: 3,
+      limit: 50,
+      filters: { status: "ACTIVE", city: "São Paulo" },
+      sort: "price",
+      order: "asc",
+    });
 
-    expect(received).toEqual([{ page: 3, limit: 50 }]);
+    await listProperties(repository, input);
+
+    expect(received).toEqual([input]);
   });
 });

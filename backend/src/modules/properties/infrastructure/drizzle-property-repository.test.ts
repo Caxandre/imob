@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { runTenantMigrations } from "../../../infrastructure/database/tenant/migrate.js";
 import * as tenantSchema from "../../../infrastructure/database/tenant/schema.js";
-import type { CreatePropertyInput } from "../application/property-repository.js";
+import type { CreatePropertyInput, ListPropertiesInput } from "../application/property-repository.js";
 import { createDrizzlePropertyRepository } from "./drizzle-property-repository.js";
 
 /**
@@ -58,6 +58,10 @@ async function createMigratedTenantDatabase() {
   createdFixtures.push({ databaseName, pool });
 
   return drizzle(pool, { schema: tenantSchema });
+}
+
+function listInput(overrides: Partial<ListPropertiesInput> = {}): ListPropertiesInput {
+  return { page: 1, limit: 20, filters: {}, sort: "created_at", order: "desc", ...overrides };
 }
 
 function sampleInput(overrides: Partial<CreatePropertyInput> = {}): CreatePropertyInput {
@@ -120,7 +124,7 @@ describe("createDrizzlePropertyRepository", () => {
     const second = await repository.create(sampleInput({ title: "Segundo" }));
     const third = await repository.create(sampleInput({ title: "Terceiro" }));
 
-    const result = await repository.list({ page: 1, limit: 20 });
+    const result = await repository.list(listInput());
 
     expect(result.total).toBe(3);
     expect(result.data.map((property) => property.id)).toEqual([third.id, second.id, first.id]);
@@ -134,9 +138,9 @@ describe("createDrizzlePropertyRepository", () => {
       await repository.create(sampleInput({ title: `Property ${i}` }));
     }
 
-    const firstPage = await repository.list({ page: 1, limit: 2 });
-    const secondPage = await repository.list({ page: 2, limit: 2 });
-    const thirdPage = await repository.list({ page: 3, limit: 2 });
+    const firstPage = await repository.list(listInput({ page: 1, limit: 2 }));
+    const secondPage = await repository.list(listInput({ page: 2, limit: 2 }));
+    const thirdPage = await repository.list(listInput({ page: 3, limit: 2 }));
 
     expect(firstPage.data).toHaveLength(2);
     expect(secondPage.data).toHaveLength(2);
@@ -152,7 +156,266 @@ describe("createDrizzlePropertyRepository", () => {
     const db = await createMigratedTenantDatabase();
     const repository = createDrizzlePropertyRepository(db);
 
-    await expect(repository.list({ page: 1, limit: 20 })).resolves.toEqual({ data: [], total: 0 });
+    await expect(repository.list(listInput())).resolves.toEqual({ data: [], total: 0 });
+  });
+
+  describe("list filters", () => {
+    it("filters by status", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      await repository.create(sampleInput({ title: "Draft", status: "DRAFT" }));
+      const active = await repository.create(sampleInput({ title: "Active", status: "ACTIVE" }));
+      await repository.create(sampleInput({ title: "Inactive", status: "INACTIVE" }));
+
+      const result = await repository.list(listInput({ filters: { status: "ACTIVE" } }));
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([active.id]);
+    });
+
+    it("filters by property_type", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const house = await repository.create(sampleInput({ title: "Casa", propertyType: "HOUSE" }));
+      await repository.create(sampleInput({ title: "Apto", propertyType: "APARTMENT" }));
+      await repository.create(sampleInput({ title: "Terreno", propertyType: "LAND" }));
+
+      const result = await repository.list(listInput({ filters: { propertyType: "HOUSE" } }));
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([house.id]);
+    });
+
+    it("filters by transaction_type", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const forSale = await repository.create(sampleInput({ title: "Venda", transactionType: "SALE" }));
+      await repository.create(sampleInput({ title: "Aluguel", transactionType: "RENT" }));
+
+      const result = await repository.list(listInput({ filters: { transactionType: "SALE" } }));
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([forSale.id]);
+    });
+
+    it("filters by city case-insensitively after trim, without matching substrings", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const saoPaulo = await repository.create(sampleInput({ title: "SP", city: "São Paulo" }));
+      await repository.create(sampleInput({ title: "Campinas", city: "Campinas" }));
+      await repository.create(sampleInput({ title: "SP Interior", city: "São Paulo Interior" }));
+
+      const result = await repository.list(listInput({ filters: { city: "são paulo" } }));
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([saoPaulo.id]);
+    });
+
+    it("filters by state", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const sp = await repository.create(sampleInput({ title: "SP", state: "SP" }));
+      await repository.create(sampleInput({ title: "RJ", state: "RJ" }));
+
+      const result = await repository.list(listInput({ filters: { state: "SP" } }));
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([sp.id]);
+    });
+
+    it("filters by price range (price_min/price_max)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      await repository.create(sampleInput({ title: "Barato", price: "300000.00" }));
+      const middle = await repository.create(sampleInput({ title: "Médio", price: "450000.00" }));
+      await repository.create(sampleInput({ title: "Caro", price: "700000.00" }));
+
+      const result = await repository.list(
+        listInput({ filters: { priceMin: "350000.00", priceMax: "600000.00" } }),
+      );
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([middle.id]);
+    });
+
+    it("filters by bedrooms_min/bathrooms_min/parking_spaces_min, excluding NULL rows", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const qualifies = await repository.create(
+        sampleInput({ title: "Qualifica", bedrooms: 3, bathrooms: 2, parkingSpaces: 2 }),
+      );
+      await repository.create(sampleInput({ title: "Poucos quartos", bedrooms: 1, bathrooms: 2, parkingSpaces: 2 }));
+      await repository.create(
+        sampleInput({ title: "Sem info", bedrooms: null, bathrooms: null, parkingSpaces: null }),
+      );
+
+      const result = await repository.list(
+        listInput({ filters: { bedroomsMin: 2, bathroomsMin: 1, parkingSpacesMin: 1 } }),
+      );
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([qualifies.id]);
+    });
+
+    it("filters by area range (area_min/area_max), excluding NULL rows", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const inRange = await repository.create(sampleInput({ title: "Na faixa", areaM2: "80.00" }));
+      await repository.create(sampleInput({ title: "Pequeno", areaM2: "40.00" }));
+      await repository.create(sampleInput({ title: "Sem área", areaM2: null }));
+
+      const result = await repository.list(listInput({ filters: { areaMin: "60.00", areaMax: "100.00" } }));
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([inRange.id]);
+    });
+
+    it("combines multiple filters with AND semantics", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const match = await repository.create(
+        sampleInput({
+          title: "Combina",
+          status: "ACTIVE",
+          propertyType: "APARTMENT",
+          city: "São Paulo",
+          price: "500000.00",
+        }),
+      );
+      // Fails city.
+      await repository.create(
+        sampleInput({ title: "Cidade errada", status: "ACTIVE", propertyType: "APARTMENT", city: "Campinas" }),
+      );
+      // Fails status.
+      await repository.create(
+        sampleInput({ title: "Status errado", status: "DRAFT", propertyType: "APARTMENT", city: "São Paulo" }),
+      );
+      // Fails price_max.
+      await repository.create(
+        sampleInput({
+          title: "Muito caro",
+          status: "ACTIVE",
+          propertyType: "APARTMENT",
+          city: "São Paulo",
+          price: "900000.00",
+        }),
+      );
+
+      const result = await repository.list(
+        listInput({
+          filters: { status: "ACTIVE", propertyType: "APARTMENT", city: "São Paulo", priceMax: "600000.00" },
+        }),
+      );
+
+      expect(result.total).toBe(1);
+      expect(result.data.map((p) => p.id)).toEqual([match.id]);
+    });
+
+    it("reports the filtered total, not the tenant's overall count", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      for (let i = 0; i < 7; i += 1) {
+        await repository.create(sampleInput({ title: `Outro ${i}`, status: "DRAFT" }));
+      }
+      for (let i = 0; i < 3; i += 1) {
+        await repository.create(sampleInput({ title: `Ativo ${i}`, status: "ACTIVE" }));
+      }
+
+      const result = await repository.list(listInput({ filters: { status: "ACTIVE" } }));
+
+      expect(result.total).toBe(3);
+    });
+
+    it("paginates a filtered result set correctly", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      for (let i = 0; i < 5; i += 1) {
+        await repository.create(sampleInput({ title: `Ativo ${i}`, status: "ACTIVE" }));
+      }
+      await repository.create(sampleInput({ title: "Draft", status: "DRAFT" }));
+
+      const firstPage = await repository.list(listInput({ page: 1, limit: 2, filters: { status: "ACTIVE" } }));
+      const secondPage = await repository.list(listInput({ page: 2, limit: 2, filters: { status: "ACTIVE" } }));
+      const thirdPage = await repository.list(listInput({ page: 3, limit: 2, filters: { status: "ACTIVE" } }));
+
+      expect(firstPage.data).toHaveLength(2);
+      expect(secondPage.data).toHaveLength(2);
+      expect(thirdPage.data).toHaveLength(1);
+      expect(firstPage.total).toBe(5);
+      expect(secondPage.total).toBe(5);
+      expect(thirdPage.total).toBe(5);
+    });
+  });
+
+  describe("list sorting", () => {
+    it("sorts by price ascending", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const low = await repository.create(sampleInput({ title: "Baixo", price: "100000.00" }));
+      const mid = await repository.create(sampleInput({ title: "Médio", price: "300000.00" }));
+      const high = await repository.create(sampleInput({ title: "Alto", price: "700000.00" }));
+
+      const result = await repository.list(listInput({ sort: "price", order: "asc" }));
+
+      expect(result.data.map((p) => p.id)).toEqual([low.id, mid.id, high.id]);
+    });
+
+    it("sorts by price descending", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const low = await repository.create(sampleInput({ title: "Baixo", price: "100000.00" }));
+      const mid = await repository.create(sampleInput({ title: "Médio", price: "300000.00" }));
+      const high = await repository.create(sampleInput({ title: "Alto", price: "700000.00" }));
+
+      const result = await repository.list(listInput({ sort: "price", order: "desc" }));
+
+      expect(result.data.map((p) => p.id)).toEqual([high.id, mid.id, low.id]);
+    });
+
+    it("sorts a nullable column with NULLS LAST in both directions", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const withArea = await repository.create(sampleInput({ title: "Com área", areaM2: "80.00" }));
+      const withoutArea = await repository.create(sampleInput({ title: "Sem área", areaM2: null }));
+
+      const ascending = await repository.list(listInput({ sort: "area_m2", order: "asc" }));
+      const descending = await repository.list(listInput({ sort: "area_m2", order: "desc" }));
+
+      expect(ascending.data.map((p) => p.id)).toEqual([withArea.id, withoutArea.id]);
+      expect(descending.data.map((p) => p.id)).toEqual([withArea.id, withoutArea.id]);
+    });
+
+    it("breaks ties deterministically by id when the sort column has equal values", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+
+      const first = await repository.create(sampleInput({ title: "Empate 1", price: "500000.00" }));
+      const second = await repository.create(sampleInput({ title: "Empate 2", price: "500000.00" }));
+      const third = await repository.create(sampleInput({ title: "Empate 3", price: "500000.00" }));
+
+      const expectedAsc = [first, second, third].map((p) => p.id).sort();
+      const expectedDesc = [...expectedAsc].reverse();
+
+      const ascending = await repository.list(listInput({ sort: "price", order: "asc" }));
+      const descending = await repository.list(listInput({ sort: "price", order: "desc" }));
+
+      expect(ascending.data.map((p) => p.id)).toEqual(expectedAsc);
+      expect(descending.data.map((p) => p.id)).toEqual(expectedDesc);
+    });
   });
 
   describe("update", () => {

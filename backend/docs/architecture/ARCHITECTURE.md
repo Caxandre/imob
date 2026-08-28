@@ -618,10 +618,10 @@ máquina de estado própria fora do escopo desta tarefa), `price` `numeric(15,2)
 `postal_code`, todos nullable — `state` é `varchar(2)`, nunca uma tabela de UFs), timestamps
 `TIMESTAMPTZ`. Checks: `price > 0`,
 `bedrooms`/`bathrooms`/`parking_spaces >= 0` (quando presentes), `area_m2 > 0` (quando
-presente). Índice único: `(created_at DESC, id DESC)`, servindo exatamente a única listagem
-que esta tarefa tem (sem filtros ainda) — sem índices em `status`/`property_type`/
-`transaction_type`/`city`, deliberadamente, até existir uma rota que realmente filtre por
-eles.
+presente). Índice único: `(created_at DESC, id DESC)`. `GET /api/v1/properties` ganhou filtros
+estruturados e ordenação no Prompt 023 (ver seção "Properties" abaixo), mas nenhum índice novo
+foi adicionado por conta disso — sem dados/`EXPLAIN` reais de uso, adicionar índices por filtro
+seria otimização prematura; permanece uma avaliação futura, não implementada nesta tarefa.
 
 **Migration**: `drizzle/tenant/0001_fancy_blackheart.sql`, puramente aditiva (nenhuma
 migration no Control Plane). `schemaVersion` (contagem de `drizzle.__drizzle_migrations`)
@@ -712,6 +712,26 @@ observando a resposta. `TenantDatabaseNotAvailableError`/cluster `INACTIVE`/secr
 inválido mapeiam para `503` — são problemas de infraestrutura/operação, nunca algo que o
 chamador corrija mudando a requisição; nenhuma mensagem inclui detalhe interno (qual check
 falhou, nome do cluster, secret reference).
+
+**IMPLEMENTED** (Prompt 023) — `GET /api/v1/properties` ganhou filtros estruturados
+(`status`/`property_type`/`transaction_type`/`city`/`state`/`price_min`/`price_max`/
+`bedrooms_min`/`bathrooms_min`/`parking_spaces_min`/`area_min`/`area_max`, todos opcionais,
+combinados com AND) e ordenação (`sort`/`order`) — validados e normalizados por Zod na fronteira
+HTTP (`property-request.schema.ts`), nunca interpretados pelo repository, que só recebe um
+`PropertyListFilters`/`PropertySort`/`SortOrder` já prontos (`property-repository.ts`). Parâmetro
+de query desconhecido é rejeitado com `400` (nunca ignorado silenciosamente). `city` é
+case-insensitive exato após trim (`ilike` sem wildcards), nunca substring/full-text; `sort` é uma
+allowlist fechada (`created_at`/`updated_at`/`price`/`area_m2`/`bedrooms`) sempre mapeada para
+uma coluna Drizzle conhecida — a string bruta de `sort`/`order` nunca é interpolada em SQL.
+Colunas nullable (`area_m2`/`bedrooms`) ordenam com `NULLS LAST` explícito em ambas as direções;
+toda ordenação é desempatada por `id` na mesma direção do sort principal, para paginação sempre
+estável. `pagination.total`/`total_pages` refletem o total **filtrado**, nunca o total geral do
+tenant — a mesma função que constrói os predicados WHERE alimenta a query de dados e a de
+`count(*)`, para as duas nunca divergirem (`drizzle-property-repository.ts`). Sem migration nesta
+tarefa: o índice existente (`created_at DESC, id DESC`) já bastava para a fase atual; índices
+adicionais por filtro ficam como avaliação futura, sem dados reais de uso para justificá-los
+agora. Busca full-text (`q`/substring arbitrária) e busca por proximidade/geolocalização
+continuam **PLANNED**, deliberadamente fora do escopo desta tarefa.
 
 **IMPLEMENTED** — isolamento A/B provado em nível HTTP
 (`src/modules/properties/http/property-routes.test.ts`): tenant A cria, tenant A vê na

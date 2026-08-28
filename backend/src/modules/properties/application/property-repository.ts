@@ -20,9 +20,50 @@ export interface CreatePropertyInput {
   postalCode: string | null;
 }
 
+/**
+ * Structured filters for `GET /api/v1/properties` (this task). Every field is optional and
+ * combines with every other present field using AND semantics — a filter that is absent here
+ * means "do not restrict on this column", never "match only rows where this column is empty".
+ * `priceMin`/`priceMax`/`areaMin`/`areaMax` stay decimal strings end to end (never `number`),
+ * same money-contract reasoning as `CreatePropertyInput.price`. Validation (ranges, enums,
+ * decimal format) happens at the HTTP boundary (`property-request.schema.ts`) before this
+ * shape is ever built — the repository only ever receives already-validated filters.
+ */
+export interface PropertyListFilters {
+  status?: PropertyStatus;
+  propertyType?: PropertyType;
+  transactionType?: TransactionType;
+  /** Case-insensitive, exact after trim — never a substring/full-text match. */
+  city?: string;
+  /** Already normalized to uppercase by the HTTP boundary. */
+  state?: string;
+  priceMin?: string;
+  priceMax?: string;
+  bedroomsMin?: number;
+  bathroomsMin?: number;
+  parkingSpacesMin?: number;
+  areaMin?: string;
+  areaMax?: string;
+}
+
+/**
+ * Sortable columns for `GET /api/v1/properties` — a closed allowlist (this task, section 26):
+ * `sort`/`order` are never interpolated into SQL directly, always mapped through this type to a
+ * known Drizzle column. Mirrors `PROPERTY_SORT_FIELDS`/`SORT_ORDERS` in
+ * `property-request.schema.ts` (http layer) manually, the same domain/http duplication already
+ * used for `PropertyType`/`TransactionType`/`PropertyStatus` in this codebase — the application
+ * layer never imports Zod/http types.
+ */
+export type PropertySort = "created_at" | "updated_at" | "price" | "area_m2" | "bedrooms";
+
+export type SortOrder = "asc" | "desc";
+
 export interface ListPropertiesInput {
   page: number;
   limit: number;
+  filters: PropertyListFilters;
+  sort: PropertySort;
+  order: SortOrder;
 }
 
 export interface ListPropertiesResult {

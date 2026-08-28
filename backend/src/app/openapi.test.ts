@@ -27,6 +27,7 @@ interface OpenApiOperation {
   tags?: string[];
   requestBody?: unknown;
   responses: Record<string, unknown>;
+  parameters?: { name: string; in: string }[];
 }
 
 interface OpenApiSpec {
@@ -101,6 +102,23 @@ describe("OpenAPI specification", () => {
     const list = spec.paths["/api/v1/properties"]?.get;
     expect(list?.operationId).toBe("listProperties");
     expect(list?.tags).toEqual(["Properties"]);
+    // Structured filters + sorting (this task) are documented as real query parameters, not
+    // silently accepted-but-undocumented.
+    const listQueryParamNames = (list?.parameters ?? [])
+      .filter((param) => param.in === "query")
+      .map((param) => param.name);
+    expect(listQueryParamNames).toEqual(
+      expect.arrayContaining([
+        "status",
+        "property_type",
+        "transaction_type",
+        "city",
+        "price_min",
+        "price_max",
+        "sort",
+        "order",
+      ]),
+    );
 
     const getById = spec.paths["/api/v1/properties/{id}"]?.get;
     expect(getById?.operationId).toBe("getProperty");

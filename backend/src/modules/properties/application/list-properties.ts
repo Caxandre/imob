@@ -1,10 +1,7 @@
 import type { Property } from "../domain/property.js";
-import type { PropertyRepository } from "./property-repository.js";
+import type { ListPropertiesInput, PropertyRepository } from "./property-repository.js";
 
-export interface ListPropertiesInput {
-  page: number;
-  limit: number;
-}
+export type { ListPropertiesInput };
 
 export interface ListPropertiesPagination {
   page: number;
@@ -19,10 +16,14 @@ export interface ListPropertiesOutput {
 }
 
 /**
- * Lists properties in the already-resolved tenant's database, ordered deterministically
- * (`created_at DESC, id DESC` — see `PropertyRepository`/schema) and paginated. `totalPages`
- * is computed here, not by the repository, since it is pure arithmetic over `total`/`limit`
- * with no need for another round trip to the database.
+ * Lists properties in the already-resolved tenant's database, filtered/sorted/paginated per
+ * `input`. `filters`/`sort`/`order` are passed straight through to the repository unchanged
+ * (this task, section 29) — this use case never interprets a query string or builds SQL itself,
+ * that already happened at the HTTP boundary (validation) and happens next in the repository
+ * (predicate/order-by construction). `totalPages` is computed here, not by the repository, since
+ * it is pure arithmetic over `total`/`limit` with no need for another round trip to the
+ * database. With no filters, default sort (`created_at DESC, id DESC`) preserves the previous
+ * unfiltered behavior exactly.
  */
 export async function listProperties(
   repository: PropertyRepository,

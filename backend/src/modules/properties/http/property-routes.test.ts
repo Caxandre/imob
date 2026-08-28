@@ -483,6 +483,111 @@ describe("Properties HTTP routes", () => {
         await app.close();
       }
     });
+
+    it("filters by status, property_type, and combines multiple filters with city (normalized case-insensitive)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("filters", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const match = await createProperty(app, tenant.id, {
+          status: "ACTIVE",
+          property_type: "APARTMENT",
+          city: "São Paulo",
+        });
+        await createProperty(app, tenant.id, { status: "DRAFT", property_type: "APARTMENT", city: "São Paulo" });
+        await createProperty(app, tenant.id, { status: "ACTIVE", property_type: "HOUSE", city: "São Paulo" });
+        await createProperty(app, tenant.id, { status: "ACTIVE", property_type: "APARTMENT", city: "Campinas" });
+
+        const response = await app.inject({
+          method: "GET",
+          // Lowercase "sao paulo" (no accent) exercises normalization — trimmed + case-insensitive.
+          url: "/api/v1/properties?status=ACTIVE&property_type=APARTMENT&city=s%C3%A3o%20paulo",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const body = response.json();
+        expect(body.data.map((p: { id: string }) => p.id)).toEqual([match.json().id]);
+        expect(body.pagination.total).toBe(1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("normalizes state to uppercase (sp -> SP)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("state-normalize", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const match = await createProperty(app, tenant.id, { state: "SP" });
+        await createProperty(app, tenant.id, { state: "RJ" });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?state=sp",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data.map((p: { id: string }) => p.id)).toEqual([match.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("sorts by price ascending and descending via query params", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("sort", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const low = await createProperty(app, tenant.id, { price: "100000.00" });
+        const high = await createProperty(app, tenant.id, { price: "900000.00" });
+
+        const ascending = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?sort=price&order=asc",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+        const descending = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?sort=price&order=desc",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(ascending.json().data.map((p: { id: string }) => p.id)).toEqual([low.json().id, high.json().id]);
+        expect(descending.json().data.map((p: { id: string }) => p.id)).toEqual([high.json().id, low.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it.each([
+      ["price_min greater than price_max", "price_min=600000.00&price_max=300000.00"],
+      ["area_min greater than area_max", "area_min=100.00&area_max=50.00"],
+      ["invalid status", "status=SOLD"],
+      ["invalid sort", "sort=title"],
+      ["invalid order", "order=sideways"],
+      ["unknown query parameter", "prcie_min=100000"],
+    ])("rejects an invalid query (%s) with 400", async (_label, queryString) => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("query-validation", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/api/v1/properties?${queryString}`,
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
   });
 
   describe("GET /api/v1/properties/:id", () => {
@@ -883,6 +988,37 @@ describe("Properties HTTP routes", () => {
         expect(patchFromA.statusCode).toBe(200);
         const deleteFromA = await deleteProperty(app, tenantA.id, propertyId);
         expect(deleteFromA.statusCode).toBe(204);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("a filtered query in A never returns or counts B's matching rows", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("isolation-filter-a", secretStore);
+      const tenantB = await provisionReadyTenant("isolation-filter-b", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const propertyA = await createProperty(app, tenantA.id, {
+          status: "ACTIVE",
+          property_type: "APARTMENT",
+          city: "São Paulo",
+        });
+        await createProperty(app, tenantB.id, {
+          status: "ACTIVE",
+          property_type: "APARTMENT",
+          city: "São Paulo",
+        });
+
+        const responseA = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties?status=ACTIVE&property_type=APARTMENT&city=S%C3%A3o%20Paulo",
+          headers: { [TENANT_ID_HEADER]: tenantA.id },
+        });
+
+        expect(responseA.json().data.map((p: { id: string }) => p.id)).toEqual([propertyA.json().id]);
+        expect(responseA.json().pagination.total).toBe(1);
       } finally {
         await app.close();
       }

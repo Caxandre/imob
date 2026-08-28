@@ -12,6 +12,15 @@ export const PROPERTY_TYPES = ["HOUSE", "APARTMENT", "LAND", "COMMERCIAL", "OTHE
 export const TRANSACTION_TYPES = ["SALE", "RENT"] as const;
 export const PROPERTY_STATUSES = ["DRAFT", "ACTIVE", "INACTIVE"] as const;
 
+/**
+ * Allowlist for `GET /api/v1/properties?sort=` (this task, section 22/26) — mirrors
+ * `PropertySort` in `property-repository.ts` (application layer) manually, the same
+ * domain/http duplication already used for `PROPERTY_TYPES`/`TRANSACTION_TYPES`/
+ * `PROPERTY_STATUSES` above. Never grown by reading an arbitrary column name off the request.
+ */
+export const PROPERTY_SORT_FIELDS = ["created_at", "updated_at", "price", "area_m2", "bedrooms"] as const;
+export const SORT_ORDERS = ["asc", "desc"] as const;
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Plain digits with an optional 2-decimal-place fraction — matches this schema's NUMERIC(*, 2)
@@ -97,11 +106,63 @@ export const createPropertyBodySchema = z.object({
 
 export type CreatePropertyBody = z.infer<typeof createPropertyBodySchema>;
 
-/** `page`/`limit` arrive as query string values (always strings) — coerced, then bounded. */
-export const listPropertiesQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(DEFAULT_PAGE_LIMIT),
-});
+// Query-string counterpart of `optionalNonNegativeInt()` above: no `.nullish()` (query params
+// are either present or entirely absent, never `null`), and coerced from the string every query
+// param actually arrives as. `z.coerce.number()` on "abc" yields `NaN`, which `.int()` rejects;
+// on "1.5" yields 1.5, which `.int()` also rejects; on "-1" passes `.int()` but fails `.min(0)`
+// — all three fail as required (this task, section 31).
+function optionalNonNegativeIntQueryParam() {
+  return z.coerce.number().int().min(0).optional();
+}
+
+/**
+ * Authoritative validation for `GET /api/v1/properties` — structured filters (this task,
+ * sections 4-16) plus `sort`/`order` (sections 22-27), all optional and AND-combined. `.strict()`
+ * rejects any query param outside this shape with `400` (section 33) instead of silently
+ * ignoring a typo like `?prcie_min=...`. `status`/`property_type`/`transaction_type` reuse the
+ * exact same enums as the create/update schemas above — never a second, independently
+ * maintained list of valid values (section 6/60). `price_min`/`price_max`/`area_min`/`area_max`
+ * reuse `positiveDecimalString`, so they carry the exact same decimal-string format and `> 0`
+ * constraint as `price`/`area_m2` on create (sections 11/16), and stay strings end to end —
+ * never round-tripped through JS `number` (section 32).
+ */
+export const listPropertiesQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(DEFAULT_PAGE_LIMIT),
+    status: z.enum(PROPERTY_STATUSES).optional(),
+    property_type: z.enum(PROPERTY_TYPES).optional(),
+    transaction_type: z.enum(TRANSACTION_TYPES).optional(),
+    // Case-insensitive exact match after trim (section 9) — normalization itself happens in the
+    // repository (`ilike` with no wildcards); this only trims and bounds the length.
+    city: z.string().trim().min(1).max(ADDRESS_FIELD_MAX_LENGTH).optional(),
+    state: z.string().trim().length(2, "state must be a 2-letter Brazilian UF").toUpperCase().optional(),
+    price_min: positiveDecimalString("price_min").optional(),
+    price_max: positiveDecimalString("price_max").optional(),
+    bedrooms_min: optionalNonNegativeIntQueryParam(),
+    bathrooms_min: optionalNonNegativeIntQueryParam(),
+    parking_spaces_min: optionalNonNegativeIntQueryParam(),
+    area_min: positiveDecimalString("area_min").optional(),
+    area_max: positiveDecimalString("area_max").optional(),
+    sort: z.enum(PROPERTY_SORT_FIELDS).default("created_at"),
+    order: z.enum(SORT_ORDERS).default("desc"),
+  })
+  .strict()
+  .refine(
+    (query) =>
+      query.price_min === undefined ||
+      query.price_max === undefined ||
+      // Validation-only comparison (never the value stored/sent to the database — the decimal
+      // strings themselves are what reach the repository, section 32); safe at real-estate
+      // price magnitudes, well inside JS's safe integer range.
+      Number(query.price_min) <= Number(query.price_max),
+    { message: "price_min must be less than or equal to price_max", path: ["price_min"] },
+  )
+  .refine(
+    (query) =>
+      query.area_min === undefined || query.area_max === undefined || Number(query.area_min) <= Number(query.area_max),
+    { message: "area_min must be less than or equal to area_max", path: ["area_min"] },
+  );
 
 export type ListPropertiesQuery = z.infer<typeof listPropertiesQuerySchema>;
 

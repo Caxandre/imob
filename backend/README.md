@@ -180,6 +180,10 @@ Swagger UI (com pnpm dev:full em execução)
     → conferir 201, com o property criado
   → Properties → GET /api/v1/properties → Try it out
     → preencher X-Tenant-Id com o mesmo id → Execute → conferir a listagem paginada
+    → opcional: testar filtros e ordenação, ex. status=ACTIVE&property_type=APARTMENT&
+      city=São Paulo&price_min=300000.00&price_max=600000.00&sort=price&order=asc
+      (parâmetros desconhecidos retornam 400 — ver a descrição da rota no Swagger para a
+      lista completa)
   → Properties → GET /api/v1/properties/{id} → Try it out
     → preencher X-Tenant-Id e o id retornado pelo POST → Execute → conferir 200
   → Properties → PATCH /api/v1/properties/{id} → Try it out
