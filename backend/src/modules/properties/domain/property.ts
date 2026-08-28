@@ -46,3 +46,20 @@ export class PropertyNotFoundError extends Error {
     this.propertyId = propertyId;
   }
 }
+
+/**
+ * Raised when an action is attempted against an `INACTIVE` (archived) property that only
+ * `DRAFT`/`ACTIVE` properties may accept (Prompt 027, section 42) — currently just media
+ * upload. Maps to `409 Conflict` (`property-error-mapper.ts`), the same status already used for
+ * "tenant not ready" elsewhere in this module: the request cannot be completed given the
+ * resource's current state, not something a corrected request body would fix.
+ */
+export class PropertyArchivedError extends Error {
+  readonly propertyId: string;
+
+  constructor(propertyId: string) {
+    super(`Property "${propertyId}" is archived (INACTIVE) and cannot accept this action`);
+    this.name = "PropertyArchivedError";
+    this.propertyId = propertyId;
+  }
+}

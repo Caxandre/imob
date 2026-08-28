@@ -62,6 +62,7 @@ describe("OpenAPI specification", () => {
         "/api/v1/tenants",
         "/api/v1/properties",
         "/api/v1/properties/{id}",
+        "/api/v1/properties/{id}/media",
       ]),
     );
   });
@@ -142,6 +143,20 @@ describe("OpenAPI specification", () => {
     expect(Object.keys(archive?.responses ?? {})).toEqual(
       expect.arrayContaining(["204", "400", "404", "409", "503", "500"]),
     );
+
+    const uploadMedia = spec.paths["/api/v1/properties/{id}/media"]?.post;
+    expect(uploadMedia?.operationId).toBe("uploadPropertyMedia");
+    expect(uploadMedia?.tags).toEqual(["Properties"]);
+    expect(Object.keys(uploadMedia?.responses ?? {})).toEqual(
+      expect.arrayContaining(["201", "400", "404", "409", "413", "503", "500"]),
+    );
+
+    const listMedia = spec.paths["/api/v1/properties/{id}/media"]?.get;
+    expect(listMedia?.operationId).toBe("listPropertyMedia");
+    expect(listMedia?.tags).toEqual(["Properties"]);
+    expect(Object.keys(listMedia?.responses ?? {})).toEqual(
+      expect.arrayContaining(["200", "400", "404", "409", "503", "500"]),
+    );
   });
 
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
@@ -157,6 +172,8 @@ describe("OpenAPI specification", () => {
         "UpdatePropertyRequest",
         "Property",
         "PropertyList",
+        "PropertyMedia",
+        "PropertyMediaList",
       ]),
     );
   });

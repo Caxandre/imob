@@ -1,3 +1,5 @@
+import { ALLOWED_PROPERTY_MEDIA_MIME_TYPES } from "../domain/property-media.js";
+import { MAX_MEDIA_FILE_SIZE_BYTES } from "./property-media-request.schema.js";
 import {
   ADDRESS_FIELD_MAX_LENGTH,
   DEFAULT_PAGE_LIMIT,
@@ -230,4 +232,85 @@ export const propertyListSchema = {
       pagination: { page: 1, limit: DEFAULT_PAGE_LIMIT, total: 1, total_pages: 1 },
     },
   ],
+} as const;
+
+const EXAMPLE_PROPERTY_MEDIA = {
+  id: "3b1f6e2a-8c9d-4f7a-9e3b-2d1a5c8f0e11",
+  property_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  public_url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a....jpg",
+  mime_type: "image/jpeg",
+  size_bytes: 245_760,
+  original_filename: "foto-sala.jpg",
+  position: 0,
+  created_at: "2026-08-28T12:00:00.000Z",
+  updated_at: "2026-08-28T12:00:00.000Z",
+} as const;
+
+/**
+ * Deliberately never includes `object_key` (this task, section 44) — it is an internal storage
+ * detail, not part of the public contract. `public_url` is the persisted value from the upload
+ * (`ObjectStorage.putObject()`), never recomputed on read (section 8).
+ */
+export const propertyMediaSchema = {
+  $id: "PropertyMedia",
+  title: "PropertyMedia",
+  type: "object",
+  description: "A property media (photo) as persisted in the tenant's own database. Never carries a tenant id.",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    property_id: { type: "string", format: "uuid" },
+    public_url: { type: "string", format: "uri" },
+    mime_type: { type: "string", enum: [...ALLOWED_PROPERTY_MEDIA_MIME_TYPES] },
+    size_bytes: { type: "integer", minimum: 1 },
+    original_filename: { type: "string", nullable: true },
+    position: { type: "integer", minimum: 0 },
+    created_at: { type: "string", format: "date-time" },
+    updated_at: { type: "string", format: "date-time" },
+  },
+  required: [
+    "id",
+    "property_id",
+    "public_url",
+    "mime_type",
+    "size_bytes",
+    "original_filename",
+    "position",
+    "created_at",
+    "updated_at",
+  ],
+  examples: [EXAMPLE_PROPERTY_MEDIA],
+} as const;
+
+export const propertyMediaListSchema = {
+  $id: "PropertyMediaList",
+  title: "PropertyMediaList",
+  type: "object",
+  properties: {
+    data: { type: "array", items: { $ref: "PropertyMedia#" } },
+  },
+  required: ["data"],
+  examples: [{ data: [EXAMPLE_PROPERTY_MEDIA] }],
+} as const;
+
+/**
+ * `multipart/form-data` request body for `POST /api/v1/properties/{id}/media` — documented as
+ * a plain JSON Schema description (this task, section 69: no base64 embedded here), the same
+ * loose-on-purpose style already used for `CreatePropertyRequest`/`UpdatePropertyRequest`:
+ * Fastify's built-in AJV validation runs before the handler's own multipart/magic-byte checks,
+ * so encoding real constraints here would let AJV reject a request with its own generic error
+ * shape instead of this API's `{statusCode, error, message, details}` envelope. The `file`
+ * field itself is intentionally not schema-validated at all — `@fastify/multipart` parses it
+ * before AJV body validation would even apply to a multipart request.
+ */
+export const uploadPropertyMediaRequestSchema = {
+  $id: "UploadPropertyMediaRequest",
+  title: "UploadPropertyMediaRequest",
+  type: "object",
+  description:
+    `multipart/form-data with a single field named "file" (binary), at most ` +
+    `${String(MAX_MEDIA_FILE_SIZE_BYTES / (1024 * 1024))}MB, one of: ` +
+    `${ALLOWED_PROPERTY_MEDIA_MIME_TYPES.join(", ")}.`,
+  properties: {
+    file: { type: "string", format: "binary", description: "The image file." },
+  },
 } as const;
