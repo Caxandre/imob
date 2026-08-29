@@ -28,11 +28,28 @@ export type ProcessPropertyMediaJobPayload = z.infer<typeof processPropertyMedia
 
 export type MediaProcessingQueue = Queue<ProcessPropertyMediaJobPayload>;
 
-/**
- * No consumer is created here (this task, section 44) — only the queue/job contract a future
- * dispatcher (not implemented yet, see ADR-008 "Deferred dispatcher design") will publish to,
- * and a future worker (not implemented yet) will consume from.
- */
-export function createMediaProcessingQueue(connection: Redis): MediaProcessingQueue {
-  return new Queue<ProcessPropertyMediaJobPayload>(MEDIA_PROCESSING_QUEUE_NAME, { connection });
+export interface CreateMediaProcessingQueueOptions {
+  /** Retry policy for every job added to this queue (ADR-008 "Failure handling", Prompt 032,
+   * section 35/36) — configured once here, at the queue level, never invented later by the
+   * worker after a job already exists. Unlike the provisioning queue's explicit `attempts: 1`
+   * (ADR-002 — that workflow delegates all recovery to its own execution-lease mechanism, never
+   * to BullMQ), image processing is a different workload that does want BullMQ to retry
+   * transient failures automatically. */
+  attempts: number;
+  /** Base delay (ms) for BullMQ's exponential backoff — attempt N waits roughly
+   * `backoffDelayMs * 2^(N-1)`. */
+  backoffDelayMs: number;
+}
+
+export function createMediaProcessingQueue(
+  connection: Redis,
+  options: CreateMediaProcessingQueueOptions,
+): MediaProcessingQueue {
+  return new Queue<ProcessPropertyMediaJobPayload>(MEDIA_PROCESSING_QUEUE_NAME, {
+    connection,
+    defaultJobOptions: {
+      attempts: options.attempts,
+      backoff: { type: "exponential", delay: options.backoffDelayMs },
+    },
+  });
 }

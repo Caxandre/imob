@@ -905,19 +905,19 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
           );
         });
 
-        if (!outcome.objectStorageDeleted) {
-          // Metadata removal already committed — this is a best-effort cleanup failure, never
-          // a reason to fail the request (ADR-007 "Delete"). Never logs a secret; only the
-          // identifiers needed to find/reconcile the orphaned object later.
+        if (outcome.failedObjectKeys.length > 0) {
+          // Metadata removal already committed — this is a best-effort cleanup failure (original
+          // and/or any variant), never a reason to fail the request (ADR-007 "Delete"). Never
+          // logs a secret; only the identifiers needed to find/reconcile the orphaned objects.
           request.log.warn(
             {
               operation: "property.media.delete.objectStorageFailed",
               tenantId: tenantContext.tenantId,
               propertyId: parsedParams.data.id,
               mediaId: parsedParams.data.mediaId,
-              objectKey: outcome.objectKey,
+              objectKeys: outcome.failedObjectKeys,
             },
-            "property media metadata deleted, but the object storage delete failed — object may be orphaned",
+            "property media metadata deleted, but some object storage deletes failed — objects may be orphaned",
           );
         }
 

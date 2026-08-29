@@ -36,6 +36,27 @@ const envSchema = z
     MEDIA_OUTBOX_DISPATCH_CONCURRENCY: z.coerce.number().int().positive().default(5),
     MEDIA_OUTBOX_DISPATCH_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
 
+    // Media processing worker (Prompt 032, ADR-008) — see
+    // src/workers/media-processing-worker.ts. CPU-intensive workload, never reusing the
+    // provisioning worker's own concurrency/retry configuration (this task, section 34).
+    // MAX_INPUT_PIXELS guards against decompression bombs (a small file that decodes to huge
+    // dimensions) — sharp's own `limitInputPixels` option, applied on every decode regardless
+    // of which specific call would otherwise trigger it. 40,000,000 px is roughly a 6500x6150
+    // image — generous for real estate photography (even a 45MP DSLR/phone photo is well under
+    // this) while still bounding worst-case decode memory to a knowable ceiling; not derived
+    // from a specific measurement, a round, conservative starting point (this task, section 14).
+    MEDIA_PROCESSING_MAX_INPUT_PIXELS: z.coerce.number().int().positive().default(40_000_000),
+    MEDIA_PROCESSING_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(2),
+    // Retry policy for the BullMQ job itself (ADR-008 "Failure handling") — configured once,
+    // where the dispatcher publishes the job (queue defaultJobOptions), never invented later by
+    // the worker after the job already exists (this task, section 36). Exponential backoff:
+    // attempt 2 waits ~5s, attempt 3 ~10s, attempt 4 ~20s, attempt 5 ~40s (BullMQ's own
+    // exponential formula, delay * 2^(attempt-1)) — long enough for a transient R2/PostgreSQL
+    // blip to clear without hammering either, short enough that a media stuck in PROCESSING
+    // resolves within roughly a minute of retries before falling back to FAILED.
+    MEDIA_PROCESSING_JOB_ATTEMPTS: z.coerce.number().int().positive().default(5),
+    MEDIA_PROCESSING_JOB_BACKOFF_MS: z.coerce.number().int().positive().default(5000),
+
     // Tenant database cluster selection (ADR-003) — the ACTIVE database_clusters.name the
     // initial DatabaseClusterSelector implementation targets. No default: which cluster
     // tenants get provisioned into must always be an explicit choice, never an accident.

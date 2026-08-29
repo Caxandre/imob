@@ -4,6 +4,7 @@ import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
 
 import { env } from "../../config/env.js";
+import { ObjectStorageObjectNotFoundError } from "./object-storage.js";
 import { createCloudflareR2ObjectStorage } from "./cloudflare-r2-object-storage.js";
 
 /**
@@ -25,7 +26,7 @@ const r2ConfigComplete =
 const shouldRun = process.env.RUN_R2_INTEGRATION_TESTS === "true" && r2ConfigComplete;
 
 describe.runIf(shouldRun)("createCloudflareR2ObjectStorage — real Cloudflare R2", () => {
-  it("putObject / public URL / HeadObject / deleteObject round-trip against a real bucket", async () => {
+  it("putObject / public URL / HeadObject / getObject / deleteObject round-trip against a real bucket", async () => {
     // Non-null assertions are safe here only because `shouldRun`/`r2ConfigComplete` above
     // already confirmed every field is defined before this suite is even allowed to run.
     const storage = createCloudflareR2ObjectStorage({
@@ -39,12 +40,13 @@ describe.runIf(shouldRun)("createCloudflareR2ObjectStorage — real Cloudflare R
     // Never `properties/...` yet (this task, section 29) — an ephemeral, isolated key that
     // can never collide with real application data.
     const key = `integration-tests/${randomUUID()}.txt`;
+    const body = "hello-r2";
     let uploaded = false;
 
     try {
       const result = await storage.putObject({
         key,
-        body: Buffer.from("hello-r2"),
+        body: Buffer.from(body),
         contentType: "text/plain",
       });
       uploaded = true;
@@ -63,6 +65,13 @@ describe.runIf(shouldRun)("createCloudflareR2ObjectStorage — real Cloudflare R
       await expect(
         headClient.send(new HeadObjectCommand({ Bucket: env.R2_BUCKET, Key: key })),
       ).resolves.toBeDefined();
+
+      // getObject (Prompt 032) — the exact read path the media processing worker uses to fetch
+      // an original before generating variants; a real round-trip against the real bucket.
+      const read = await storage.getObject(key);
+      expect(Buffer.isBuffer(read.body)).toBe(true);
+      expect(read.body.toString("utf8")).toBe(body);
+      expect(read.contentType).toBe("text/plain");
     } finally {
       // Always attempted, even if an assertion above threw — never leaves an object behind
       // in the real bucket (this task, section 31).
@@ -70,5 +79,19 @@ describe.runIf(shouldRun)("createCloudflareR2ObjectStorage — real Cloudflare R
         await storage.deleteObject(key);
       }
     }
+  });
+
+  it("getObject on a genuinely missing key rejects with ObjectStorageObjectNotFoundError", async () => {
+    const storage = createCloudflareR2ObjectStorage({
+      accountId: env.R2_ACCOUNT_ID,
+      accessKeyId: env.R2_ACCESS_KEY_ID,
+      secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+      bucket: env.R2_BUCKET,
+      publicUrl: env.R2_PUBLIC_URL,
+    });
+
+    const key = `integration-tests/never-existed-${randomUUID()}.txt`;
+
+    await expect(storage.getObject(key)).rejects.toBeInstanceOf(ObjectStorageObjectNotFoundError);
   });
 });

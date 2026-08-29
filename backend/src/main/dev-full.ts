@@ -10,42 +10,45 @@ import { createTenantDatabaseCredentialResolver } from "../modules/provisioning/
 import { createInMemorySecretStore } from "../modules/provisioning/test-support/in-memory-secret-store.js";
 import { createPgTenantDatabaseConnectionManager } from "../modules/tenant-runtime/infrastructure/pg-tenant-database-connection-manager.js";
 import { createMediaOutboxDispatcherRuntime } from "../workers/media-outbox-dispatcher-runtime.js";
+import { createMediaProcessingWorkerRuntime } from "../workers/media-processing-worker-runtime.js";
 import { createProvisioningWorkerRuntime } from "../workers/provisioning-worker-runtime.js";
 import { bootstrapLocalDevCluster } from "./dev-full-bootstrap.js";
 
 /**
- * DEV-ONLY combined runtime: the HTTP API, the provisioning worker, and (Prompt 031) the media
- * outbox dispatcher in a single process, sharing one `SecretStore` instance. Exists solely to
- * close a local-development gap (`server.ts`/`provisioning-worker.ts`/
- * `media-outbox-dispatcher.ts` run as genuinely separate processes and do NOT share
- * `SecretStore` state — see their own docstrings and ARCHITECTURE.md), so that a tenant
- * provisioned locally can actually have its properties routes exercised manually through
- * Swagger, and its media outbox actually dispatched to BullMQ, without a real production-grade
- * `SecretStore` provider (ADR-004: AWS Secrets Manager, status PLANNED) existing yet.
+ * DEV-ONLY combined runtime: the HTTP API, the provisioning worker, the media outbox dispatcher
+ * (Prompt 031), and (Prompt 032) the media processing worker in a single process, sharing one
+ * `SecretStore` instance. Exists solely to close a local-development gap (`server.ts`/
+ * `provisioning-worker.ts`/`media-outbox-dispatcher.ts`/`media-processing-worker.ts` run as
+ * genuinely separate processes and do NOT share `SecretStore` state — see their own docstrings
+ * and ARCHITECTURE.md), so that a tenant provisioned locally can actually have its properties
+ * routes exercised manually through Swagger, its media outbox actually dispatched to BullMQ, and
+ * its media actually processed into THUMBNAIL/CARD/DETAIL variants, without a real
+ * production-grade `SecretStore` provider (ADR-004: AWS Secrets Manager, status PLANNED)
+ * existing yet.
  *
  * THIS IS NOT THE PRODUCTION TOPOLOGY. `server.ts`, `provisioning-worker.ts`,
- * `provisioning-dispatcher.ts`, and `media-outbox-dispatcher.ts` remain the real, independent
- * entrypoints — this file changes nothing about them and is never started alongside them for
- * the same purpose (it duplicates what they do, in one process, for local convenience only).
- * `provisioning-dispatcher.ts` is deliberately NOT composed in here (unlike the provisioning
- * worker and the media outbox dispatcher): it never resolves a tenant credential — only Control
- * Plane + Redis — so it has no `SecretStore`-sharing gap to close and stays a genuinely separate
- * process even for local development (see the recommended flow below). Delete this file's role
- * once ADR-004 is implemented and a real dev secret-sharing story (or the production provider
- * itself) exists.
+ * `provisioning-dispatcher.ts`, `media-outbox-dispatcher.ts`, and `media-processing-worker.ts`
+ * remain the real, independent entrypoints — this file changes nothing about them and is never
+ * started alongside them for the same purpose (it duplicates what they do, in one process, for
+ * local convenience only). `provisioning-dispatcher.ts` is deliberately NOT composed in here
+ * (unlike the other three): it never resolves a tenant credential — only Control Plane + Redis —
+ * so it has no `SecretStore`-sharing gap to close and stays a genuinely separate process even
+ * for local development (see the recommended flow below). Delete this file's role once ADR-004
+ * is implemented and a real dev secret-sharing story (or the production provider itself) exists.
  *
  * Recommended local flow (README.md has the full walkthrough):
  *   docker compose up -d
  *   pnpm db:migrate
  *   pnpm dev:dispatcher   (separate terminal — still a separate process, this is fine)
- *   pnpm dev:full         (this file — API + provisioning worker + media outbox dispatcher,
- *                          shared SecretStore)
+ *   pnpm dev:full         (this file — API + provisioning worker + media outbox dispatcher +
+ *                          media processing worker, shared SecretStore)
  *   → POST /api/v1/tenants via Swagger, wait for the tenant to become READY
  *   → POST/GET /api/v1/properties via Swagger, using that tenant's id as X-Tenant-Id
  *   → POST /api/v1/properties/{id}/media uploads a photo; its outbox event is picked up by the
- *     media outbox dispatcher running in this same process within
- *     MEDIA_OUTBOX_DISPATCH_POLL_INTERVAL_MS and transported to the "media-processing" BullMQ
- *     queue — no worker consumes it yet (Prompt 031), so it stays queued; that is expected.
+ *     media outbox dispatcher within MEDIA_OUTBOX_DISPATCH_POLL_INTERVAL_MS, transported to the
+ *     "media-processing" BullMQ queue, and then consumed by the media processing worker running
+ *     in this same process — `GET .../media` should show `processing_status: "READY"` shortly
+ *     after (Prompt 032).
  *
  * On startup, this entrypoint also runs `bootstrapLocalDevCluster()` (Prompt 024): it ensures
  * the local `database_clusters` row (`TENANT_DATABASE_DEFAULT_CLUSTER`) exists and (re-)seeds
@@ -114,6 +117,8 @@ try {
   throw error;
 }
 
+const mediaProcessingWorkerRuntime = createMediaProcessingWorkerRuntime(secretStore, objectStorage, logger);
+
 const app = buildApp({ tenantDatabaseConnectionManager, objectStorage });
 
 try {
@@ -125,7 +130,7 @@ try {
 
 logger.info(
   { operation: "dev-full.startup" },
-  "dev-only combined runtime started (API + provisioning worker + media outbox dispatcher, shared SecretStore)",
+  "dev-only combined runtime started (API + provisioning worker + media outbox dispatcher + media processing worker, shared SecretStore)",
 );
 
 let shuttingDown = false;
@@ -138,7 +143,12 @@ async function shutdown(signal: string): Promise<void> {
 
   logger.info({ operation: "dev-full.shutdown", signal }, "shutdown requested");
   // app.close() runs buildApp()'s own onClose hook, which closes tenantDatabaseConnectionManager.
-  await Promise.all([app.close(), workerRuntime.shutdown(), mediaOutboxDispatcherRuntime.shutdown()]);
+  await Promise.all([
+    app.close(),
+    workerRuntime.shutdown(),
+    mediaOutboxDispatcherRuntime.shutdown(),
+    mediaProcessingWorkerRuntime.shutdown(),
+  ]);
   await controlPlanePool.end();
   logger.info({ operation: "dev-full.shutdown" }, "shutdown complete");
   process.exit(0);

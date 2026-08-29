@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 
-import { outboxEvents, properties, propertyMedia } from "../../../infrastructure/database/tenant/schema.js";
+import { outboxEvents, properties, propertyMedia, propertyMediaVariants } from "../../../infrastructure/database/tenant/schema.js";
 import type { TenantDatabase } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
 import {
   PROPERTY_MEDIA_AGGREGATE_TYPE,
@@ -228,6 +228,15 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
           throw new PropertyMediaNotFoundError(mediaId);
         }
 
+        // Read before the delete (Prompt 032, section 64) — `ON DELETE CASCADE` (Prompt 030)
+        // removes these rows the instant `propertyMedia` is deleted below, so their object keys
+        // must be captured now or they're gone. Zero rows is a normal outcome (media never
+        // processed, or still PROCESSING/FAILED), never assumed to be exactly three.
+        const variants = await tx
+          .select({ objectKey: propertyMediaVariants.objectKey })
+          .from(propertyMediaVariants)
+          .where(eq(propertyMediaVariants.propertyMediaId, mediaId));
+
         await tx.delete(propertyMedia).where(eq(propertyMedia.id, mediaId));
 
         // Old positions (pre-reindex) still correctly reflect relative order — deleting one row
@@ -272,7 +281,7 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
 
         // Real Cloudflare R2 deletion is the caller's job, strictly after this transaction
         // commits (ADR-007 "Delete") — this repository never touches ObjectStorage itself.
-        return { objectKey: media.objectKey };
+        return { objectKey: media.objectKey, variantObjectKeys: variants.map((v) => v.objectKey) };
       });
     },
   };

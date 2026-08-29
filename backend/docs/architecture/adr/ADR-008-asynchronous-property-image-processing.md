@@ -2,20 +2,29 @@
 
 ## Status
 
-Aceito. Implementação: **PLANNED / DESIGNED** (Prompt 029) — esta ADR define a arquitetura;
-nenhum código de processamento de imagem foi implementado naquela tarefa. `sharp` é o provider
-escolhido, mas **ainda não instalado**.
+Aceito. Implementação: **IMPLEMENTED** (Prompt 032) — processamento real de imagem com `sharp`,
+ponta a ponta. Histórico:
 
-**Prompt 030 — IMPLEMENTED (foundation only)**: a infraestrutura persistente que este documento
-descreve abaixo — `property_media.processing_status`, a tabela `property_media_variants`, o
-contrato da fila BullMQ (`media-processing`/`process-property-media`) e o registro transacional
-da intenção de processar via `outbox_events` — está implementada.
-
-**Prompt 031 — IMPLEMENTED**: o dispatcher que efetivamente publica um job real no BullMQ a
-partir de um evento de outbox pendente, descobrindo tenants elegíveis via Control Plane — ver
-[ADR-009](ADR-009-multi-tenant-outbox-dispatch.md) e "Deferred: outbox dispatcher across tenants"
-abaixo. Ainda **PLANNED**: qualquer processamento real de imagem — o worker que efetivamente
-consome a fila `media-processing` e roda `sharp`.
+- **Prompt 029 — PLANNED / DESIGNED**: esta ADR definiu a arquitetura; nenhum código de
+  processamento de imagem foi implementado naquela tarefa. `sharp` era o provider escolhido,
+  mas ainda não instalado.
+- **Prompt 030 — IMPLEMENTED (foundation only)**: a infraestrutura persistente —
+  `property_media.processing_status`, a tabela `property_media_variants`, o contrato da fila
+  BullMQ (`media-processing`/`process-property-media`) e o registro transacional da intenção de
+  processar via `outbox_events`.
+- **Prompt 031 — IMPLEMENTED**: o dispatcher que efetivamente publica um job real no BullMQ a
+  partir de um evento de outbox pendente, descobrindo tenants elegíveis via Control Plane — ver
+  [ADR-009](ADR-009-multi-tenant-outbox-dispatch.md).
+- **Prompt 032 — IMPLEMENTED**: `sharp` instalado e confinado a
+  `sharp-image-variant-processor.ts`; o worker real
+  (`bullmq-media-processing-worker.ts`/`media-processing-worker-runtime.ts`/
+  `media-processing-worker.ts`) consome a fila, baixa o original (`ObjectStorage.getObject()`,
+  novo neste Prompt), gera THUMBNAIL/CARD/DETAIL, envia ao R2, e finaliza `property_media`
+  (`READY`/`FAILED`) atomicamente com as variantes e `outbox_events.processed_at`. Todas as
+  seções abaixo ("Variants", "Queue and worker", "Idempotency", "Failure handling") descrevem a
+  implementação real, não mais apenas o plano — os valores concretos (limite de pixels,
+  qualidade WebP, tentativas/backoff) usados em produção estão registrados onde antes só havia
+  uma sugestão.
 
 ## Context
 
@@ -277,10 +286,12 @@ processamento — mesma regra permanente já aplicada a todo runtime de negócio
 
 **`ObjectStorage` no worker**: o worker consome a mesma porta `ObjectStorage` já usada pela API
 (nunca o SDK do R2/`@aws-sdk/client-s3` diretamente) — mesmo boundary porta/adapter do ADR-006.
-Para obter os bytes do original, o port provavelmente precisará evoluir com um método
-`getObject(key)` (hoje só existem `putObject`/`deleteObject`) — **não implementado nesta
-tarefa**; registrado aqui como necessidade futura conhecida, a ser adicionada quando a
-implementação real do worker começar.
+**Implementado pelo Prompt 032**: o port evoluiu com `getObject(key): Promise<GetObjectResult>`
+(`{body: Buffer, contentType?, contentLength?}`) — materializado inteiro em memória, nunca
+stream (aceitável dado o limite de 10MB do original, Prompt 027). Erros classificados de forma
+provider-agnostic no adapter: `ObjectStorageObjectNotFoundError` (o provider confirma que a key
+não existe — S3 `NoSuchKey`/404, nunca esse detalhe vazando do adapter) tratado como permanente;
+qualquer outra falha (`ObjectStorageReadError`) tratada como transitória.
 
 ### Idempotency
 
@@ -319,10 +330,16 @@ Se a persistência de metadata falhar depois do upload da variante ter sucesso, 
 preferida — análoga ao ADR-007 "Upload" — é permitir reprocessamento determinístico: como a key
 da variante é sempre a mesma, um retry subsequente do job simplesmente reenvia (sobrescrevendo)
 a mesma key e tenta persistir a metadata de novo, sem exigir uma exclusão compensatória
-explícita como no fluxo de upload do original. Uma compensação ativa (deletar a variante do R2
-se a metadata falhar) é uma alternativa válida e não descartada, mas a decisão desta ADR é que
-não é estritamente necessária dado que a key determinística por si só já resolve o caso comum —
-detalhe de implementação a confirmar no Prompt que efetivamente implementar o worker.
+explícita como no fluxo de upload do original.
+
+**Confirmado pelo Prompt 032**: a compensação ativa (deletar a variante do R2 se a metadata
+falhar) não foi implementada — a key determinística já resolve o caso comum, exatamente como
+esta ADR previu. O que o Prompt 032 implementou é mais forte que "persistência de metadata
+falhou": `PropertyMediaProcessingRepository.finalizeReady()` faz upload de todas as variantes e
+só então persiste a metadata de todas dentro de **uma única transação atômica** — se essa
+transação falhar por qualquer motivo, nenhuma linha de `property_media_variants` é criada
+(provado com um rollback forçado real, `drizzle-property-media-processing-repository.test.ts`);
+o retry seguinte re-sobe as mesmas keys e tenta a mesma transação de novo, convergindo.
 
 ### Failure handling
 
@@ -334,27 +351,47 @@ Distinguir explicitamente falhas transitórias de falhas permanentes:
 - PostgreSQL indisponível/timeout transitório ao resolver o Tenant Data Plane ou persistir
   metadata de variante.
 
-**Permanent** (não deve ser retentado indefinidamente — falha terminal, `property_media.status =
-FAILED`):
-- Original inválido/corrompido — `sharp` não consegue decodificar o arquivo.
-- Imagem animada detectada sem suporte planejado (ver "Animated images" acima).
+**Permanent** (não deve ser retentado indefinidamente — falha terminal, `property_media.
+processing_status = FAILED`):
+- Original inválido/corrompido — `sharp` não consegue decodificar o arquivo
+  (`UnsupportedPropertyMediaError`, ver `sharp-image-variant-processor.ts`).
+- Original ausente no R2 — `ObjectStorageObjectNotFoundError` (o adapter classifica a partir do
+  código de erro real do provider — `NoSuchKey`/404 — nunca vazando esse detalhe para o
+  chamador).
+- Dimensões/contagem de pixels acima do limite configurado (`MEDIA_PROCESSING_MAX_INPUT_PIXELS`,
+  default 40.000.000px) — o mesmo `UnsupportedPropertyMediaError`, guarda contra decompression
+  bomb.
+- Imagem animada/multi-página detectada (`sharp().metadata().pages > 1`, cobre WebP animado,
+  TIFF, HEIF, GIF, PDF) — ver "Animated images" acima.
+- O evento de outbox referenciado pelo job não corresponde ao que se espera (`aggregate_type`/
+  `event_type`/`aggregate_id` inconsistentes, ou a mídia pertence a outra propriedade que a do
+  payload) — defensivo, inalcançável pelo fluxo normal (só este código escreve esses eventos),
+  mas tratado como permanente e nunca processado se algum dia ocorrer.
 
 Magic bytes já são validados no upload (Prompt 027) — mas o worker, rodando em um processo/tempo
 diferente do upload, ainda precisa tratar uma falha de decode do `sharp` como um erro controlado
 e classificado, nunca deixar uma exceção não tratada derrubar o worker inteiro ou reprocessar
 infinitamente um arquivo genuinamente corrompido.
 
-**BullMQ retry**: ao contrário do padrão `attempts: 1` explícito já usado pela fila de
-provisionamento (ADR-002 — que delega toda recuperação a um mecanismo de execution
-lease/recovery próprio, fora do BullMQ), processamento de imagem é uma carga de trabalho
-diferente e não deve herdar esse padrão automaticamente. A arquitetura aqui planeja retries do
-BullMQ para erros classificados como transient, com **exponential backoff** — valores concretos
-(número de tentativas, backoff inicial/máximo) ficam para o Prompt de implementação, não
-inventados sem justificativa nesta ADR. Um erro classificado como permanent nunca deve ser
-retentado pelo BullMQ (o job handler deve resolver, não rejeitar, um erro permanente já
-registrado como `FAILED` — mesmo princípio já usado por `startPendingProvisioningJob`, que
-resolve normalmente uma falha de provisioning já persistida como `FAILED`, nunca a propaga como
-falha de callback do BullMQ).
+**BullMQ retry — confirmado pelo Prompt 032**: ao contrário do padrão `attempts: 1` explícito já
+usado pela fila de provisionamento (ADR-002 — que delega toda recuperação a um mecanismo de
+execution lease/recovery próprio, fora do BullMQ), processamento de imagem usa retry real do
+BullMQ para erros transitórios, configurado uma vez em `createMediaProcessingQueue()`'s
+`defaultJobOptions` (nunca inventado depois pelo worker): `MEDIA_PROCESSING_JOB_ATTEMPTS`
+(default **5**) e `MEDIA_PROCESSING_JOB_BACKOFF_MS` (default **5000**, `type: "exponential"` —
+tentativa 2 espera ~5s, tentativa 3 ~10s, tentativa 4 ~20s, tentativa 5 ~40s). Longo o suficiente
+para uma instabilidade transitória de R2/PostgreSQL se resolver sem martelar nenhum dos dois;
+curto o suficiente para uma mídia presa em `PROCESSING` se resolver (para `READY` ou `FAILED`)
+dentro de aproximadamente um minuto de tentativas. Um erro classificado como permanent nunca
+espera as tentativas configuradas — o worker o converte imediatamente em `UnrecoverableError`
+(BullMQ) assim que persiste `FAILED`/`processed_at`, terminando o job sem retry adicional. Na
+**última** tentativa configurada, se o erro ainda for transitório (nunca chegou a ser
+classificado como permanent), o worker faz uma última tentativa best-effort de persistir
+`FAILED`/`processed_at` antes de deixar o erro original propagar como a falha final do job — se
+essa tentativa de finalização também falhar, o erro original ainda propaga sem forjar sucesso
+(uma mídia pode ficar presa em `PROCESSING` nesse cenário raro; é um caso operacional
+excepcional, não um novo framework de recovery, e pode exigir requeue/investigação manual —
+fora do escopo desta tarefa resolver automaticamente).
 
 ### Security
 
@@ -489,17 +526,17 @@ protocolo do dispatcher de provisionamento, ADR-002), e transporte determinísti
 de `sharp` real que consome a fila `media-processing` — o dispatcher só transporta a intenção até
 lá, nunca processa a imagem em si.
 
-## Consequência para o Prompt 028 — delete
+## Consequência para o Prompt 028 — delete — RESOLVIDO (Prompt 032)
 
-Quando esta arquitetura for implementada, `deletePropertyMedia` (Prompt 028) precisará remover
-não só o objeto original, mas **todas as variantes existentes** do R2, best-effort — mesma
-ordem de consistência já decidida no ADR-007 "Delete" (metadata primeiro, objetos depois,
-best-effort, nunca bloqueando o 204). Isso é uma alteração futura da lógica de delete definida
-no Prompt 028, não implementada nesta tarefa — registrada aqui para que a implementação futura
-do worker de imagem não esqueça de atualizar `deletePropertyMedia` (e, com `ON DELETE CASCADE`
-em `property_media_variants`, a remoção da metadata das variantes já seria automática ao
-remover a linha de `property_media` — só a limpeza dos objetos R2 correspondentes precisaria de
-código novo).
+`deletePropertyMedia` (Prompt 028) agora remove não só o objeto original, mas **toda variante
+existente** do R2, best-effort — mesma ordem de consistência já decidida no ADR-007 "Delete"
+(metadata primeiro, objetos depois, best-effort, nunca bloqueando o 204). Como previsto aqui,
+`ON DELETE CASCADE` em `property_media_variants` já cuidava da remoção da metadata das
+variantes automaticamente ao remover a linha de `property_media` — o Prompt 032 acrescentou
+exatamente o que faltava: o `repository.delete()` (Prompt 028) agora lê os `object_key` das
+variantes *antes* do `DELETE` que dispara o cascade (senão as keys já teriam sumido), e a
+camada de aplicação tenta remover cada key — original e cada variante — independentemente, uma
+falhando nunca impedindo a tentativa das outras.
 
 ## Alternatives considered
 

@@ -72,7 +72,7 @@ beforeEach(async () => {
     sql`TRUNCATE TABLE ${provisioningJobs}, ${tenantDatabases}, ${tenants}, ${databaseClusters} CASCADE`,
   );
   connection = createRedisConnection();
-  queue = createMediaProcessingQueue(connection);
+  queue = createMediaProcessingQueue(connection, { attempts: 5, backoffDelayMs: 5000 });
 });
 
 afterEach(async () => {

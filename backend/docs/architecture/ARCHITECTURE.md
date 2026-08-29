@@ -848,9 +848,10 @@ vice-versa. Isso não é um bug: é a consequência honesta e esperada de não e
 outro mecanismo de compartilhamento local seguro. Nenhum fallback para a credencial
 administrativa do cluster existe ou é permitido para contornar isso.
 
-**IMPLEMENTED** (Prompt 021; Prompt 031 acrescentou o dispatcher de outbox de mídia) —
-`src/main/dev-full.ts` (`pnpm dev:full`), um runtime **somente de desenvolvimento** que sobe a
-API HTTP, o worker de provisionamento, e o dispatcher de outbox de mídia no mesmo processo,
+**IMPLEMENTED** (Prompt 021; Prompt 031 acrescentou o dispatcher de outbox de mídia; Prompt 032
+acrescentou o worker de processamento de imagens) — `src/main/dev-full.ts` (`pnpm dev:full`), um
+runtime **somente de desenvolvimento** que sobe a API HTTP, o worker de provisionamento, o
+dispatcher de outbox de mídia, e o worker de processamento de imagens no mesmo processo,
 compartilhando a mesma instância de `SecretStore`:
 
 ```text
@@ -861,7 +862,8 @@ uma única composição de dependências
 InMemorySecretStore compartilhado
     ├── HTTP API (build-app.ts → TenantDatabaseConnectionManager)
     ├── provisioning worker (createProvisioningWorkerRuntime)
-    └── media outbox dispatcher (createMediaOutboxDispatcherRuntime — Prompt 031)
+    ├── media outbox dispatcher (createMediaOutboxDispatcherRuntime — Prompt 031)
+    └── media processing worker (createMediaProcessingWorkerRuntime — Prompt 032)
 ```
 
 `createProvisioningWorkerRuntime()` (`src/workers/provisioning-worker-runtime.ts`) foi
@@ -874,22 +876,23 @@ construído a partir do **mesmo** `SecretStore` que o worker usou resolve e cone
 sucesso; construído a partir de um `SecretStore` **diferente**, falha com
 `TenantSecretNotFoundError` — nunca recorrendo à credencial administrativa.
 `createMediaOutboxDispatcherRuntime()` (`src/workers/media-outbox-dispatcher-runtime.ts`, Prompt
-031) segue exatamente o mesmo padrão de extração, pela mesma razão: este dispatcher também
-precisa resolver credencial de aplicação por tenant (para abrir cada Tenant Data Plane e
-reivindicar seu `outbox_events`), então herda o mesmo gap de `SecretStore` entre processos que o
-worker de provisionamento já tem — `provisioning-dispatcher.ts`, por não tocar credencial de
-tenant nenhuma (só Control Plane + Redis), permanece deliberadamente fora de `dev-full.ts`
-(seção "Media outbox dispatcher" acima detalha o porquê).
+031) e `createMediaProcessingWorkerRuntime()` (`src/workers/media-processing-worker-runtime.ts`,
+Prompt 032) seguem exatamente o mesmo padrão de extração, pela mesma razão: os dois precisam
+resolver credencial de aplicação por tenant (para abrir cada Tenant Data Plane), então herdam o
+mesmo gap de `SecretStore` entre processos que o worker de provisionamento já tem —
+`provisioning-dispatcher.ts`, por não tocar credencial de tenant nenhuma (só Control Plane +
+Redis), permanece deliberadamente fora de `dev-full.ts` (seção "Media outbox dispatcher" acima
+detalha o porquê).
 
 `dev-full.ts` recusa-se a iniciar sob `NODE_ENV=production` com seu próprio fail-fast
 explícito (não depende só do guard interno do `InMemorySecretStore`) — este runtime **não
-representa a topologia de produção** e nunca deve ser usado como se representasse. Os quatro
+representa a topologia de produção** e nunca deve ser usado como se representasse. Os cinco
 entrypoints independentes (`server.ts`, `provisioning-worker.ts`, `provisioning-dispatcher.ts`,
-`media-outbox-dispatcher.ts`) continuam existindo, inalterados em intenção — eles continuam
-não compartilhando `SecretStore` entre si quando executados separadamente, e essa é uma
-limitação documentada, não corrigida por este runtime combinado (que é uma conveniência local
-temporária, não uma correção da arquitetura real). `dev-full.ts` deixa de ser necessário
-quando o Prompt de ADR-004 (AWS Secrets Manager) for implementado.
+`media-outbox-dispatcher.ts`, `media-processing-worker.ts`) continuam existindo, inalterados em
+intenção — eles continuam não compartilhando `SecretStore` entre si quando executados
+separadamente, e essa é uma limitação documentada, não corrigida por este runtime combinado (que
+é uma conveniência local temporária, não uma correção da arquitetura real). `dev-full.ts` deixa
+de ser necessário quando o Prompt de ADR-004 (AWS Secrets Manager) for implementado.
 
 Fluxo local recomendado para testar `POST/GET /api/v1/properties` manualmente via Swagger
 (ver também README.md):
@@ -944,12 +947,16 @@ implementado.
 **Object storage provider: Cloudflare R2** (ver
 [ADR-006](adr/ADR-006-cloudflare-r2-object-storage.md)).
 
-**IMPLEMENTED** (Prompt 026) — `ObjectStorage` port
-(`src/infrastructure/object-storage/object-storage.ts`): `putObject`/`deleteObject`, tipos
-independentes de provider (`PutObjectInput`/`StoredObject`), e `validateObjectKey` (rejeita key
-vazia, começando com `/`, ou com um segmento `..`) — compartilhado por qualquer adapter futuro,
-não só o do R2. Domínio/aplicação dependem só desta porta; `@aws-sdk/client-s3` nunca vaza para
-fora do adapter.
+**IMPLEMENTED** (Prompt 026; `getObject` acrescentado no Prompt 032) — `ObjectStorage` port
+(`src/infrastructure/object-storage/object-storage.ts`): `putObject`/`getObject`/`deleteObject`,
+tipos independentes de provider (`PutObjectInput`/`StoredObject`/`GetObjectResult`), e
+`validateObjectKey` (rejeita key vazia, começando com `/`, ou com um segmento `..`) —
+compartilhado por qualquer adapter futuro, não só o do R2. `getObject` materializa o corpo
+inteiro em `Buffer` (nunca stream — o original já é limitado a 10MB no upload, Prompt 027) e
+classifica falhas de forma provider-agnostic: `ObjectStorageObjectNotFoundError` (permanente) vs
+`ObjectStorageReadError` (transitório) — o adapter R2 é quem sabe traduzir o erro real do SDK
+(`NoSuchKey`/404) para essa distinção, nunca o chamador. Domínio/aplicação dependem só desta
+porta; `@aws-sdk/client-s3` nunca vaza para fora do adapter.
 
 **IMPLEMENTED** (Prompt 026) — adapter real
 (`createCloudflareR2ObjectStorage`, `src/infrastructure/object-storage/cloudflare-r2-object-storage.ts`),
@@ -1082,20 +1089,23 @@ problema em ADR-007 "Delete" e no CLAUDE.md, mas não implementa a reconciliaç�
 
 **PLANNED / DESIGNED** (Prompt 029) — arquitetura de processamento assíncrono de imagens,
 decidida em [ADR-008](adr/ADR-008-asynchronous-property-image-processing.md). Nenhum
-processamento de imagem real existe ainda — `sharp` continua **não instalado**.
+processamento de imagem real foi decidida ali; a implementação real veio no Prompt 032 (ver
+abaixo) — `sharp` está instalado e em uso desde então.
 
-**IMPLEMENTED** (Prompt 030) — a infraestrutura persistente que a arquitetura acima depende de,
-sem nenhum resize real:
+**IMPLEMENTED** — a arquitetura completa de processamento assíncrono de mídia, ponta a ponta:
 
 ```text
 Property media processing status  = IMPLEMENTED  (property_media.processing_status)
-Property media variants schema    = IMPLEMENTED  (property_media_variants, sem writer ainda)
+Property media variants schema    = IMPLEMENTED  (property_media_variants)
 Media processing outbox intent    = IMPLEMENTED  (outbox_events, dentro da transação do upload)
-BullMQ media-processing contract  = IMPLEMENTED  (queue/job/payload, sem consumer)
+BullMQ media-processing contract  = IMPLEMENTED  (queue/job/payload + retry/backoff, Prompt 032)
 Media outbox dispatcher           = IMPLEMENTED  (Prompt 031 — ver ADR-009)
 Cross-tenant discovery            = IMPLEMENTED  (Prompt 031 — TenantDiscovery, ver ADR-009)
-Media processing worker           = PLANNED
-Sharp worker                      = PLANNED
+Sharp image processing            = IMPLEMENTED  (Prompt 032 — ver abaixo)
+Media processing worker           = IMPLEMENTED  (Prompt 032 — ver abaixo)
+THUMBNAIL/CARD/DETAIL generation  = IMPLEMENTED  (Prompt 032)
+Media variant HTTP exposure       = PLANNED
+Orphan reconciliation             = PLANNED
 ```
 
 ```text
@@ -1120,9 +1130,9 @@ aplicação (`upload-property-media.ts`/`drizzle-property-media-repository.ts`);
 coluna (`READY`) existe apenas para o backfill de linhas anteriores a esta migration — mídias já
 válidas sob o modelo anterior, que nunca devem parecer quebradas por não terem variantes ainda
 (provado empiricamente: `tenant-data-plane.test.ts` aplica as migrations 0000-0004, insere uma
-linha crua, depois aplica a 0005 e confirma `processing_status = 'READY'`). `FAILED` é um valor
-alcançável do enum desde já, mas nada nesta tarefa transiciona uma linha para ele — isso é do
-worker futuro.
+linha crua, depois aplica a 0005 e confirma `processing_status = 'READY'`). `FAILED` já era um
+valor alcançável do enum desde o Prompt 030, mas só o worker de processamento real (Prompt 032,
+ver abaixo) efetivamente transiciona uma linha para ele.
 
 `property_media_variants` (mesma migration) — colunas `id`/`property_media_id` (FK
 `ON DELETE CASCADE`, diferente do `RESTRICT` de `property_media.property_id` — uma variant não
@@ -1130,25 +1140,29 @@ tem valor independente, é inteiramente reproduzível a partir do original)/`var
 `THUMBNAIL`/`CARD`/`DETAIL`)/`object_key` (`UNIQUE`)/`public_url`/`mime_type` (texto livre,
 deliberadamente não restrito a `image/webp` — seção 14 do Prompt 030)/`width`/`height`
 (`CHECK > 0` ambos)/`size_bytes` (`CHECK > 0`)/timestamps, `UNIQUE(property_media_id, variant)` —
-o mecanismo de idempotência que o futuro worker vai depender (upsert sobre essa constraint, nunca
-um insert simples). Sem `tenant_id` (ADR-001). **Nenhum repository/CRUD existe para esta tabela**
-(deliberado — Prompt 030, seção 57: sem consumidor real ainda, uma abstração aqui seria código
-morto); os testes de constraint (`drizzle-property-media-repository.test.ts`) inserem
-diretamente através do objeto de tabela do Drizzle.
+o mecanismo de idempotência que o worker de processamento depende (upsert sobre essa constraint
+— `PropertyMediaProcessingRepository.finalizeReady()`, Prompt 032, ver abaixo — nunca um insert
+simples). Sem `tenant_id` (ADR-001). Nenhum repository dedicado existia para esta tabela no
+Prompt 030 (deliberado — seção 57 daquela tarefa: sem consumidor real ainda); os testes de
+constraint originais daquele momento (`drizzle-property-media-repository.test.ts`) seguem
+inserindo diretamente através do objeto de tabela do Drizzle, mas o Prompt 032 acrescentou o
+repository real que o worker usa (`property-media-processing-repository.ts`).
 
 **Media processing outbox intent**: em vez de uma tabela de jobs nova, o upload reaproveita
 `outbox_events` — já existente em todo Tenant Data Plane desde a primeira migration — como a
 intenção persistente e transacional de processar uma mídia (Prompt 030, seções 40/49). Isso
 evita exatamente o problema de dual-write PostgreSQL+Redis que o provisionamento já resolveu de
 outra forma (dispatcher + lease, ADR-002): o upload HTTP nunca chama `queue.add()` diretamente
-— só grava a intenção no mesmo banco/transação da mídia. `outbox_events.processed_at` não é
-marcado por nada nesta tarefa (fica para o futuro dispatcher).
+— só grava a intenção no mesmo banco/transação da mídia. `outbox_events.processed_at` não era
+marcado por nada no Prompt 030 — desde o Prompt 032, o worker de processamento (ver abaixo) o
+marca ao final de um `finalizeReady`/`finalizeFailed` bem-sucedido.
 
 **BullMQ media-processing contract** (`src/infrastructure/queue/media-processing-queue.ts`) —
 fila `media-processing`, job `process-property-media`, payload mínimo validado por Zod
 (`tenantId`/`propertyId`/`mediaId`, todos UUID, `.strict()` — nunca credenciais, URL pública ou
-bytes). `createMediaProcessingQueue()` é só uma factory de `Queue` — **nenhum consumer/`Worker`
-é criado nesta tarefa**.
+bytes). `createMediaProcessingQueue()` ganhou (Prompt 032) `defaultJobOptions` configuráveis
+(`attempts`/`backoff` exponencial) — nenhum consumer existia no Prompt 030; o Prompt 032
+implementou o worker real (ver abaixo).
 
 - Original sempre preservado no R2, indefinidamente — reprocessamento futuro (nova qualidade,
   novo preset, correção de algoritmo) não exige novo upload do usuário.
@@ -1211,9 +1225,112 @@ dispatcher de provisionamento, que só toca Control Plane + Redis), ele herda o 
 `SecretStore` entre processos já documentado para `provisioning-worker.ts` vs `server.ts` (ver
 "Local development runtime" abaixo) — `pnpm dev:full` agora também compõe este runtime,
 compartilhando a mesma `SecretStore` em memória que o worker de provisionamento já usa, fechando
-o gap localmente. Nenhum worker consome a fila `media-processing` ainda — um job publicado por
-este dispatcher fica em espera no Redis até o Prompt que implementar o worker de `sharp` (ADR-008)
-existir; isso é esperado.
+o gap localmente.
+
+**IMPLEMENTED** (Prompt 032) — worker real de processamento de imagens com `sharp`, consumindo a
+fila `media-processing` publicada pelo dispatcher acima. Arquitetura completa registrada em
+[ADR-008](adr/ADR-008-asynchronous-property-image-processing.md) (atualizada de
+PLANNED/DESIGNED para implementação real por esta tarefa):
+
+```text
+BullMQ (job process-property-media, jobId = outbox_events.id)
+    ↓
+Media Processing Worker (src/modules/media-processing/infrastructure/bullmq-media-processing-worker.ts)
+    ↓
+job.id validado como UUID (= outboxEventId) + job.data revalidado pelo mesmo schema Zod do
+    dispatcher — nunca confia apenas na validação já feita lá
+    ↓
+TenantDatabaseResolver.resolve(tenantId) → TenantDatabaseConnectionManager.withTenantDatabase
+    ↓
+PropertyMediaProcessingRepository.loadContext({outboxEventId, propertyId, mediaId})
+    ready              → segue abaixo
+    already-processed  → no-op (replay idempotente de um job já concluído)
+    media-missing       → markObsoleteProcessed(outboxEventId) — mídia deletada após o enqueue,
+                          nunca um erro
+    invalid-event       → finalizeFailed(...) — outbox/mídia inconsistentes entre si (defensivo,
+                          inalcançável pelo fluxo normal), erro permanente
+    ↓ (ready)
+ObjectStorage.getObject(objectKey) — baixa o original
+    ObjectStorageObjectNotFoundError → finalizeFailed (permanente)
+    qualquer outro erro                → propaga (transitório, BullMQ decide o retry)
+    ↓
+ImageVariantProcessor.process(buffer) — sharp (ver abaixo)
+    UnsupportedPropertyMediaError → finalizeFailed (permanente)
+    qualquer outro erro            → propaga (transitório)
+    ↓
+para cada variante (sequencial, nunca paralelo — evita 3 encode+upload simultâneos):
+    ObjectStorage.putObject(key determinística, ver seção "Storage layout" do ADR-008)
+    ↓
+PropertyMediaProcessingRepository.finalizeReady({outboxEventId, mediaId, variants})
+    — UMA transação: upsert das 3 variantes (UNIQUE(property_media_id, variant),
+      onConflictDoUpdate) + property_media.processing_status = READY +
+      outbox_events.processed_at = now() — READY nunca observável sem as variantes que o
+      justificam, provado com rollback forçado real (drizzle-property-media-processing-repository.test.ts)
+    media-missing → limpa (best-effort) as variantes recém-enviadas ao R2, nunca recria a mídia
+```
+
+**Sharp image processing** (`src/modules/media-processing/infrastructure/sharp-image-variant-processor.ts`)
+— `sharp` (dependência direta única desta tarefa) confinado inteiramente a este arquivo; o port
+(`image-variant-processor.ts`) e todo consumidor nunca o importam diretamente. Presets
+centralizados: `THUMBNAIL` 320px, `CARD` 640px, `DETAIL` 1280px (largura máxima), sempre WebP
+qualidade 82, `withoutEnlargement: true` (nunca amplia um original menor), aspect ratio sempre
+preservado (resize só por largura, sem `fit`/crop). `.rotate()` sem argumento aplica a
+orientação EXIF nos pixels antes de descartar toda a metadata (nunca `.withMetadata()` — GPS/
+câmera/dados pessoais nunca sobrevivem numa variante pública). `limitInputPixels` (env
+`MEDIA_PROCESSING_MAX_INPUT_PIXELS`, default 40.000.000px) aplicado em toda chamada `sharp()` —
+guarda contra decompression bombs, nunca dependente só do limite de 10MB em bytes do upload.
+`metadata().pages > 1` rejeita imagem animada/multi-página explicitamente (nunca processa
+silenciosamente só o primeiro frame). Qualquer falha de decode/transform/limite vira
+`UnsupportedPropertyMediaError` (nunca um tipo de erro do `sharp` vazando para fora do adapter)
+— testado com Node 22/Windows local e confirmado em CI (Linux) via `pnpm test` normal, incluindo
+um teste real de pixel-limit e um teste real de auto-orientação (fixtures geradas em memória
+via `sharp({create: ...})`, nunca um binário externo).
+
+**Object storage `getObject`** (`src/infrastructure/object-storage/object-storage.ts`,
+`cloudflare-r2-object-storage.ts`) — porta evoluída com `getObject(key): Promise<GetObjectResult>`
+(`{body: Buffer, contentType?, contentLength?}`, materializado inteiro em memória — nunca stream,
+seção 18 do Prompt 032, aceitável dado o limite de 10MB do original). Erros classificados no
+adapter, nunca vazando forma de SDK: `ObjectStorageObjectNotFoundError` (S3 `NoSuchKey`/404 —
+provider-agnostic, permanente) vs `ObjectStorageReadError` (qualquer outra falha — transitório).
+`InMemoryObjectStorage` (test-support) evoluiu junto, mesma semântica.
+
+**Retry/backoff configurável** (`src/config/env.ts`) —
+`MEDIA_PROCESSING_JOB_ATTEMPTS` (default 5) e `MEDIA_PROCESSING_JOB_BACKOFF_MS` (default 5000,
+exponencial) configurados uma vez em `createMediaProcessingQueue()`'s `defaultJobOptions` (nunca
+inventados depois pelo worker) — diferente do `attempts: 1` explícito da fila de provisionamento
+(ADR-002, que delega toda recuperação ao seu próprio execution lease). Na última tentativa
+configurada, se o erro ainda for transitório, o worker tenta persistir `FAILED` +
+`outbox_events.processed_at` ele mesmo antes de deixar o job falhar definitivamente — nunca uma
+mídia presa em `PROCESSING` para sempre só porque R2/PostgreSQL ficaram indisponíveis por tempo
+demais. Uma falha permanente (classificada) vira `UnrecoverableError` do BullMQ imediatamente,
+sem esperar as tentativas configuradas se esgotarem.
+
+`MEDIA_PROCESSING_WORKER_CONCURRENCY` (default 2) — nunca reaproveita a concorrência do worker
+de provisionamento (workload de CPU, não de I/O).
+
+**Delete atualizado** (Prompt 032, seção 64-67) — `DELETE .../media/:mediaId` agora também
+remove, best-effort, toda variante já gerada, não só o original: o repository lê os
+`object_key` das variantes (`property_media_variants`) *antes* do `DELETE` que dispara o
+`ON DELETE CASCADE`, e a camada de aplicação tenta remover cada key (original + variantes)
+independentemente — uma falhando nunca impede a tentativa das outras (ADR-007 "Delete").
+
+Novo módulo `src/modules/media-processing/` ganhou `domain/property-media-processing-error.ts`
+(`UnsupportedPropertyMediaError`) e os arquivos de `application`/`infrastructure` acima.
+`src/modules/properties/domain/property-media-variant.ts` (novo) define `PropertyMediaVariantName`
+e a key determinística (`buildPropertyMediaVariantObjectKey`) reutilizada pelo worker.
+
+Entrypoint standalone `src/workers/media-processing-worker.ts`
+(`pnpm dev:media-worker`/`start:media-worker`) — mesma limitação de `SecretStore` entre
+processos que o dispatcher de outbox de mídia (precisa resolver credencial de tenant), mesmo
+fail-fast em produção, e exige Cloudflare R2 totalmente configurado no startup (nunca lazy no
+primeiro job) — `pnpm dev:full` agora também compõe este runtime, compartilhando a mesma
+`SecretStore`.
+
+**Fora do escopo do Prompt 032** (deliberado): exposição HTTP das variantes (`processing_status`
+já era exposto desde o Prompt 030; URLs de `THUMBNAIL`/`CARD`/`DETAIL` continuam PLANNED),
+reconciliação de objetos órfãos no R2 (originais e variantes — continua PLANNED, keys
+determinísticas reduzem o impacto mas não eliminam o problema), `processing_version`/
+reprocessamento sob demanda.
 
 ## Princípios
 

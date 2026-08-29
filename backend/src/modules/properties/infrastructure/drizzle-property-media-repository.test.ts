@@ -467,11 +467,48 @@ describe("createDrizzlePropertyMediaRepository", () => {
       const result = await mediaRepository.delete(property.id, b.id);
 
       expect(result.objectKey).toBe(b.objectKey);
+      expect(result.variantObjectKeys).toEqual([]);
       const list = await mediaRepository.listByProperty(property.id);
       expect(list.map((media) => ({ id: media.id, position: media.position }))).toEqual([
         { id: a.id, position: 0 },
         { id: c.id, position: 1 },
       ]);
+    });
+
+    it("returns every variant's object_key (read before the cascade removes the rows) and the variants are actually gone afterward", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+      const variantInputs = [
+        { variant: "THUMBNAIL" as const, objectKey: `tenants/t/properties/p/${media.id}/thumbnail.webp` },
+        { variant: "CARD" as const, objectKey: `tenants/t/properties/p/${media.id}/card.webp` },
+        { variant: "DETAIL" as const, objectKey: `tenants/t/properties/p/${media.id}/detail.webp` },
+      ];
+      for (const input of variantInputs) {
+        await db.insert(tenantSchema.propertyMediaVariants).values({
+          propertyMediaId: media.id,
+          variant: input.variant,
+          objectKey: input.objectKey,
+          publicUrl: `https://public-base.example/${input.objectKey}`,
+          mimeType: "image/webp",
+          width: 320,
+          height: 240,
+          sizeBytes: 4096,
+        });
+      }
+
+      const result = await mediaRepository.delete(property.id, media.id);
+
+      expect(result.objectKey).toBe(media.objectKey);
+      expect(result.variantObjectKeys.sort()).toEqual(variantInputs.map((v) => v.objectKey).sort());
+
+      const remainingVariants = await db
+        .select()
+        .from(tenantSchema.propertyMediaVariants)
+        .where(eq(tenantSchema.propertyMediaVariants.propertyMediaId, media.id));
+      expect(remainingVariants).toHaveLength(0);
     });
 
     it("promotes the media now at position 0 to cover when the deleted media was the cover", async () => {

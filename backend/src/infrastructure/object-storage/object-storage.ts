@@ -1,11 +1,11 @@
 /**
  * Provider-agnostic port for persisting binary objects (Prompt 026, ADR-006) — property media
- * (Prompt 027) will be the first real consumer, but nothing here mentions properties, tenants,
- * or any other domain concept. Domain/application code depends only on this interface, never on
+ * (Prompt 027) was the first real consumer of `putObject`/`deleteObject`; the media processing
+ * worker (Prompt 032) is the first consumer of `getObject` (it needs to read back the original
+ * to generate variants). Domain/application code depends only on this interface, never on
  * `@aws-sdk/client-s3` or any other provider SDK — that stays confined to the adapter
- * (`cloudflare-r2-object-storage.ts`). Deliberately minimal: only what this task needs
- * (`putObject`/`deleteObject`) — no `listObjects`/`copyObject`/presigned URLs/multipart until a
- * real consumer needs them.
+ * (`cloudflare-r2-object-storage.ts`). Deliberately minimal: no `listObjects`/`copyObject`/
+ * presigned URLs/multipart until a real consumer needs them.
  */
 export interface PutObjectInput {
   key: string;
@@ -19,8 +19,28 @@ export interface StoredObject {
   publicUrl: string;
 }
 
+/**
+ * Materialized as a `Buffer` — never a stream (Prompt 032, section 18): the upload path this
+ * object is always read back from already caps the original at `MAX_MEDIA_FILE_SIZE_BYTES`
+ * (10MB, Prompt 027), so buffering the whole object in memory is an acceptable simplification
+ * for this first version. Streaming is a future refinement, not implemented here.
+ */
+export interface GetObjectResult {
+  body: Buffer;
+  contentType?: string;
+  contentLength?: number;
+}
+
 export interface ObjectStorage {
   putObject(input: PutObjectInput): Promise<StoredObject>;
+  /**
+   * Reads an object back in full (Prompt 032). Rejects with {@link ObjectStorageObjectNotFoundError}
+   * when the key genuinely does not exist in the provider — a provider-agnostic classification
+   * (never an SDK-specific error code/type leaking past the adapter, section 61) that callers
+   * may treat as a permanent condition; any other failure rejects with
+   * {@link ObjectStorageReadError} and should be treated as transient.
+   */
+  getObject(key: string): Promise<GetObjectResult>;
   /** Idempotent — deleting a key that doesn't exist must never throw (this task, section 21). */
   deleteObject(key: string): Promise<void>;
 }
@@ -87,5 +107,37 @@ export class ObjectStorageDeleteError extends Error {
   constructor(bucket: string, key: string, cause?: unknown) {
     super(`Failed to delete object "${key}" from bucket "${bucket}"`, cause === undefined ? undefined : { cause });
     this.name = "ObjectStorageDeleteError";
+  }
+}
+
+/**
+ * Raised when the underlying provider rejects a `getObject` call for a reason other than the key
+ * genuinely not existing (see {@link ObjectStorageObjectNotFoundError} for that case) — same
+ * safety guarantees as `ObjectStorageUploadError`/`ObjectStorageDeleteError` (never credentials,
+ * raw SDK request, or `Authorization` headers; original cause preserved only in `.cause`).
+ * Callers should treat this as transient (Prompt 032, section 61) — e.g. R2 unreachable, a
+ * network error — never a reason to give up permanently on their own.
+ */
+export class ObjectStorageReadError extends Error {
+  constructor(bucket: string, key: string, cause?: unknown) {
+    super(`Failed to read object "${key}" from bucket "${bucket}"`, cause === undefined ? undefined : { cause });
+    this.name = "ObjectStorageReadError";
+  }
+}
+
+/**
+ * Raised by `getObject` when the provider confirms the key does not exist — a provider-agnostic
+ * classification an adapter derives from whatever SDK-specific signal it has (e.g. S3's
+ * `NoSuchKey`/404), never leaked past the adapter boundary (Prompt 032, section 61: "não acoplar
+ * application layer a códigos do SDK AWS"). Callers may treat this as a permanent condition —
+ * retrying a genuinely missing object can never succeed.
+ */
+export class ObjectStorageObjectNotFoundError extends Error {
+  readonly key: string;
+
+  constructor(key: string) {
+    super(`Object "${key}" was not found`);
+    this.name = "ObjectStorageObjectNotFoundError";
+    this.key = key;
   }
 }

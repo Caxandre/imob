@@ -1,7 +1,14 @@
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it, vi } from "vitest";
 
-import { InvalidObjectKeyError, ObjectStorageConfigurationError, ObjectStorageDeleteError, ObjectStorageUploadError } from "./object-storage.js";
+import {
+  InvalidObjectKeyError,
+  ObjectStorageConfigurationError,
+  ObjectStorageDeleteError,
+  ObjectStorageObjectNotFoundError,
+  ObjectStorageReadError,
+  ObjectStorageUploadError,
+} from "./object-storage.js";
 import type { CloudflareR2RawConfig, S3CommandSender } from "./cloudflare-r2-object-storage.js";
 import { buildCloudflareR2Endpoint, buildPublicObjectUrl, createCloudflareR2ObjectStorage } from "./cloudflare-r2-object-storage.js";
 
@@ -33,13 +40,28 @@ function validRawConfig(overrides: Partial<CloudflareR2RawConfig> = {}): Cloudfl
   };
 }
 
-function fakeCommandSender(behavior: "succeed" | "throw" = "succeed") {
-  const receivedCommands: (PutObjectCommand | DeleteObjectCommand)[] = [];
+function fakeCommandSender(behavior: "succeed" | "throw" | "not-found" | "no-body" = "succeed") {
+  const receivedCommands: (PutObjectCommand | DeleteObjectCommand | GetObjectCommand)[] = [];
   const sender: S3CommandSender = {
     async send(command) {
       receivedCommands.push(command);
       if (behavior === "throw") {
         throw new Error("simulated provider failure");
+      }
+      if (behavior === "not-found") {
+        const error = new Error("The specified key does not exist.");
+        error.name = "NoSuchKey";
+        throw error;
+      }
+      if (command instanceof GetObjectCommand) {
+        if (behavior === "no-body") {
+          return {};
+        }
+        return {
+          Body: { transformToByteArray: async () => new Uint8Array([0xff, 0xd8, 0xff]) },
+          ContentType: "image/jpeg",
+          ContentLength: 3,
+        };
       }
       return {};
     },
@@ -169,6 +191,67 @@ describe("createCloudflareR2ObjectStorage — putObject", () => {
     await expect(
       storage.putObject({ key: "a.txt", body: Buffer.from("x"), contentType: "text/plain" }),
     ).rejects.toBeInstanceOf(ObjectStorageUploadError);
+  });
+});
+
+describe("createCloudflareR2ObjectStorage — getObject", () => {
+  it("sends a GetObjectCommand with bucket/key and returns a Buffer with contentType/contentLength", async () => {
+    const { sender, receivedCommands } = fakeCommandSender();
+    const storage = createCloudflareR2ObjectStorage(validRawConfig(), { client: sender });
+
+    const result = await storage.getObject("tenants/t/properties/p/m.jpg");
+
+    expect(receivedCommands).toHaveLength(1);
+    const command = receivedCommands[0];
+    expect(command).toBeInstanceOf(GetObjectCommand);
+    expect(command?.input).toMatchObject({ Bucket: "test-bucket", Key: "tenants/t/properties/p/m.jpg" });
+    expect(Buffer.isBuffer(result.body)).toBe(true);
+    expect(result.body).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+    expect(result.contentType).toBe("image/jpeg");
+    expect(result.contentLength).toBe(3);
+  });
+
+  it("rejects an invalid key without calling the provider", async () => {
+    const { sender, receivedCommands } = fakeCommandSender();
+    const storage = createCloudflareR2ObjectStorage(validRawConfig(), { client: sender });
+
+    await expect(storage.getObject("/leading-slash.jpg")).rejects.toBeInstanceOf(InvalidObjectKeyError);
+    expect(receivedCommands).toHaveLength(0);
+  });
+
+  it("maps a NoSuchKey provider error to ObjectStorageObjectNotFoundError", async () => {
+    const { sender } = fakeCommandSender("not-found");
+    const storage = createCloudflareR2ObjectStorage(validRawConfig(), { client: sender });
+
+    await expect(storage.getObject("missing.jpg")).rejects.toBeInstanceOf(ObjectStorageObjectNotFoundError);
+  });
+
+  it("maps any other provider failure to ObjectStorageReadError (transient)", async () => {
+    const { sender } = fakeCommandSender("throw");
+    const storage = createCloudflareR2ObjectStorage(validRawConfig(), { client: sender });
+
+    await expect(storage.getObject("a.jpg")).rejects.toBeInstanceOf(ObjectStorageReadError);
+  });
+
+  it("maps a response with no Body to ObjectStorageReadError instead of crashing", async () => {
+    const { sender } = fakeCommandSender("no-body");
+    const storage = createCloudflareR2ObjectStorage(validRawConfig(), { client: sender });
+
+    await expect(storage.getObject("a.jpg")).rejects.toBeInstanceOf(ObjectStorageReadError);
+  });
+
+  it("never includes credentials or raw SDK error details in a mapped error's message", async () => {
+    const { sender } = fakeCommandSender("throw");
+    const storage = createCloudflareR2ObjectStorage(validRawConfig({ secretAccessKey: "distinctive-secret-marker" }), {
+      client: sender,
+    });
+
+    try {
+      await storage.getObject("a.jpg");
+      expect.fail("expected ObjectStorageReadError");
+    } catch (error) {
+      expect((error as Error).message).not.toContain("distinctive-secret-marker");
+    }
   });
 });
 

@@ -49,7 +49,10 @@ export function createMediaOutboxDispatcherRuntime(
   });
 
   const redisConnection = createRedisConnection();
-  const queue: MediaProcessingQueue = createMediaProcessingQueue(redisConnection);
+  const queue: MediaProcessingQueue = createMediaProcessingQueue(redisConnection, {
+    attempts: env.MEDIA_PROCESSING_JOB_ATTEMPTS,
+    backoffDelayMs: env.MEDIA_PROCESSING_JOB_BACKOFF_MS,
+  });
   const publisher = createBullMqMediaOutboxJobPublisher(queue);
 
   const deps: MediaOutboxDispatchCycleDeps = {

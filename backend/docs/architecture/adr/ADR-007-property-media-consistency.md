@@ -76,10 +76,20 @@ oposta** ao upload, deliberadamente.
 ```text
 lock property (SELECT ... FOR UPDATE)
     ↓
-DELETE property_media + reindex posições + promoção de capa   ← metadados removem primeiro,
+DELETE property_media (ON DELETE CASCADE remove property_media_variants — Prompt 030/032)
+    + reindex posições + promoção de capa                     ← metadados removem primeiro,
     ↓ (commit da transação)                                      tudo em uma transação
-ObjectStorage.deleteObject()   (best-effort, nunca refeito)    ← objeto real remove depois
+ObjectStorage.deleteObject() para o original E cada variante   ← objetos reais removem depois,
+    (best-effort, independente, nunca refeito — Prompt 032)       um a um, best-effort
 ```
+
+**Atualizado pelo Prompt 032**: a exclusão remove best-effort não só o objeto original, mas
+**toda variante já gerada** (`THUMBNAIL`/`CARD`/`DETAIL`) — o repositório lê os `object_key` das
+variantes de `property_media_variants` *antes* do `DELETE` que dispara o `ON DELETE CASCADE`
+(as linhas de variant já teriam sumido depois), e a camada de aplicação tenta remover cada key —
+original e cada variante — de forma independente: uma falhando nunca impede a tentativa das
+outras. Zero variantes é um resultado normal (mídia nunca processada, ou ainda
+`PROCESSING`/`FAILED`) — a exclusão nunca assume um número fixo de variantes.
 
 Aqui a assimetria com o upload é a decisão central, não um detalhe: no upload, o pior cenário
 tolerável é um objeto órfão em R2 (sem row) — por isso o objeto é escrito primeiro. Na exclusão,
@@ -96,12 +106,13 @@ Consequências específicas da exclusão, em paralelo às já registradas acima 
 - Se a transação PostgreSQL falhar (media inexistente/de outra propriedade, tenant não
   encontrado, etc.), `ObjectStorage.deleteObject()` **nunca é chamado** — o erro propaga direto
   de `PropertyMediaRepository.delete()`, antes de a camada de aplicação sequer tentar tocar o R2.
-- Se a transação commitar mas `ObjectStorage.deleteObject()` falhar, a requisição HTTP ainda
-  retorna **204** — nunca 503/500 por causa disso. A falha é logada de forma segura (bucket
-  implícito no adapter, `objectKey`, `mediaId` — nunca segredos) para permitir reconciliação
-  futura; o objeto órfão resultante cai na mesma categoria "Future → Reconciliação de órfãos" já
-  prevista abaixo, agora alimentada por dois caminhos (insert-falhou-e-compensação-falhou no
-  upload, e delete-do-objeto-falhou aqui) em vez de um só.
+- Se a transação commitar mas `ObjectStorage.deleteObject()` falhar para uma ou mais keys
+  (original e/ou alguma variante), a requisição HTTP ainda retorna **204** — nunca 503/500 por
+  causa disso. As falhas são logadas de forma segura (bucket implícito no adapter, as keys que
+  falharam, `mediaId` — nunca segredos) para permitir reconciliação futura; cada objeto órfão
+  resultante cai na mesma categoria "Future → Reconciliação de órfãos" já prevista abaixo, agora
+  alimentada por três caminhos (insert-falhou-e-compensação-falhou no upload,
+  delete-do-original-falhou, delete-de-alguma-variante-falhou) em vez de um só.
 - A remoção da row, o reindex gapless de `position` (`0..N-1`) e a eventual promoção de uma nova
   capa acontecem todos dentro da mesma transação (protegida pelo lock de linha em `properties`
   já usado por `create`/`reorder`/`setCover`) — nunca como passos separados que poderiam
