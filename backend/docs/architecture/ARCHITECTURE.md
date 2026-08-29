@@ -848,8 +848,9 @@ vice-versa. Isso não é um bug: é a consequência honesta e esperada de não e
 outro mecanismo de compartilhamento local seguro. Nenhum fallback para a credencial
 administrativa do cluster existe ou é permitido para contornar isso.
 
-**IMPLEMENTED** (Prompt 021) — `src/main/dev-full.ts` (`pnpm dev:full`), um runtime **somente
-de desenvolvimento** que sobe a API HTTP e o worker de provisionamento no mesmo processo,
+**IMPLEMENTED** (Prompt 021; Prompt 031 acrescentou o dispatcher de outbox de mídia) —
+`src/main/dev-full.ts` (`pnpm dev:full`), um runtime **somente de desenvolvimento** que sobe a
+API HTTP, o worker de provisionamento, e o dispatcher de outbox de mídia no mesmo processo,
 compartilhando a mesma instância de `SecretStore`:
 
 ```text
@@ -859,7 +860,8 @@ uma única composição de dependências
     ↓
 InMemorySecretStore compartilhado
     ├── HTTP API (build-app.ts → TenantDatabaseConnectionManager)
-    └── provisioning worker (createProvisioningWorkerRuntime)
+    ├── provisioning worker (createProvisioningWorkerRuntime)
+    └── media outbox dispatcher (createMediaOutboxDispatcherRuntime — Prompt 031)
 ```
 
 `createProvisioningWorkerRuntime()` (`src/workers/provisioning-worker-runtime.ts`) foi
@@ -871,12 +873,19 @@ partir de instâncias diferentes — sem duplicar a composição. Testado direta
 construído a partir do **mesmo** `SecretStore` que o worker usou resolve e conecta com
 sucesso; construído a partir de um `SecretStore` **diferente**, falha com
 `TenantSecretNotFoundError` — nunca recorrendo à credencial administrativa.
+`createMediaOutboxDispatcherRuntime()` (`src/workers/media-outbox-dispatcher-runtime.ts`, Prompt
+031) segue exatamente o mesmo padrão de extração, pela mesma razão: este dispatcher também
+precisa resolver credencial de aplicação por tenant (para abrir cada Tenant Data Plane e
+reivindicar seu `outbox_events`), então herda o mesmo gap de `SecretStore` entre processos que o
+worker de provisionamento já tem — `provisioning-dispatcher.ts`, por não tocar credencial de
+tenant nenhuma (só Control Plane + Redis), permanece deliberadamente fora de `dev-full.ts`
+(seção "Media outbox dispatcher" acima detalha o porquê).
 
 `dev-full.ts` recusa-se a iniciar sob `NODE_ENV=production` com seu próprio fail-fast
 explícito (não depende só do guard interno do `InMemorySecretStore`) — este runtime **não
-representa a topologia de produção** e nunca deve ser usado como se representasse. Os três
-entrypoints independentes (`server.ts`, `provisioning-worker.ts`,
-`provisioning-dispatcher.ts`) continuam existindo, inalterados em intenção — eles continuam
+representa a topologia de produção** e nunca deve ser usado como se representasse. Os quatro
+entrypoints independentes (`server.ts`, `provisioning-worker.ts`, `provisioning-dispatcher.ts`,
+`media-outbox-dispatcher.ts`) continuam existindo, inalterados em intenção — eles continuam
 não compartilhando `SecretStore` entre si quando executados separadamente, e essa é uma
 limitação documentada, não corrigida por este runtime combinado (que é uma conveniência local
 temporária, não uma correção da arquitetura real). `dev-full.ts` deixa de ser necessário
@@ -1083,7 +1092,9 @@ Property media processing status  = IMPLEMENTED  (property_media.processing_stat
 Property media variants schema    = IMPLEMENTED  (property_media_variants, sem writer ainda)
 Media processing outbox intent    = IMPLEMENTED  (outbox_events, dentro da transação do upload)
 BullMQ media-processing contract  = IMPLEMENTED  (queue/job/payload, sem consumer)
-Media outbox dispatcher           = PLANNED      (ver "Deferred dispatcher design" abaixo)
+Media outbox dispatcher           = IMPLEMENTED  (Prompt 031 — ver ADR-009)
+Cross-tenant discovery            = IMPLEMENTED  (Prompt 031 — TenantDiscovery, ver ADR-009)
+Media processing worker           = PLANNED
 Sharp worker                      = PLANNED
 ```
 
@@ -1139,28 +1150,70 @@ fila `media-processing`, job `process-property-media`, payload mínimo validado 
 bytes). `createMediaProcessingQueue()` é só uma factory de `Queue` — **nenhum consumer/`Worker`
 é criado nesta tarefa**.
 
-### Deferred dispatcher design
-
-Uma pendência arquitetural explícita, deliberadamente não resolvida nesta tarefa: `property_media`
-e seu `outbox_events` vivem no Tenant Data Plane — um database físico por tenant (ADR-001) — não
-existe hoje um único lugar para consultar "todas as mídias aguardando processamento em todos os
-tenants". Um dispatcher que varresse ingenuamente todos os tenant databases em loop (conectar a
-cada um, a cada N segundos) foi explicitamente rejeitado (Prompt 030, seções 38/42/70) sem um
-desenho real de descoberta/agendamento — o mesmo tipo de problema que o dispatcher de
-provisionamento já resolveu, mas para um domínio (Control Plane, um database só) estruturalmente
-mais simples que este. Prompt(s) futuro(s) precisam decidir como consumir outboxes de múltiplos
-tenant databases antes que o worker de `sharp` real (Prompt 031/032?) possa ser ligado de ponta
-a ponta — ver ADR-008 para a arquitetura de processamento em si, que continua válida e
-inalterada.
-
 - Original sempre preservado no R2, indefinidamente — reprocessamento futuro (nova qualidade,
   novo preset, correção de algoritmo) não exige novo upload do usuário.
-- Nenhuma mudança de comportamento HTTP nesta tarefa além do novo campo `processing_status` na
+- Nenhuma mudança de comportamento HTTP no Prompt 030 além do novo campo `processing_status` na
   resposta de `PropertyMedia`: `POST .../media` continua exatamente como no Prompt 027/028;
   `property_media.object_key` de mídia já existente (formato `.../<mediaId>.<ext>`, sem
   subpasta) permanece válido — variantes futuras usam o prefixo `.../<mediaId>/`, sem exigir
   reorganização de keys existentes. Nenhuma rota nova; `property_media_variants` não é exposta
   em nenhuma resposta HTTP ainda.
+
+**IMPLEMENTED** (Prompt 031) — dispatcher multi-tenant de outbox de mídia, arquitetura completa
+em [ADR-009](adr/ADR-009-multi-tenant-outbox-dispatch.md). Resolve a pendência que o Prompt 030
+havia registrado (como consumir `outbox_events` espalhado por um database físico por tenant, sem
+um loop ingênuo varrendo todo tenant database conhecido):
+
+```text
+Control Plane
+    ↓
+TenantDiscovery.listReadyTenantIds({ after: cursor, limit: tenantBatchSize })
+    — tenants.status=READY AND tenant_databases.status=READY AND database_clusters.status=ACTIVE,
+      ordenado por tenants.id ASC, cursor em memória (nunca persistido — perder o cursor apenas
+      reinicia a varredura; a fonte de verdade é o outbox pendente de cada tenant, não o cursor)
+    ↓ (até MEDIA_OUTBOX_DISPATCH_CONCURRENCY tenants em paralelo por ciclo)
+para cada tenant elegível:
+    TenantDatabaseResolver.resolve(tenantId) — revalidado a cada ciclo, nunca cacheado
+    ↓
+    TenantDatabaseConnectionManager.withTenantDatabase(target, ...)
+    ↓
+    claim: SELECT ... FOR UPDATE SKIP LOCKED (aggregate_type=PROPERTY_MEDIA,
+        event_type=PROPERTY_MEDIA_PROCESSING_REQUESTED, não despachado/processado/falho,
+        lease ausente ou expirado) LIMIT eventBatchSize, ORDER BY created_at ASC, id ASC (FIFO)
+    ↓ (commit — transação curta, nunca aberta durante a chamada ao BullMQ)
+    para cada evento: valida payload (Zod) →
+        inválido  → dispatch_failed_at + dispatch_error (mensagem fixa, nunca payload/stack)
+        válido    → queue.add(jobId = outbox_events.id) → sucesso: dispatched_at
+                                                          → falha: releaseLease (retry imediato)
+```
+
+`outbox_events` ganhou (migration `drizzle/tenant/0006_add_outbox_dispatch_metadata.sql`,
+`schemaVersion` 6→7) `dispatch_claimed_at`/`dispatch_lease_until`/`dispatched_at`/
+`dispatch_failed_at`/`dispatch_error` — mesma forma exata das colunas de dispatch de
+`provisioning_jobs` (ADR-002), deliberadamente genérica (nem a constraint nem o índice parcial
+fazem referência a `aggregate_type`/`event_type` — esse filtro vive só na query do dispatcher,
+CLAUDE.md: nenhuma tabela de outbox media-specific). `jobId = outbox_events.id` (nunca um UUID
+novo por tentativa) é o que torna uma redelivery segura — provado com Redis real: uma falha de
+confirmação simulada seguida de uma nova tentativa produz exatamente um job no BullMQ, nunca
+dois. `dispatched_at` (confirmação de transporte) permanece estritamente distinto de
+`processed_at` (conclusão de processamento de domínio, nunca escrito por este dispatcher) — ver
+ADR-009 para o raciocínio completo.
+
+Isolamento de falha em duas camadas: por evento (uma falha de `publish()` libera o lease e não
+impede os próximos eventos do mesmo tenant) e por tenant (um tenant temporariamente inacessível —
+secret ausente, cluster `INACTIVE`, timeout — é registrado e pulado, nunca aborta o ciclo
+inteiro). Novo módulo `src/modules/media-processing/` (aplicação + infraestrutura) e
+`src/modules/tenant-runtime/{application,infrastructure}/tenant-discovery.ts` (descoberta,
+reutilizável por qualquer dispatcher cross-tenant futuro). Entrypoint standalone
+`src/workers/media-outbox-dispatcher.ts` (`pnpm dev:media-dispatcher`/`start:media-dispatcher`) —
+mas, como este dispatcher precisa resolver credencial de aplicação de cada tenant (diferente do
+dispatcher de provisionamento, que só toca Control Plane + Redis), ele herda o mesmo gap de
+`SecretStore` entre processos já documentado para `provisioning-worker.ts` vs `server.ts` (ver
+"Local development runtime" abaixo) — `pnpm dev:full` agora também compõe este runtime,
+compartilhando a mesma `SecretStore` em memória que o worker de provisionamento já usa, fechando
+o gap localmente. Nenhum worker consome a fila `media-processing` ainda — um job publicado por
+este dispatcher fica em espera no Redis até o Prompt que implementar o worker de `sharp` (ADR-008)
+existir; isso é esperado.
 
 ## Princípios
 

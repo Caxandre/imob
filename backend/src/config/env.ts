@@ -26,6 +26,16 @@ const envSchema = z
     PROVISIONING_RECOVERY_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
     PROVISIONING_RECOVERY_BATCH_SIZE: z.coerce.number().int().positive().default(10),
 
+    // Media outbox dispatcher (Prompt 031, ADR-009) — see src/workers/media-outbox-dispatcher.ts.
+    // Distinct from the provisioning dispatch vars above: this dispatcher additionally paginates
+    // *tenants* (tenant batch), on top of the per-tenant event batch, since eligible work is
+    // spread across many Tenant Data Plane databases rather than one Control Plane table.
+    MEDIA_OUTBOX_DISPATCH_TENANT_BATCH_SIZE: z.coerce.number().int().positive().default(25),
+    MEDIA_OUTBOX_DISPATCH_EVENT_BATCH_SIZE: z.coerce.number().int().positive().default(20),
+    MEDIA_OUTBOX_DISPATCH_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+    MEDIA_OUTBOX_DISPATCH_CONCURRENCY: z.coerce.number().int().positive().default(5),
+    MEDIA_OUTBOX_DISPATCH_LEASE_SECONDS: z.coerce.number().int().positive().default(30),
+
     // Tenant database cluster selection (ADR-003) — the ACTIVE database_clusters.name the
     // initial DatabaseClusterSelector implementation targets. No default: which cluster
     // tenants get provisioned into must always be an explicit choice, never an accident.
