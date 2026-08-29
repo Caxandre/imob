@@ -67,20 +67,55 @@ export const auditLogs = pgTable("audit_logs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const outboxEvents = pgTable("outbox_events", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  aggregateType: text("aggregate_type").notNull(),
-  aggregateId: uuid("aggregate_id").notNull(),
-  eventType: text("event_type").notNull(),
-  payload: jsonb("payload").notNull(),
-  // The business moment the event happened — distinct from createdAt (row insertion time),
-  // and always supplied by the caller rather than defaulted, since backfilled/replayed
-  // events legitimately have an occurredAt in the past.
-  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
-  // Set by the future outbox publisher (not implemented here) once the event is relayed.
-  processedAt: timestamp("processed_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const outboxEvents = pgTable(
+  "outbox_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    aggregateType: text("aggregate_type").notNull(),
+    aggregateId: uuid("aggregate_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    // The business moment the event happened — distinct from createdAt (row insertion time),
+    // and always supplied by the caller rather than defaulted, since backfilled/replayed
+    // events legitimately have an occurredAt in the past.
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    // Set by the future *consumer* once it finishes real domain processing for this event —
+    // never by the dispatcher below (Prompt 031, ADR-009: "dispatched_at vs processed_at").
+    // Still unset by anything in this codebase; the media outbox dispatcher never writes here.
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    // Dispatch protocol (Prompt 031, ADR-009) — deliberately generic (not media-specific):
+    // any future outbox consumer that needs cross-tenant transport to a queue reuses this same
+    // shape, exactly like `provisioning_jobs`' own dispatch columns (ADR-002) this mirrors.
+    // Owned exclusively by whatever dispatcher claims an event — never by the eventual domain
+    // consumer, which only ever touches `processedAt`.
+    dispatchClaimedAt: timestamp("dispatch_claimed_at", { withTimezone: true }),
+    dispatchLeaseUntil: timestamp("dispatch_lease_until", { withTimezone: true }),
+    dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+    // Set instead of `dispatchedAt` when the event itself is unusable (e.g. a payload that
+    // fails its Zod shape check) — a permanent condition, never retried by lease expiry. Kept
+    // narrow and safe: never a stack trace, never a credential (this task, section 28).
+    dispatchFailedAt: timestamp("dispatch_failed_at", { withTimezone: true }),
+    dispatchError: text("dispatch_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Same shape as `provisioning_jobs_dispatch_lease_requires_claim` (ADR-002) — a lease never
+    // exists without the claim that set it.
+    check(
+      "outbox_events_dispatch_lease_requires_claim",
+      sql`${t.dispatchLeaseUntil} IS NULL OR ${t.dispatchClaimedAt} IS NOT NULL`,
+    ),
+    // Serves the dispatcher's FIFO claim scan directly (this task, section 12/29): still
+    // pending transport (never dispatched, never permanently failed) and not yet fully
+    // processed. `aggregate_type`/`event_type` are deliberately NOT part of this index/predicate
+    // — this table stays a generic outbox, so a future non-media consumer of the exact same
+    // pending-work shape gets the same index for free; the media-specific filter lives in the
+    // dispatcher's own query, applied on top of what this index already narrows down.
+    index("outbox_events_pending_dispatch_idx")
+      .on(t.createdAt, t.id)
+      .where(sql`${t.processedAt} IS NULL AND ${t.dispatchedAt} IS NULL AND ${t.dispatchFailedAt} IS NULL`),
+  ],
+);
 
 // Prompt 030 (ADR-008) — lifecycle of a media's derived variants; see `propertyMedia.processingStatus`.
 export const mediaProcessingStatus = pgEnum("media_processing_status", ["PROCESSING", "READY", "FAILED"]);

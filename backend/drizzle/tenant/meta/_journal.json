@@ -43,6 +43,13 @@
       "when": 1787955899664,
       "tag": "0005_add_media_processing_status_and_variants",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787964287636,
+      "tag": "0006_add_outbox_dispatch_metadata",
+      "breakpoints": true
     }
   ]
 }
