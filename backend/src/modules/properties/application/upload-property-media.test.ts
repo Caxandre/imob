@@ -62,7 +62,7 @@ function fakePropertyMediaRepository(overrides: Partial<PropertyMediaRepository>
     listByProperty: async () => [FAKE_MEDIA],
     reorder: async () => [FAKE_MEDIA],
     setCover: async () => FAKE_MEDIA,
-    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey }),
+    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey, variantObjectKeys: [] }),
     ...overrides,
   };
 }
@@ -73,6 +73,9 @@ function fakeObjectStorage(overrides: Partial<ObjectStorage> = {}): ObjectStorag
       key: input.key,
       publicUrl: `https://public-base.example/${input.key}`,
     }),
+    getObject: async () => {
+      throw new Error("getObject not implemented in this fake");
+    },
     deleteObject: async () => undefined,
     ...overrides,
   };

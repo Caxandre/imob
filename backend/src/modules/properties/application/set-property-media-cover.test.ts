@@ -61,7 +61,7 @@ function fakePropertyMediaRepository(overrides: Partial<PropertyMediaRepository>
     listByProperty: async () => [FAKE_MEDIA],
     reorder: async () => [FAKE_MEDIA],
     setCover: async () => FAKE_MEDIA,
-    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey }),
+    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey, variantObjectKeys: [] }),
     ...overrides,
   };
 }

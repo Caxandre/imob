@@ -1,8 +1,15 @@
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
 
-import type { ObjectStorage, PutObjectInput, StoredObject } from "./object-storage.js";
-import { ObjectStorageConfigurationError, ObjectStorageDeleteError, ObjectStorageUploadError, validateObjectKey } from "./object-storage.js";
+import type { GetObjectResult, ObjectStorage, PutObjectInput, StoredObject } from "./object-storage.js";
+import {
+  ObjectStorageConfigurationError,
+  ObjectStorageDeleteError,
+  ObjectStorageObjectNotFoundError,
+  ObjectStorageReadError,
+  ObjectStorageUploadError,
+  validateObjectKey,
+} from "./object-storage.js";
 
 /**
  * Raw, possibly-incomplete configuration — matches the shape `env.R2_*` actually has (every
@@ -79,8 +86,35 @@ export function buildPublicObjectUrl(publicUrlBase: string, key: string): string
  * network (this task, section 26), without inventing a broader abstraction than this adapter
  * needs.
  */
+export interface S3GetObjectResponse {
+  Body?: { transformToByteArray(): Promise<Uint8Array> };
+  ContentType?: string;
+  ContentLength?: number;
+}
+
 export interface S3CommandSender {
   send(command: PutObjectCommand | DeleteObjectCommand): Promise<unknown>;
+  send(command: GetObjectCommand): Promise<S3GetObjectResponse>;
+}
+
+/**
+ * Detects "the key does not exist" from whatever shape the AWS SDK v3 actually throws for S3
+ * (Cloudflare R2's S3-compatible API included) — confined entirely to this file (Prompt 032,
+ * section 61: the `ObjectStorage` port and every caller stay unaware that this check exists at
+ * all, let alone what it looks for). `error.name === "NoSuchKey"` is the SDK's own modeled
+ * exception name for this condition; the `$metadata.httpStatusCode === 404` fallback covers any
+ * response the SDK doesn't map to that specific exception class but that is still, structurally,
+ * a 404.
+ */
+function isNoSuchKeyError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "NoSuchKey") {
+    return true;
+  }
+  const metadata = (error as { $metadata?: { httpStatusCode?: number } }).$metadata;
+  return metadata?.httpStatusCode === 404;
 }
 
 export interface CloudflareR2ObjectStorageDependencies {
@@ -142,6 +176,30 @@ export function createCloudflareR2ObjectStorage(
       }
 
       return { key: input.key, publicUrl: buildPublicObjectUrl(config.publicUrl, input.key) };
+    },
+
+    async getObject(key: string): Promise<GetObjectResult> {
+      validateObjectKey(key);
+
+      let response: S3GetObjectResponse;
+      try {
+        response = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key }));
+      } catch (error) {
+        if (isNoSuchKeyError(error)) {
+          throw new ObjectStorageObjectNotFoundError(key);
+        }
+        throw new ObjectStorageReadError(config.bucket, key, error);
+      }
+
+      if (!response.Body) {
+        // Structurally unreachable through a real S3-compatible GetObject response (a 2xx
+        // response always carries a body), but never assumed — a defensive, honest failure
+        // instead of a downstream crash on `undefined.transformToByteArray()`.
+        throw new ObjectStorageReadError(config.bucket, key, new Error("GetObject response had no Body"));
+      }
+
+      const bytes = await response.Body.transformToByteArray();
+      return { body: Buffer.from(bytes), contentType: response.ContentType, contentLength: response.ContentLength };
     },
 
     async deleteObject(key: string): Promise<void> {

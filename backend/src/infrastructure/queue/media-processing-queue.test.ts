@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  createMediaProcessingQueue,
   MEDIA_PROCESSING_QUEUE_NAME,
   PROCESS_PROPERTY_MEDIA_JOB_NAME,
   processPropertyMediaJobPayloadSchema,
+  type MediaProcessingQueue,
 } from "./media-processing-queue.js";
+import { createRedisConnection } from "./redis-connection.js";
 
 const VALID_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -55,5 +58,32 @@ describe("processPropertyMediaJobPayloadSchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+});
+
+describe("createMediaProcessingQueue (real Redis) — retry/backoff", () => {
+  let connection: ReturnType<typeof createRedisConnection>;
+  let queue: MediaProcessingQueue;
+
+  beforeEach(() => {
+    connection = createRedisConnection();
+    queue = createMediaProcessingQueue(connection, { attempts: 5, backoffDelayMs: 5000 });
+  });
+
+  afterEach(async () => {
+    await queue.obliterate({ force: true }).catch(() => undefined);
+    await queue.close();
+    await connection.quit();
+  });
+
+  it("every job added inherits the configured attempts and exponential backoff, without the caller specifying them", async () => {
+    const job = await queue.add(
+      PROCESS_PROPERTY_MEDIA_JOB_NAME,
+      { tenantId: VALID_ID, propertyId: VALID_ID, mediaId: VALID_ID },
+      { jobId: "22222222-2222-4222-8222-222222222222" },
+    );
+
+    expect(job.opts.attempts).toBe(5);
+    expect(job.opts.backoff).toEqual({ type: "exponential", delay: 5000 });
   });
 });

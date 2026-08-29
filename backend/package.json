@@ -12,12 +12,14 @@
     "dev:dispatcher": "tsx watch --env-file=.env src/workers/provisioning-dispatcher.ts",
     "dev:provisioning-worker": "tsx watch --env-file=.env src/workers/provisioning-worker.ts",
     "dev:media-dispatcher": "tsx watch --env-file=.env src/workers/media-outbox-dispatcher.ts",
+    "dev:media-worker": "tsx watch --env-file=.env src/workers/media-processing-worker.ts",
     "dev:full": "tsx watch --env-file=.env src/main/dev-full.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file=.env dist/main/server.js",
     "start:dispatcher": "node --env-file=.env dist/workers/provisioning-dispatcher.js",
     "start:provisioning-worker": "node --env-file=.env dist/workers/provisioning-worker.js",
     "start:media-dispatcher": "node --env-file=.env dist/workers/media-outbox-dispatcher.js",
+    "start:media-worker": "node --env-file=.env dist/workers/media-processing-worker.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file=.env src/infrastructure/database/control-plane/migrate.ts",
     "tenant-db:generate": "drizzle-kit generate --config=drizzle.tenant.config.ts",
@@ -37,6 +39,7 @@
     "ioredis": "^6.0.0",
     "pg": "^8.23.0",
     "pino": "^10.3.1",
+    "sharp": "^0.35.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {

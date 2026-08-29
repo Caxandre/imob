@@ -1,4 +1,11 @@
-import { validateObjectKey, type ObjectStorage, type PutObjectInput, type StoredObject } from "../object-storage.js";
+import {
+  ObjectStorageObjectNotFoundError,
+  validateObjectKey,
+  type GetObjectResult,
+  type ObjectStorage,
+  type PutObjectInput,
+  type StoredObject,
+} from "../object-storage.js";
 
 /**
  * Test-support / local-development only — an in-process, non-persistent `ObjectStorage` fake,
@@ -28,6 +35,16 @@ export function createInMemoryObjectStorage(): InMemoryObjectStorage {
       validateObjectKey(input.key);
       objects.set(input.key, { body: input.body, contentType: input.contentType });
       return { key: input.key, publicUrl: `${FAKE_PUBLIC_BASE}/${input.key}` };
+    },
+
+    async getObject(key: string): Promise<GetObjectResult> {
+      validateObjectKey(key);
+      const stored = objects.get(key);
+      if (!stored) {
+        throw new ObjectStorageObjectNotFoundError(key);
+      }
+      const body = Buffer.isBuffer(stored.body) ? stored.body : Buffer.from(stored.body);
+      return { body, contentType: stored.contentType, contentLength: body.length };
     },
 
     async deleteObject(key: string): Promise<void> {

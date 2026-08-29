@@ -63,7 +63,7 @@ function fakePropertyMediaRepository(overrides: Partial<PropertyMediaRepository>
     listByProperty: async () => [FAKE_MEDIA],
     reorder: async () => [FAKE_MEDIA],
     setCover: async () => FAKE_MEDIA,
-    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey }),
+    delete: async () => ({ objectKey: FAKE_MEDIA.objectKey, variantObjectKeys: [] }),
     ...overrides,
   };
 }
@@ -71,13 +71,14 @@ function fakePropertyMediaRepository(overrides: Partial<PropertyMediaRepository>
 function fakeObjectStorage(overrides: Partial<ObjectStorage> = {}): ObjectStorage {
   return {
     putObject: async (input) => ({ key: input.key, publicUrl: `https://public-base.example/${input.key}` }),
+    getObject: async () => { throw new Error("getObject not implemented in this fake"); },
     deleteObject: async () => undefined,
     ...overrides,
   };
 }
 
 describe("deletePropertyMedia", () => {
-  it("deletes the metadata then the R2 object, reporting objectStorageDeleted: true", async () => {
+  it("deletes the metadata then the original R2 object, reporting no failed keys", async () => {
     const deleteCalls: string[] = [];
     const objectStorage = fakeObjectStorage({
       deleteObject: async (key) => {
@@ -93,8 +94,36 @@ describe("deletePropertyMedia", () => {
       FAKE_MEDIA.id,
     );
 
-    expect(outcome).toEqual({ objectKey: FAKE_MEDIA.objectKey, objectStorageDeleted: true });
+    expect(outcome).toEqual({ objectKeys: [FAKE_MEDIA.objectKey], failedObjectKeys: [] });
     expect(deleteCalls).toEqual([FAKE_MEDIA.objectKey]);
+  });
+
+  it("also deletes every variant object key the repository reports, alongside the original", async () => {
+    const deleteCalls: string[] = [];
+    const variantKeys = [
+      `tenants/t/properties/p/${FAKE_MEDIA.id}/thumbnail.webp`,
+      `tenants/t/properties/p/${FAKE_MEDIA.id}/card.webp`,
+      `tenants/t/properties/p/${FAKE_MEDIA.id}/detail.webp`,
+    ];
+    const mediaRepository = fakePropertyMediaRepository({
+      delete: async () => ({ objectKey: FAKE_MEDIA.objectKey, variantObjectKeys: variantKeys }),
+    });
+    const objectStorage = fakeObjectStorage({
+      deleteObject: async (key) => {
+        deleteCalls.push(key);
+      },
+    });
+
+    const outcome = await deletePropertyMedia(
+      fakePropertyRepository(),
+      mediaRepository,
+      objectStorage,
+      FAKE_PROPERTY.id,
+      FAKE_MEDIA.id,
+    );
+
+    expect(outcome).toEqual({ objectKeys: [FAKE_MEDIA.objectKey, ...variantKeys], failedObjectKeys: [] });
+    expect(deleteCalls).toEqual([FAKE_MEDIA.objectKey, ...variantKeys]);
   });
 
   it("throws PropertyNotFoundError when the property does not exist, never touching the media repository or ObjectStorage", async () => {
@@ -103,7 +132,7 @@ describe("deletePropertyMedia", () => {
     const mediaRepository = fakePropertyMediaRepository({
       delete: async (propertyId) => {
         mediaDeleteCalls.push(propertyId);
-        return { objectKey: FAKE_MEDIA.objectKey };
+        return { objectKey: FAKE_MEDIA.objectKey, variantObjectKeys: [] };
       },
     });
     const objectStorage = fakeObjectStorage({
@@ -144,7 +173,7 @@ describe("deletePropertyMedia", () => {
     expect(objectStorageDeleteCalls).toHaveLength(0);
   });
 
-  it("still resolves successfully (never throws) when the R2 delete fails, reporting objectStorageDeleted: false", async () => {
+  it("still resolves successfully (never throws) when the R2 delete fails, reporting the key as failed", async () => {
     const objectStorage = fakeObjectStorage({
       deleteObject: async () => {
         throw new Error("R2 unreachable");
@@ -159,7 +188,37 @@ describe("deletePropertyMedia", () => {
       FAKE_MEDIA.id,
     );
 
-    expect(outcome).toEqual({ objectKey: FAKE_MEDIA.objectKey, objectStorageDeleted: false });
+    expect(outcome).toEqual({ objectKeys: [FAKE_MEDIA.objectKey], failedObjectKeys: [FAKE_MEDIA.objectKey] });
+  });
+
+  it("attempts every key independently — one failing never stops the others from being attempted", async () => {
+    const variantKeys = [
+      `tenants/t/properties/p/${FAKE_MEDIA.id}/thumbnail.webp`,
+      `tenants/t/properties/p/${FAKE_MEDIA.id}/card.webp`,
+    ];
+    const mediaRepository = fakePropertyMediaRepository({
+      delete: async () => ({ objectKey: FAKE_MEDIA.objectKey, variantObjectKeys: variantKeys }),
+    });
+    const attempted: string[] = [];
+    const objectStorage = fakeObjectStorage({
+      deleteObject: async (key) => {
+        attempted.push(key);
+        if (key === FAKE_MEDIA.objectKey) {
+          throw new Error("R2 unreachable for the original");
+        }
+      },
+    });
+
+    const outcome = await deletePropertyMedia(
+      fakePropertyRepository(),
+      mediaRepository,
+      objectStorage,
+      FAKE_PROPERTY.id,
+      FAKE_MEDIA.id,
+    );
+
+    expect(attempted).toEqual([FAKE_MEDIA.objectKey, ...variantKeys]);
+    expect(outcome.failedObjectKeys).toEqual([FAKE_MEDIA.objectKey]);
   });
 
   it("allows deleting media for an INACTIVE (archived) property", async () => {
@@ -171,6 +230,6 @@ describe("deletePropertyMedia", () => {
       FAKE_MEDIA.id,
     );
 
-    expect(outcome.objectStorageDeleted).toBe(true);
+    expect(outcome.failedObjectKeys).toEqual([]);
   });
 });

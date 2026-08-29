@@ -17,7 +17,7 @@ let queue: MediaProcessingQueue;
 
 beforeEach(() => {
   connection = createRedisConnection();
-  queue = createMediaProcessingQueue(connection);
+  queue = createMediaProcessingQueue(connection, { attempts: 5, backoffDelayMs: 5000 });
 });
 
 afterEach(async () => {

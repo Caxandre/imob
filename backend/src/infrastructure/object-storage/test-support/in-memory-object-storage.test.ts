@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { InvalidObjectKeyError } from "../object-storage.js";
+import { InvalidObjectKeyError, ObjectStorageObjectNotFoundError } from "../object-storage.js";
 import { createInMemoryObjectStorage } from "./in-memory-object-storage.js";
 
 describe("createInMemoryObjectStorage", () => {
@@ -36,5 +36,29 @@ describe("createInMemoryObjectStorage", () => {
       InvalidObjectKeyError,
     );
     await expect(storage.deleteObject("/leading.txt")).rejects.toBeInstanceOf(InvalidObjectKeyError);
+  });
+
+  it("reads back a stored object as a Buffer with its contentType/contentLength", async () => {
+    const storage = createInMemoryObjectStorage();
+    await storage.putObject({ key: "a/b.txt", body: Buffer.from("hello"), contentType: "text/plain" });
+
+    const result = await storage.getObject("a/b.txt");
+
+    expect(Buffer.isBuffer(result.body)).toBe(true);
+    expect(result.body).toEqual(Buffer.from("hello"));
+    expect(result.contentType).toBe("text/plain");
+    expect(result.contentLength).toBe(5);
+  });
+
+  it("rejects getObject for a key that was never stored with ObjectStorageObjectNotFoundError", async () => {
+    const storage = createInMemoryObjectStorage();
+
+    await expect(storage.getObject("never-existed.txt")).rejects.toBeInstanceOf(ObjectStorageObjectNotFoundError);
+  });
+
+  it("rejects an invalid key on getObject, same as put/delete", async () => {
+    const storage = createInMemoryObjectStorage();
+
+    await expect(storage.getObject("/leading.txt")).rejects.toBeInstanceOf(InvalidObjectKeyError);
   });
 });

@@ -17,10 +17,15 @@ export interface CreatePropertyMediaInput {
   originalFilename: string | null;
 }
 
-/** Returned by `delete()` — just enough for the caller to remove the R2 object afterward
- * (Prompt 028, section 46). Never anything the caller would expose to an HTTP client. */
+/** Returned by `delete()` — just enough for the caller to remove the real objects afterward
+ * (Prompt 028, section 46; Prompt 032, section 66: variant keys added once
+ * `property_media_variants` had rows to lose). Never anything the caller would expose to an
+ * HTTP client. `variantObjectKeys` reflects however many variant rows actually existed at
+ * delete time (0 if the media was never processed, or still `PROCESSING`/`FAILED` — never
+ * assumed to be exactly 3). */
 export interface DeletePropertyMediaResult {
   objectKey: string;
+  variantObjectKeys: string[];
 }
 
 /**
@@ -63,10 +68,12 @@ export interface PropertyMediaRepository {
    * property row lock. If the removed media was the cover and others remain, the one now at
    * position 0 becomes the new cover (section 39); if none remain, the gallery has no cover
    * (section 40); if the removed media was not the cover, the current cover is untouched
-   * (section 41). Never touches Cloudflare R2 itself — returns the removed row's `objectKey`
-   * so the caller can delete the real object *after* this transaction has committed (ADR-007
-   * "Delete"). Rejects with {@link PropertyMediaNotFoundError} if `mediaId` does not belong to
-   * this property — R2 is never touched in that case either.
+   * (section 41). `property_media_variants` rows for this media disappear via `ON DELETE
+   * CASCADE` (Prompt 030) — their object keys are read *before* the delete (while they still
+   * exist) and returned alongside the original's, so the caller can best-effort remove every
+   * real R2 object *after* this transaction has committed (ADR-007 "Delete", Prompt 032, section
+   * 66). Never touches Cloudflare R2 itself. Rejects with {@link PropertyMediaNotFoundError} if
+   * `mediaId` does not belong to this property — R2 is never touched in that case either.
    */
   delete(propertyId: string, mediaId: string): Promise<DeletePropertyMediaResult>;
 }

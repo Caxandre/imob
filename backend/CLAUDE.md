@@ -68,8 +68,8 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   dentro de uma requisição HTTP normal de upload; transformações de mídia rodam de forma
   assíncrona, a partir do original preservado — ver
   [ADR-008](docs/architecture/adr/ADR-008-asynchronous-property-image-processing.md) (Prompt
-  029, arquitetura definida; Prompt 030, fundação persistente implementada; Prompt 031,
-  dispatcher implementado — só o worker de `sharp` em si ainda não).
+  029, arquitetura definida; Prompt 030, fundação persistente; Prompt 031, dispatcher; Prompt
+  032, worker real com `sharp` — implementação completa).
 - Fluxos HTTP nunca devem fazer dual-write direto entre o PostgreSQL do tenant e o BullMQ
   (`INSERT` seguido de `queue.add()` como duas escritas independentes) quando um outbox durável
   no próprio Tenant Data Plane puder representar a intenção assíncrona de forma atômica — grave
@@ -89,6 +89,17 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   terminou seu trabalho), nunca confirmação de transporte até uma fila — um dispatcher que só
   publica no BullMQ usa metadata própria e separada (`dispatched_at`) para essa confirmação,
   nunca `processed_at`. Ver ADR-009 "`dispatched_at` vs `processed_at`" como exemplo aplicado.
+- Uma mídia só pode se tornar `READY` na mesma transação do Tenant Data Plane que persiste toda
+  a metadata de variante obrigatória e marca o evento de outbox de processamento correspondente
+  como processado — nunca `READY` primeiro e as variantes depois (ou vice-versa) em passos
+  separados que poderiam observar um estado intermediário inconsistente. Ver
+  `PropertyMediaProcessingRepository.finalizeReady()` (Prompt 032, ADR-008) como exemplo
+  aplicado, com um rollback forçado real provando a atomicidade
+  (`drizzle-property-media-processing-repository.test.ts`).
+- Object keys de variantes de imagem devem ser determinísticas (derivadas só de IDs técnicos +
+  o nome da variante, nunca um UUID novo por tentativa), para que um retry sobrescreva o mesmo
+  objeto em vez de criar um objeto duplicado. Ver `buildPropertyMediaVariantObjectKey` (Prompt
+  032, ADR-008 "Idempotency") como exemplo aplicado.
 
 ## Multi-tenancy — regra crítica
 

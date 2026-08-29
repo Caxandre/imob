@@ -21,7 +21,8 @@ tenant context (`X-Tenant-Id`) enquanto isso.
 - Fastify
 - PostgreSQL + Drizzle ORM
 - Zod (validação de configuração)
-- Redis + BullMQ (infraestrutura instalada; sem filas de negócio ainda)
+- Redis + BullMQ (fila `tenant-provisioning`, fila `media-processing`)
+- Sharp (geração de variantes de imagem — thumbnail/card/detail)
 - Pino (logging estruturado)
 - OpenAPI/Swagger
 - Vitest
@@ -95,24 +96,33 @@ Drizzle registra as migrations já aplicadas e ignora as que não estão pendent
 pnpm dev                      # API HTTP
 pnpm dev:dispatcher           # dispatcher de provisioning
 pnpm dev:provisioning-worker  # worker de provisioning
+pnpm dev:media-dispatcher     # dispatcher de outbox de mídia
+pnpm dev:media-worker         # worker de processamento de imagens (sharp)
 ```
 
-Três processos independentes, cada um sem acesso à memória dos outros — a mesma topologia
-real usada em produção. **Limitação conhecida**: `pnpm dev` e `pnpm dev:provisioning-worker`
-não compartilham `SecretStore` entre si (cada um tem sua própria instância em memória, vazia
-no início) — um secret de tenant escrito pelo worker durante o provisioning não fica visível
-para a API rodando neste modo. Isso é esperado até existir um `SecretStore` de produção real
-(ADR-004) ou outro mecanismo de compartilhamento seguro. Neste modo, tanto a linha em
-`database_clusters` quanto o secret administrativo do cluster continuam exigindo bootstrap
-manual (nenhum bootstrap automático existe fora de `pnpm dev:full`, ver abaixo). Use o modo
-integrado abaixo para testar rotas de domínio (`/api/v1/properties`) manualmente contra um
-tenant provisionado localmente.
+Cinco processos independentes, cada um sem acesso à memória dos outros — a mesma topologia
+real usada em produção. **Limitação conhecida**: `pnpm dev`, `pnpm dev:provisioning-worker`,
+`pnpm dev:media-dispatcher` e `pnpm dev:media-worker` não compartilham `SecretStore` entre si
+(cada um tem sua própria instância em memória, vazia no início) — um secret de tenant escrito
+pelo worker de provisioning durante o provisioning não fica visível para a API, para o
+dispatcher de outbox de mídia, nem para o worker de processamento de imagens rodando neste
+modo (os três últimos precisam resolver a credencial de aplicação de cada tenant para abrir seu
+Tenant Data Plane). `pnpm dev:dispatcher` (o dispatcher de *provisioning*) é a única exceção —
+ele só toca Control Plane + Redis, nunca uma credencial de tenant, então não tem esse problema.
+Isso é esperado até existir um `SecretStore` de produção real (ADR-004) ou outro mecanismo de
+compartilhamento seguro. Neste modo, tanto a linha em `database_clusters` quanto o secret
+administrativo do cluster continuam exigindo bootstrap manual (nenhum bootstrap automático
+existe fora de `pnpm dev:full`, ver abaixo). Use o modo integrado abaixo para testar rotas de
+domínio (`/api/v1/properties`) manualmente contra um tenant provisionado localmente, incluindo
+o processamento real de mídia.
 
 ### Desenvolvimento integrado (só para testes manuais locais)
 
 ```bash
-pnpm dev:full          # API + provisioning worker no mesmo processo, SecretStore compartilhado
-pnpm dev:dispatcher     # continua processo separado
+pnpm dev:full          # API + provisioning worker + media outbox dispatcher +
+                        # media processing worker, todos no mesmo processo,
+                        # SecretStore compartilhado
+pnpm dev:dispatcher     # continua processo separado (nunca precisa de SecretStore)
 ```
 
 `pnpm dev:full` existe **somente como conveniência de desenvolvimento local**, até o
@@ -221,7 +231,18 @@ Swagger UI (com pnpm dev:full em execução)
   → Properties → DELETE /api/v1/properties/{id}/media/{mediaId} → Try it out
     → preencher X-Tenant-Id, o id e o mediaId (sem corpo) → Execute → conferir 204; GET na
       galeria mostra as posições restantes reindexadas sem buracos, e — se a mídia removida era
-      a capa — a nova posição 0 vira a nova capa automaticamente
+      a capa — a nova posição 0 vira a nova capa automaticamente (original e toda variante já
+      gerada são removidos do R2 também, best-effort, após o commit — ver ADR-007 "Delete")
+```
+
+Logo após o upload, `GET .../media` mostra `"processing_status": "PROCESSING"`. Com
+`pnpm dev:full` (que já inclui o dispatcher de outbox de mídia e o worker de processamento —
+ver acima), em poucos segundos o mesmo `GET` deve mostrar `"processing_status": "READY"` — as
+variantes (`THUMBNAIL`/`CARD`/`DETAIL`, WebP) já foram geradas e enviadas ao R2 nesse meio
+tempo, mesmo que ainda não apareçam no corpo da resposta (variantes não são expostas via HTTP
+nesta tarefa). Um original que o `sharp` não consegue decodificar (ou que excede o limite de
+pixels configurado) termina como `"processing_status": "FAILED"` em vez de `"READY"` — nunca
+fica preso em `"PROCESSING"` indefinidamente.
 ```
 
 `X-Tenant-Id` é **temporário** — um mecanismo de desenvolvimento/integração enquanto
@@ -272,10 +293,14 @@ R2_PUBLIC_URL
   deve conter valores reais, só os nomes das variáveis.
 - Desde o Prompt 027, `POST /api/v1/properties/{id}/media` é o consumidor real — ver a seção
   "Testando Properties" acima.
-- Processamento assíncrono de imagem (thumbnails/variantes via `sharp` + BullMQ) tem sua
-  arquitetura definida em
-  [ADR-008](docs/architecture/adr/ADR-008-asynchronous-property-image-processing.md) — ainda
-  **não implementado** (nenhuma variante é gerada hoje).
+- Processamento assíncrono de imagem (thumbnails/variantes via `sharp` + BullMQ) está
+  **implementado** — ver
+  [ADR-008](docs/architecture/adr/ADR-008-asynchronous-property-image-processing.md) e
+  [ADR-009](docs/architecture/adr/ADR-009-multi-tenant-outbox-dispatch.md) para a arquitetura
+  completa. Toda mídia enviada gera automaticamente as variantes `THUMBNAIL`/`CARD`/`DETAIL`
+  (WebP) no mesmo bucket R2 do original, via `pnpm dev:media-dispatcher` +
+  `pnpm dev:media-worker` (ou `pnpm dev:full`, que já inclui os dois) — as variantes ainda não
+  são expostas em nenhuma resposta HTTP (só `processing_status`).
 
 Teste de integração real (opcional, nunca roda em CI): ver
 `src/infrastructure/object-storage/cloudflare-r2-object-storage.integration.test.ts` —
@@ -293,14 +318,20 @@ pnpm start
 | Comando           | Descrição                                  |
 | ------------------ | -------------------------------------------- |
 | `pnpm dev`         | Sobe a API em modo desenvolvimento (watch)   |
-| `pnpm dev:full`    | DEV-ONLY: API + provisioning worker no mesmo processo, SecretStore compartilhado |
+| `pnpm dev:full`    | DEV-ONLY: API + provisioning worker + media outbox dispatcher + media processing worker no mesmo processo, SecretStore compartilhado |
 | `pnpm dev:dispatcher` | Sobe o dispatcher de provisioning (watch)  |
 | `pnpm dev:provisioning-worker` | Sobe o worker de provisioning isolado (watch) |
+| `pnpm dev:media-dispatcher` | Sobe o dispatcher de outbox de mídia isolado (watch) |
+| `pnpm dev:media-worker` | Sobe o worker de processamento de imagens (`sharp`) isolado (watch) |
 | `pnpm db:generate` | Gera migration a partir do schema do Control Plane |
 | `pnpm db:migrate`  | Aplica migrations pendentes do Control Plane |
 | `pnpm tenant-db:generate` | Gera migration a partir do schema do Tenant Data Plane |
 | `pnpm build`       | Compila TypeScript para `dist/`              |
 | `pnpm start`       | Executa o build de produção                  |
+| `pnpm start:dispatcher` | Executa o build de produção do dispatcher de provisioning |
+| `pnpm start:provisioning-worker` | Executa o build de produção do worker de provisioning |
+| `pnpm start:media-dispatcher` | Executa o build de produção do dispatcher de outbox de mídia |
+| `pnpm start:media-worker` | Executa o build de produção do worker de processamento de imagens |
 | `pnpm typecheck`   | Verifica tipos sem gerar output              |
 | `pnpm lint`        | Executa o ESLint                             |
 | `pnpm format`      | Formata o código com Prettier                |
