@@ -1,0 +1,52 @@
+name: Frontend CI
+
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+
+jobs:
+  build:
+    name: typecheck / lint / test / build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Must run before setup-node so that `cache: pnpm` can find pnpm.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+
+      - run: pnpm lint
+
+      # No backend/infra dependency (this task, section 72) — env validation needs
+      # VITE_API_URL to exist, so tests supply a throwaway value; no real network call is ever
+      # made (apiFetch's own tests stub `fetch`).
+      - run: pnpm test
+        env:
+          VITE_API_URL: http://localhost:3000
+
+      - run: pnpm build
+        env:
+          VITE_API_URL: http://localhost:3000
