@@ -8,6 +8,7 @@ import type { ObjectStorage } from "../infrastructure/object-storage/object-stor
 import { propertyRoutes } from "../modules/properties/http/property-routes.js";
 import {
   createPropertyRequestSchema,
+  propertyListItemSchema,
   propertyListSchema,
   propertyMediaListSchema,
   propertyMediaSchema,
@@ -124,6 +125,7 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(createPropertyRequestSchema);
   app.addSchema(updatePropertyRequestSchema);
   app.addSchema(propertySchema);
+  app.addSchema(propertyListItemSchema);
   app.addSchema(propertyListSchema);
   app.addSchema(propertyMediaSchema);
   app.addSchema(propertyMediaListSchema);

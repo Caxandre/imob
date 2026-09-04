@@ -1,4 +1,4 @@
-import type { Property } from "../domain/property.js";
+import type { PropertyWithCover } from "../domain/property-cover.js";
 import type { ListPropertiesInput, PropertyRepository } from "./property-repository.js";
 
 export type { ListPropertiesInput };
@@ -11,7 +11,7 @@ export interface ListPropertiesPagination {
 }
 
 export interface ListPropertiesOutput {
-  data: Property[];
+  data: PropertyWithCover[];
   pagination: ListPropertiesPagination;
 }
 

@@ -104,6 +104,11 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   variantes, mas nunca podem expor object-storage keys (do original ou de qualquer variante) —
   são detalhe interno de armazenamento, nunca parte do contrato público. Ver
   `toPropertyMediaResponse`/`toVariantResponse` (Prompt 035) como exemplo aplicado.
+- Respostas de catálogo de propriedade podem incluir uma projeção resumida da mídia de capa
+  (`cover`), mas essa projeção nunca pode exigir uma query de mídia por propriedade (nunca N+1)
+  nem expor object-storage keys. Ver `loadCoversByPropertyIds`/`toPropertyCoverResponse`
+  (Prompt 037A) como exemplo aplicado — número fixo de queries por página, apenas
+  `thumbnail`/`card` (nunca `detail`, que o catálogo não precisa).
 
 ## Multi-tenancy — regra crítica
 

@@ -1,3 +1,4 @@
+import type { PropertyWithCover } from "../domain/property-cover.js";
 import type { Property, PropertyStatus, PropertyType, TransactionType } from "../domain/property.js";
 
 export interface CreatePropertyInput {
@@ -82,7 +83,7 @@ export interface ListPropertiesInput {
 }
 
 export interface ListPropertiesResult {
-  data: Property[];
+  data: PropertyWithCover[];
   total: number;
 }
 
@@ -123,6 +124,8 @@ export interface UpdatePropertyInput {
  */
 export interface PropertyRepository {
   create(input: CreatePropertyInput): Promise<Property>;
+  /** Each item includes a summarized cover media (Prompt 037A) — see `PropertyWithCover`. Loads
+   * it with a fixed number of queries per page, never one per property (never N+1). */
   list(input: ListPropertiesInput): Promise<ListPropertiesResult>;
   findById(id: string): Promise<Property | undefined>;
   /** Returns `undefined` when no property with that id exists — never throws for "not found". */

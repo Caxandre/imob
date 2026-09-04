@@ -260,6 +260,54 @@ describe("OpenAPI specification", () => {
     }
   });
 
+  it("documents PropertyList items with a nullable cover exposing only thumbnail/card, never detail (Prompt 037A)", () => {
+    const spec = getSpec();
+
+    interface VariantSlotSchema {
+      nullable?: boolean;
+      properties?: Record<string, unknown>;
+      required?: string[];
+    }
+    const listItem = spec.components?.schemas?.PropertyListItem as
+      | {
+          properties?: {
+            cover?: {
+              nullable?: boolean;
+              properties?: {
+                variants?: { properties?: Record<string, VariantSlotSchema>; required?: string[] };
+              };
+              required?: string[];
+            };
+          };
+          required?: string[];
+        }
+      | undefined;
+
+    expect(listItem?.required).toContain("cover");
+    const cover = listItem?.properties?.cover;
+    expect(cover?.nullable).toBe(true);
+    expect(cover?.required).toEqual(
+      expect.arrayContaining(["id", "public_url", "processing_status", "variants"]),
+    );
+
+    const variants = cover?.properties?.variants;
+    // Exactly thumbnail/card — detail is never part of this projection (section 5/46).
+    expect(variants?.required).toEqual(["thumbnail", "card"]);
+    expect(Object.keys(variants?.properties ?? {})).not.toContain("detail");
+    for (const key of ["thumbnail", "card"] as const) {
+      expect(variants?.properties?.[key]?.nullable).toBe(true);
+    }
+
+    // The single-item Property schema (create/get/patch/archive) never carries cover — this
+    // enrichment is exclusive to the list endpoint (section 23/24).
+    const singleProperty = spec.components?.schemas?.Property as { properties?: Record<string, unknown> } | undefined;
+    expect(Object.keys(singleProperty?.properties ?? {})).not.toContain("cover");
+
+    const list = spec.paths["/api/v1/properties"]?.get;
+    const listResponse = list?.responses?.["200"] as { content?: Record<string, unknown> } | undefined;
+    expect(listResponse).toBeDefined();
+  });
+
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
     const spec = getSpec();
 
@@ -275,6 +323,7 @@ describe("OpenAPI specification", () => {
         "CreatePropertyRequest",
         "UpdatePropertyRequest",
         "Property",
+        "PropertyListItem",
         "PropertyList",
         "PropertyMedia",
         "PropertyMediaList",

@@ -208,12 +208,102 @@ export const propertySchema = {
   examples: [EXAMPLE_PROPERTY],
 } as const;
 
+/**
+ * One processed rendition (Prompt 035) — `null` when this slot has no
+ * `property_media_variants` row yet (section 7/8/9: `PROCESSING`, `FAILED`, or a "legacy READY"
+ * media from before Prompt 032's worker ever ran). Deliberately excludes `id`/
+ * `property_media_id`/`object_key`/`created_at`/`updated_at` (section 11) — a public rendition
+ * DTO, never a row dump. `url` (not `public_url`, section 12) distinguishes a variant's own URL
+ * from the original media's `public_url` at the top level. `mime_type` is whatever the worker
+ * actually persisted (currently always `image/webp`, ADR-008) — never hardcoded here (section
+ * 27). Reused by both `PropertyMedia.variants` (thumbnail/card/detail) and
+ * `PropertyListItem.cover.variants` (thumbnail/card only, Prompt 037A) — the exact same shape,
+ * never duplicated.
+ */
+const VARIANT_PROPERTY = {
+  type: "object",
+  nullable: true,
+  properties: {
+    url: { type: "string", format: "uri" },
+    mime_type: { type: "string" },
+    width: { type: "integer", minimum: 1 },
+    height: { type: "integer", minimum: 1 },
+    size_bytes: { type: "integer", minimum: 1 },
+  },
+  required: ["url", "mime_type", "width", "height", "size_bytes"],
+} as const;
+
+const EXAMPLE_PROPERTY_COVER = {
+  id: "3b1f6e2a-8c9d-4f7a-9e3b-2d1a5c8f0e11",
+  public_url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a....jpg",
+  processing_status: "READY",
+  variants: {
+    thumbnail: {
+      url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a.../thumbnail.webp",
+      mime_type: "image/webp",
+      width: 320,
+      height: 213,
+      size_bytes: 12_345,
+    },
+    card: {
+      url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a.../card.webp",
+      mime_type: "image/webp",
+      width: 640,
+      height: 426,
+      size_bytes: 23_456,
+    },
+  },
+} as const;
+
+/**
+ * `GET /api/v1/properties` items only (Prompt 037A) — never `Property` itself (create/get/
+ * patch/archive responses, section 23/24): those never carry `cover`. Reuses `VARIANT_PROPERTY`
+ * for `thumbnail`/`card` — deliberately **not** `detail` (section 5): the catalog never needs
+ * the largest rendition, only enough to render a grid card. `cover` is `null` exactly when the
+ * property has no `property_media` row yet (section 34) — never an artificial object. Never
+ * includes `object_key`/`position`/`original_filename`/timestamps of the underlying media row
+ * (section 6) — a minimal summary, not a row dump. See `drizzle-property-repository.ts` for how
+ * `cover` is selected (`is_cover` first, then `position ASC, id ASC` fallback) and loaded
+ * (fixed number of queries per page, never one per property).
+ */
+export const propertyListItemSchema = {
+  $id: "PropertyListItem",
+  title: "PropertyListItem",
+  type: "object",
+  description: "A property as returned by the list endpoint — Property's own fields plus a summarized cover media.",
+  properties: {
+    ...propertySchema.properties,
+    cover: {
+      type: "object",
+      nullable: true,
+      description: "null when this property has no media yet.",
+      properties: {
+        id: { type: "string", format: "uuid" },
+        public_url: { type: "string", format: "uri" },
+        processing_status: { type: "string", enum: ["PROCESSING", "READY", "FAILED"] },
+        variants: {
+          type: "object",
+          description: "Only thumbnail/card — never detail (the catalog never needs it).",
+          properties: {
+            thumbnail: VARIANT_PROPERTY,
+            card: VARIANT_PROPERTY,
+          },
+          required: ["thumbnail", "card"],
+        },
+      },
+      required: ["id", "public_url", "processing_status", "variants"],
+    },
+  },
+  required: [...propertySchema.required, "cover"],
+  examples: [{ ...EXAMPLE_PROPERTY, cover: EXAMPLE_PROPERTY_COVER }],
+} as const;
+
 export const propertyListSchema = {
   $id: "PropertyList",
   title: "PropertyList",
   type: "object",
   properties: {
-    data: { type: "array", items: { $ref: "Property#" } },
+    data: { type: "array", items: { $ref: "PropertyListItem#" } },
     pagination: {
       type: "object",
       properties: {
@@ -228,7 +318,7 @@ export const propertyListSchema = {
   required: ["data", "pagination"],
   examples: [
     {
-      data: [EXAMPLE_PROPERTY],
+      data: [{ ...EXAMPLE_PROPERTY, cover: EXAMPLE_PROPERTY_COVER }],
       pagination: { page: 1, limit: DEFAULT_PAGE_LIMIT, total: 1, total_pages: 1 },
     },
   ],
@@ -240,29 +330,6 @@ const EXAMPLE_PROPERTY_MEDIA_VARIANT = {
   width: 320,
   height: 213,
   size_bytes: 12_345,
-} as const;
-
-/**
- * One processed rendition (Prompt 035) — `null` when this slot has no
- * `property_media_variants` row yet (section 7/8/9: `PROCESSING`, `FAILED`, or a "legacy READY"
- * media from before Prompt 032's worker ever ran). Deliberately excludes `id`/
- * `property_media_id`/`object_key`/`created_at`/`updated_at` (section 11) — a public rendition
- * DTO, never a row dump. `url` (not `public_url`, section 12) distinguishes a variant's own URL
- * from the original media's `public_url` at the top level. `mime_type` is whatever the worker
- * actually persisted (currently always `image/webp`, ADR-008) — never hardcoded here (section
- * 27).
- */
-const VARIANT_PROPERTY = {
-  type: "object",
-  nullable: true,
-  properties: {
-    url: { type: "string", format: "uri" },
-    mime_type: { type: "string" },
-    width: { type: "integer", minimum: 1 },
-    height: { type: "integer", minimum: 1 },
-    size_bytes: { type: "integer", minimum: 1 },
-  },
-  required: ["url", "mime_type", "width", "height", "size_bytes"],
 } as const;
 
 const EXAMPLE_PROPERTY_MEDIA = {

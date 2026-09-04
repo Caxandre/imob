@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, gte, ilike, lte, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, type SQL, sql } from "drizzle-orm";
 
-import { properties } from "../../../infrastructure/database/tenant/schema.js";
+import { propertyMedia, propertyMediaVariants, properties } from "../../../infrastructure/database/tenant/schema.js";
 import type { TenantDatabase } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
+import type { PropertyCover, PropertyCoverVariantSet, PropertyWithCover } from "../domain/property-cover.js";
 import type { Property } from "../domain/property.js";
 import type {
   CreatePropertyInput,
@@ -13,6 +14,7 @@ import type {
   SortOrder,
   UpdatePropertyInput,
 } from "../application/property-repository.js";
+import { toPropertyMediaVariant } from "./drizzle-property-media-repository.js";
 
 /**
  * `filters.query` → a parameterized `websearch_to_tsquery('portuguese', ...)` expression, built
@@ -114,6 +116,81 @@ function buildPropertyOrderBy(sort: PropertySort, order: SortOrder, filters: Pro
   return [order === "asc" ? asc(column) : desc(column), idOrder];
 }
 
+/**
+ * Loads one summarized cover media per property id, with a fixed number of queries regardless
+ * of how many properties are on the page — never one query per property (Prompt 037A, sections
+ * 15/16/62). `propertyIds.length === 0` short-circuits before any query at all (section 33/63:
+ * an empty page of results skips cover lookup entirely).
+ *
+ * Query 1 (this function's own): exactly one candidate `property_media` row per property —
+ * `is_cover DESC, position ASC, id ASC` selects the explicit cover when one exists, and falls
+ * back deterministically to the first-by-position media otherwise (sections 7/8/18/19) — never
+ * assumes `is_cover` is always set correctly. Expressed as a `ROW_NUMBER() OVER (PARTITION BY
+ * property_id ...)` subquery, filtered to `rank = 1` outside it (window functions cannot be
+ * referenced in the same query's own `WHERE`).
+ *
+ * Query 2: `THUMBNAIL`/`CARD` variants only (section 5/20 — never `DETAIL`), for exactly the
+ * cover media ids just selected — never a query per media, and skipped entirely when no
+ * property in this batch has any media at all (section 33).
+ */
+async function loadCoversByPropertyIds(
+  db: TenantDatabase,
+  propertyIds: readonly string[],
+): Promise<Map<string, PropertyCover>> {
+  const covers = new Map<string, PropertyCover>();
+  if (propertyIds.length === 0) return covers;
+
+  const rankedMedia = db
+    .select({
+      propertyId: propertyMedia.propertyId,
+      mediaId: propertyMedia.id,
+      publicUrl: propertyMedia.publicUrl,
+      processingStatus: propertyMedia.processingStatus,
+      rank: sql<number>`row_number() over (
+        partition by ${propertyMedia.propertyId}
+        order by ${propertyMedia.isCover} desc, ${propertyMedia.position} asc, ${propertyMedia.id} asc
+      )`.as("rank"),
+    })
+    .from(propertyMedia)
+    .where(inArray(propertyMedia.propertyId, propertyIds as string[]))
+    .as("ranked_cover_media");
+
+  const coverRows = await db.select().from(rankedMedia).where(eq(rankedMedia.rank, 1));
+  if (coverRows.length === 0) return covers;
+
+  const coverMediaIds = coverRows.map((row) => row.mediaId);
+  const variantRows = await db
+    .select()
+    .from(propertyMediaVariants)
+    .where(
+      and(
+        inArray(propertyMediaVariants.propertyMediaId, coverMediaIds),
+        inArray(propertyMediaVariants.variant, ["THUMBNAIL", "CARD"]),
+      ),
+    );
+
+  // Grouped by property_media_id in memory (section 21) — never dependent on row order.
+  const variantsByMediaId = new Map<string, PropertyCoverVariantSet>();
+  for (const row of variantRows) {
+    const variant = toPropertyMediaVariant(row);
+    const bucket = variantsByMediaId.get(variant.propertyMediaId) ?? { thumbnail: null, card: null };
+    if (variant.variant === "THUMBNAIL") bucket.thumbnail = variant;
+    else if (variant.variant === "CARD") bucket.card = variant;
+    variantsByMediaId.set(variant.propertyMediaId, bucket);
+  }
+
+  for (const row of coverRows) {
+    covers.set(row.propertyId, {
+      id: row.mediaId,
+      publicUrl: row.publicUrl,
+      processingStatus: row.processingStatus,
+      variants: variantsByMediaId.get(row.mediaId) ?? { thumbnail: null, card: null },
+    });
+  }
+
+  return covers;
+}
+
 function toProperty(row: typeof properties.$inferSelect): Property {
   return {
     id: row.id,
@@ -169,7 +246,16 @@ export function createDrizzlePropertyRepository(db: TenantDatabase): PropertyRep
         db.select({ count: sql<string>`count(*)` }).from(properties).where(whereClause),
       ]);
 
-      return { data: data.map(toProperty), total: Number(totalRows[0]?.count ?? 0) };
+      // Cover enrichment never touches the count query above, and never changes `data`'s
+      // ordering — it only attaches a `cover` to rows already selected/ordered/paginated by
+      // the two queries above (this task, sections 26/27/28).
+      const covers = await loadCoversByPropertyIds(db, data.map((row) => row.id));
+      const withCover: PropertyWithCover[] = data.map((row) => ({
+        ...toProperty(row),
+        cover: covers.get(row.id) ?? null,
+      }));
+
+      return { data: withCover, total: Number(totalRows[0]?.count ?? 0) };
     },
 
     async findById(id: string): Promise<Property | undefined> {
