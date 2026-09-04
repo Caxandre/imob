@@ -22,6 +22,7 @@ import { createDrizzleTenantRepository } from "../modules/tenants/infrastructure
 import { tenantRoutes } from "../modules/tenants/http/tenant-routes.js";
 import {
   createTenantRequestSchema,
+  tenantDetailsSchema,
   tenantListItemSchema,
   tenantListSchema,
   tenantSchema,
@@ -119,6 +120,7 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(tenantSchema);
   app.addSchema(tenantListItemSchema);
   app.addSchema(tenantListSchema);
+  app.addSchema(tenantDetailsSchema);
   app.addSchema(createPropertyRequestSchema);
   app.addSchema(updatePropertyRequestSchema);
   app.addSchema(propertySchema);

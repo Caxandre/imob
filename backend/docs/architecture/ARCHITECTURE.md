@@ -495,6 +495,43 @@ API administrativa, não à API pública por tenant (`X-Tenant-Id`) — mas nenh
 aplicada a ela ainda, e nenhum mecanismo temporário (`X-Admin-Id` ou similar) foi inventado
 para simular uma. A ausência é uma lacuna conhecida e documentada, não mascarada.
 
+### Tenant administrative details — IMPLEMENTED (Prompt 034)
+
+```http
+GET /api/v1/tenants/{id}
+```
+
+Visão operacional de **um** tenant, lida exclusivamente do Control Plane — mesma proibição de
+tocar o Tenant Data Plane da listagem acima. Duas consultas fixas por request, nunca
+proporcionais a nada (seção 18 do prompt, `O(1)` queries):
+
+```text
+1) tenants LEFT JOIN tenant_databases LEFT JOIN database_clusters   (mesmo JOIN da listagem, para o :id)
+2) provisioning_jobs WHERE tenant_id = :id ORDER BY created_at DESC, id DESC LIMIT 1
+```
+
+A segunda consulta é deliberadamente separada, não um terceiro `LEFT JOIN` — um tenant pode ter
+muitos jobs históricos, e um JOIN multiplicaria a linha do tenant por job (ou exigiria um
+lateral join menos óbvio só para "dizer que existe uma query só"); `ORDER BY ... LIMIT 1` já é
+`O(1)`, nunca proporcional ao histórico. `latestProvisioningJob` é `null` quando o tenant não
+tem nenhum `provisioning_jobs` ainda; `database` é `null` nas mesmas condições da listagem —
+nenhum dos dois causa 404 (só um `:id` inexistente causa).
+
+`database` aqui inclui `createdAt`/`updatedAt` (diferente do item da listagem, que não inclui) —
+diferença deliberada de contrato entre os dois endpoints, cada um documentado no seu próprio
+schema OpenAPI (`TenantListItem` vs `TenantDetails`). `latestProvisioningJob` expõe apenas
+`id`/`type`/`status`/`createdAt`/`updatedAt`/`dispatchedAt`/`startedAt`/`finishedAt`/
+`errorMessage` — nunca os campos internos de dispatch/execução (`dispatch_claimed_at`,
+`dispatch_lease_until`, `execution_token`, `execution_heartbeat_at`, `execution_lease_until`,
+`attempts`, `current_step`): esta é uma resposta administrativa, não um dump da tabela (seção
+14 do prompt). `errorMessage` é incluído porque o schema já o modela como um resumo curto e
+seguro de falha (nunca stack trace/erro de SQL bruto — ver o comentário do próprio schema em
+`infrastructure/database/control-plane/schema.ts`).
+
+Mesma ausência de segredo/credencial (`secret_reference`, senha, `host`/`port`, connection
+string) e mesma autorização administrativa `PLANNED` da listagem acima — ver os dois parágrafos
+anteriores, válidos igualmente para este endpoint.
+
 ## Tenant Data Plane
 
 Cada tenant possui seu **próprio database PostgreSQL exclusivo**. Ver

@@ -60,6 +60,7 @@ describe("OpenAPI specification", () => {
       expect.arrayContaining([
         "/health",
         "/api/v1/tenants",
+        "/api/v1/tenants/{id}",
         "/api/v1/properties",
         "/api/v1/properties/{id}",
         "/api/v1/properties/{id}/media",
@@ -106,6 +107,23 @@ describe("OpenAPI specification", () => {
       .filter((param) => param.in === "query")
       .map((param) => param.name);
     expect(queryParamNames).toEqual(expect.arrayContaining(["page", "limit", "status", "q"]));
+  });
+
+  it("documents GET /api/v1/tenants/{id} with a uuid path param and 200/400/404/500 responses", () => {
+    const spec = getSpec();
+    const operation = spec.paths["/api/v1/tenants/{id}"]?.get;
+
+    expect(operation).toBeDefined();
+    expect(operation?.operationId).toBe("getTenantDetails");
+    expect(operation?.tags).toEqual(["Tenants"]);
+    expect(Object.keys(operation?.responses ?? {})).toEqual(
+      expect.arrayContaining(["200", "400", "404", "500"]),
+    );
+
+    const pathParamNames = (operation?.parameters ?? [])
+      .filter((param) => param.in === "path")
+      .map((param) => param.name);
+    expect(pathParamNames).toEqual(["id"]);
   });
 
   it("documents the Properties routes with the temporary X-Tenant-Id header and expected responses", () => {
@@ -221,6 +239,7 @@ describe("OpenAPI specification", () => {
         "Tenant",
         "TenantListItem",
         "TenantList",
+        "TenantDetails",
         "CreatePropertyRequest",
         "UpdatePropertyRequest",
         "Property",

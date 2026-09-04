@@ -1,4 +1,5 @@
-import type { TenantDatabaseSummary } from "./tenant-database-summary.js";
+import type { TenantDatabaseDetails, TenantDatabaseSummary } from "./tenant-database-summary.js";
+import type { ProvisioningJobSummary } from "./tenant-provisioning-job-summary.js";
 
 export type TenantStatus = "PROVISIONING" | "READY" | "FAILED" | "SUSPENDED";
 
@@ -26,6 +27,18 @@ export interface TenantListItem extends Tenant {
   database: TenantDatabaseSummary | null;
 }
 
+/**
+ * A tenant as returned by the administrative details endpoint (Prompt 034) — the plain
+ * `Tenant` plus its database (with timestamps, unlike the listing's summary) and its most
+ * recent provisioning job. Both are `null` exactly when no corresponding row exists yet (this
+ * task, sections 8/13) — never an artificial/synthesized object, and never a 404 just because
+ * one of these is absent (only a missing tenant itself is a 404).
+ */
+export interface TenantDetails extends Tenant {
+  database: TenantDatabaseDetails | null;
+  latestProvisioningJob: ProvisioningJobSummary | null;
+}
+
 /** Raised when a tenant with the same slug already exists. Maps to HTTP 409 at the edge. */
 export class TenantSlugAlreadyExistsError extends Error {
   readonly slug: string;
@@ -34,5 +47,16 @@ export class TenantSlugAlreadyExistsError extends Error {
     super(`A tenant with slug "${slug}" already exists`);
     this.name = "TenantSlugAlreadyExistsError";
     this.slug = slug;
+  }
+}
+
+/** Raised when no tenant with the given id exists. Maps to HTTP 404 at the edge. */
+export class TenantNotFoundError extends Error {
+  readonly tenantId: string;
+
+  constructor(tenantId: string) {
+    super(`Tenant "${tenantId}" was not found`);
+    this.name = "TenantNotFoundError";
+    this.tenantId = tenantId;
   }
 }

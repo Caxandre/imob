@@ -1,4 +1,4 @@
-import type { Tenant, TenantListItem, TenantStatus } from "../domain/tenant.js";
+import type { Tenant, TenantDetails, TenantListItem, TenantStatus } from "../domain/tenant.js";
 
 export interface CreateTenantInput {
   name: string;
@@ -34,9 +34,15 @@ export interface ListTenantsResult {
  * row) as a single atomic operation — see `create-tenant.ts`. `list` reads exclusively from the
  * Control Plane (`tenants` LEFT JOIN `tenant_databases` LEFT JOIN `database_clusters`, this
  * task, sections 11/12/31) — it never opens a connection to any tenant's own database.
+ * `findDetailsById` (Prompt 034) likewise reads exclusively from the Control Plane — the same
+ * joins as `list`, plus the tenant's most recent `provisioning_jobs` row (`created_at DESC, id
+ * DESC`, section 12) — always O(1) queries per call, never proportional to a tenant's job
+ * history (section 18).
  */
 export interface TenantRepository {
   /** Throws {@link TenantSlugAlreadyExistsError} when the slug is taken. */
   createWithProvisioningIntent(input: CreateTenantInput): Promise<Tenant>;
   list(input: ListTenantsInput): Promise<ListTenantsResult>;
+  /** Returns `null` when no tenant with that id exists — never throws for "not found". */
+  findDetailsById(id: string): Promise<TenantDetails | null>;
 }
