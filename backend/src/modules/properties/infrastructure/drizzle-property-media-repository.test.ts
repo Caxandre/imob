@@ -290,6 +290,138 @@ describe("createDrizzlePropertyMediaRepository", () => {
     });
   });
 
+  describe("variants (Prompt 035)", () => {
+    function sampleVariantInput(
+      propertyMediaId: string,
+      overrides: Partial<typeof tenantSchema.propertyMediaVariants.$inferInsert> = {},
+    ) {
+      const suffix = randomUUID();
+      return {
+        propertyMediaId,
+        variant: "THUMBNAIL" as const,
+        objectKey: `tenants/test-tenant/properties/prop/${propertyMediaId}/${suffix}.webp`,
+        publicUrl: `https://public-base.example/${suffix}.webp`,
+        mimeType: "image/webp",
+        width: 320,
+        height: 213,
+        sizeBytes: 12_345,
+        ...overrides,
+      };
+    }
+
+    it("create() returns an empty variant set without querying property_media_variants", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+
+      expect(media.variants).toEqual({ thumbnail: null, card: null, detail: null });
+    });
+
+    it("listByProperty groups a fully-processed media's three variants by fixed key", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+      await db.insert(tenantSchema.propertyMediaVariants).values([
+        sampleVariantInput(media.id, { variant: "THUMBNAIL", width: 320 }),
+        sampleVariantInput(media.id, { variant: "CARD", width: 640 }),
+        sampleVariantInput(media.id, { variant: "DETAIL", width: 1280 }),
+      ]);
+
+      const [listed] = await mediaRepository.listByProperty(property.id);
+
+      expect(listed?.variants.thumbnail?.width).toBe(320);
+      expect(listed?.variants.card?.width).toBe(640);
+      expect(listed?.variants.detail?.width).toBe(1280);
+    });
+
+    it("listByProperty returns an empty variant set for media with zero variant rows — never throws", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      await mediaRepository.create(sampleMediaInput(property.id));
+
+      const [listed] = await mediaRepository.listByProperty(property.id);
+
+      expect(listed?.variants).toEqual({ thumbnail: null, card: null, detail: null });
+    });
+
+    it("never associates one media's variants with another — grouping is keyed by property_media_id, not row order", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      const mediaA = await mediaRepository.create(sampleMediaInput(property.id));
+      const mediaB = await mediaRepository.create(sampleMediaInput(property.id));
+      // Inserted in an order that would trip up a naive "assume row order matches media order"
+      // grouping strategy — B's variant first, A's second.
+      await db.insert(tenantSchema.propertyMediaVariants).values([
+        sampleVariantInput(mediaB.id, { variant: "CARD", width: 999 }),
+        sampleVariantInput(mediaA.id, { variant: "THUMBNAIL", width: 111 }),
+      ]);
+
+      const list = await mediaRepository.listByProperty(property.id);
+      const byId = new Map(list.map((media) => [media.id, media.variants]));
+
+      expect(byId.get(mediaA.id)?.thumbnail?.width).toBe(111);
+      expect(byId.get(mediaA.id)?.card).toBeNull();
+      expect(byId.get(mediaB.id)?.card?.width).toBe(999);
+      expect(byId.get(mediaB.id)?.thumbnail).toBeNull();
+    });
+
+    it("never exposes id/propertyMediaId/objectKey/createdAt/updatedAt on the mapped variant DTO fields the HTTP layer reads", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+      await db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(media.id));
+
+      const [listed] = await mediaRepository.listByProperty(property.id);
+      const thumbnail = listed?.variants.thumbnail;
+
+      // The domain object itself still carries these (internal use, e.g. delete) — this
+      // confirms the fields the HTTP mapper (`toVariantResponse`) actually reads are exactly
+      // the public five, never assuming the repository already stripped anything.
+      expect(thumbnail).toMatchObject({ mimeType: "image/webp", width: 320, height: 213, sizeBytes: 12_345 });
+      expect(typeof thumbnail?.publicUrl).toBe("string");
+    });
+
+    it("setCover carries the media's existing variants forward unchanged", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      const media = await mediaRepository.create(sampleMediaInput(property.id));
+      await db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(media.id, { variant: "THUMBNAIL", width: 320 }));
+
+      const updated = await mediaRepository.setCover(property.id, media.id);
+
+      expect(updated.variants.thumbnail?.width).toBe(320);
+    });
+
+    it("reorder carries every media's existing variants forward unchanged", async () => {
+      const db = await createMigratedTenantDatabase();
+      const propertyRepository = createDrizzlePropertyRepository(db);
+      const mediaRepository = createDrizzlePropertyMediaRepository(db);
+      const property = await propertyRepository.create(samplePropertyInput());
+      const first = await mediaRepository.create(sampleMediaInput(property.id));
+      const second = await mediaRepository.create(sampleMediaInput(property.id));
+      await db.insert(tenantSchema.propertyMediaVariants).values(sampleVariantInput(first.id, { variant: "CARD", width: 640 }));
+
+      const reordered = await mediaRepository.reorder(property.id, [second.id, first.id]);
+
+      const byId = new Map(reordered.map((media) => [media.id, media.variants]));
+      expect(byId.get(first.id)?.card?.width).toBe(640);
+      expect(byId.get(second.id)?.card).toBeNull();
+    });
+  });
+
   describe("reorder", () => {
     it("reassigns positions to match the submitted order, leaving isCover untouched", async () => {
       const db = await createMigratedTenantDatabase();

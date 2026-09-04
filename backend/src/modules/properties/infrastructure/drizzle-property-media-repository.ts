@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { outboxEvents, properties, propertyMedia, propertyMediaVariants } from "../../../infrastructure/database/tenant/schema.js";
 import type { TenantDatabase } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
@@ -7,7 +7,19 @@ import {
   PROPERTY_MEDIA_PROCESSING_REQUESTED_EVENT_TYPE,
   type PropertyMediaProcessingRequestedPayload,
 } from "../domain/property-media-processing-event.js";
-import { PropertyMediaNotFoundError, PropertyMediaReorderMismatchError, type PropertyMedia, type PropertyMediaMimeType } from "../domain/property-media.js";
+import {
+  PropertyMediaNotFoundError,
+  PropertyMediaReorderMismatchError,
+  type PropertyMedia,
+  type PropertyMediaMimeType,
+  type PropertyMediaWithVariants,
+} from "../domain/property-media.js";
+import {
+  emptyPropertyMediaVariantSet,
+  toPropertyMediaVariantSet,
+  type PropertyMediaVariant,
+  type PropertyMediaVariantSet,
+} from "../domain/property-media-variant.js";
 import type {
   CreatePropertyMediaInput,
   DeletePropertyMediaResult,
@@ -35,6 +47,59 @@ function toPropertyMedia(row: typeof propertyMedia.$inferSelect): PropertyMedia 
   };
 }
 
+function toPropertyMediaVariant(row: typeof propertyMediaVariants.$inferSelect): PropertyMediaVariant {
+  return {
+    id: row.id,
+    propertyMediaId: row.propertyMediaId,
+    variant: row.variant,
+    objectKey: row.objectKey,
+    publicUrl: row.publicUrl,
+    mimeType: row.mimeType,
+    width: row.width,
+    height: row.height,
+    sizeBytes: row.sizeBytes,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/**
+ * Loads every variant row for a batch of media ids in one query — never one query per media
+ * (Prompt 035, sections 13-15): a single `SELECT ... WHERE property_media_id IN (...)`, grouped
+ * in memory afterward. `mediaIds.length === 0` short-circuits without a round trip (an empty
+ * property, or a call sized for the empty gallery). The returned `Map` has an entry for every
+ * requested id — including ones with zero variant rows, mapped to `emptyPropertyMediaVariantSet()`
+ * — so callers never need an extra `?? emptyPropertyMediaVariantSet()` at each use site.
+ */
+async function loadVariantSetsByMediaIds(
+  db: TenantDatabase,
+  mediaIds: readonly string[],
+): Promise<Map<string, PropertyMediaVariantSet>> {
+  const sets = new Map<string, PropertyMediaVariantSet>();
+  for (const id of mediaIds) sets.set(id, emptyPropertyMediaVariantSet());
+
+  if (mediaIds.length === 0) return sets;
+
+  const rows = await db
+    .select()
+    .from(propertyMediaVariants)
+    .where(inArray(propertyMediaVariants.propertyMediaId, mediaIds as string[]));
+
+  const byMediaId = new Map<string, PropertyMediaVariant[]>();
+  for (const row of rows) {
+    const variant = toPropertyMediaVariant(row);
+    const bucket = byMediaId.get(variant.propertyMediaId);
+    if (bucket) bucket.push(variant);
+    else byMediaId.set(variant.propertyMediaId, [variant]);
+  }
+
+  for (const [mediaId, variants] of byMediaId) {
+    sets.set(mediaId, toPropertyMediaVariantSet(variants));
+  }
+
+  return sets;
+}
+
 /** Row-locks the parent property — every mutating method below starts with this, inside its own
  * transaction, so concurrent calls for the same property always serialize (Prompt 028, sections
  * 14/16/21/27/43). The row is assumed to exist: the application layer
@@ -52,7 +117,7 @@ async function lockProperty(tx: TenantDatabase, propertyId: string): Promise<voi
  */
 export function createDrizzlePropertyMediaRepository(db: TenantDatabase): PropertyMediaRepository {
   return {
-    async create(input: CreatePropertyMediaInput): Promise<PropertyMedia> {
+    async create(input: CreatePropertyMediaInput): Promise<PropertyMediaWithVariants> {
       const row = await db.transaction(async (tx) => {
         // Row-locks the parent property (this task, section 16) — every concurrent upload for
         // the same property serializes on this lock before computing the next position, so two
@@ -107,10 +172,13 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
         return inserted;
       });
 
-      return toPropertyMedia(row);
+      // A media row that was just inserted in this same call can only have zero variant rows —
+      // the worker cannot possibly have run yet — so this is a plain empty set, never a query
+      // (this task, section 18/46).
+      return { ...toPropertyMedia(row), variants: emptyPropertyMediaVariantSet() };
     },
 
-    async listByProperty(propertyId: string): Promise<PropertyMedia[]> {
+    async listByProperty(propertyId: string): Promise<PropertyMediaWithVariants[]> {
       const rows = await db
         .select()
         .from(propertyMedia)
@@ -119,10 +187,17 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
         // position)` already makes an actual position tie impossible.
         .orderBy(asc(propertyMedia.position), asc(propertyMedia.id));
 
-      return rows.map(toPropertyMedia);
+      // One extra query for every media's variants combined, never one per media (this task,
+      // sections 14/15/45) — O(1) relative to the gallery size (two queries total, always).
+      const variantSets = await loadVariantSetsByMediaIds(db, rows.map((row) => row.id));
+
+      return rows.map((row) => ({
+        ...toPropertyMedia(row),
+        variants: variantSets.get(row.id) ?? emptyPropertyMediaVariantSet(),
+      }));
     },
 
-    async reorder(propertyId: string, mediaIds: string[]): Promise<PropertyMedia[]> {
+    async reorder(propertyId: string, mediaIds: string[]): Promise<PropertyMediaWithVariants[]> {
       const rows = await db.transaction(async (tx) => {
         await lockProperty(tx, propertyId);
 
@@ -177,10 +252,17 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
           .orderBy(asc(propertyMedia.position), asc(propertyMedia.id));
       });
 
-      return rows.map(toPropertyMedia);
+      // Outside the transaction, same reasoning as `listByProperty` — reordering never creates
+      // or destroys variant rows, so this read needs no lock (this task, section 15/17).
+      const variantSets = await loadVariantSetsByMediaIds(db, rows.map((row) => row.id));
+
+      return rows.map((row) => ({
+        ...toPropertyMedia(row),
+        variants: variantSets.get(row.id) ?? emptyPropertyMediaVariantSet(),
+      }));
     },
 
-    async setCover(propertyId: string, mediaId: string): Promise<PropertyMedia> {
+    async setCover(propertyId: string, mediaId: string): Promise<PropertyMediaWithVariants> {
       const row = await db.transaction(async (tx) => {
         await lockProperty(tx, propertyId);
 
@@ -213,7 +295,11 @@ export function createDrizzlePropertyMediaRepository(db: TenantDatabase): Proper
         return updated;
       });
 
-      return toPropertyMedia(row);
+      // setCover never creates/destroys variant rows either — a single-media lookup, same
+      // batch helper reused with an array of one (this task, section 26).
+      const variantSets = await loadVariantSetsByMediaIds(db, [row.id]);
+
+      return { ...toPropertyMedia(row), variants: variantSets.get(row.id) ?? emptyPropertyMediaVariantSet() };
     },
 
     async delete(propertyId: string, mediaId: string): Promise<DeletePropertyMediaResult> {

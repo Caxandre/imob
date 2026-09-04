@@ -1187,8 +1187,9 @@ Cross-tenant discovery            = IMPLEMENTED  (Prompt 031 — TenantDiscovery
 Sharp image processing            = IMPLEMENTED  (Prompt 032 — ver abaixo)
 Media processing worker           = IMPLEMENTED  (Prompt 032 — ver abaixo)
 THUMBNAIL/CARD/DETAIL generation  = IMPLEMENTED  (Prompt 032)
-Media variant HTTP exposure       = PLANNED
+Media variant HTTP exposure       = IMPLEMENTED  (Prompt 035 — ver abaixo)
 Orphan reconciliation             = PLANNED
+Signed/private media URLs         = PLANNED
 ```
 
 ```text
@@ -1253,8 +1254,8 @@ implementou o worker real (ver abaixo).
   resposta de `PropertyMedia`: `POST .../media` continua exatamente como no Prompt 027/028;
   `property_media.object_key` de mídia já existente (formato `.../<mediaId>.<ext>`, sem
   subpasta) permanece válido — variantes futuras usam o prefixo `.../<mediaId>/`, sem exigir
-  reorganização de keys existentes. Nenhuma rota nova; `property_media_variants` não é exposta
-  em nenhuma resposta HTTP ainda.
+  reorganização de keys existentes. Nenhuma rota nova nesta etapa; `property_media_variants`
+  ainda não era exposta em nenhuma resposta HTTP — isso mudou no Prompt 035 (ver abaixo).
 
 **IMPLEMENTED** (Prompt 031) — dispatcher multi-tenant de outbox de mídia, arquitetura completa
 em [ADR-009](adr/ADR-009-multi-tenant-outbox-dispatch.md). Resolve a pendência que o Prompt 030
@@ -1410,10 +1411,41 @@ primeiro job) — `pnpm dev:full` agora também compõe este runtime, compartilh
 `SecretStore`.
 
 **Fora do escopo do Prompt 032** (deliberado): exposição HTTP das variantes (`processing_status`
-já era exposto desde o Prompt 030; URLs de `THUMBNAIL`/`CARD`/`DETAIL` continuam PLANNED),
-reconciliação de objetos órfãos no R2 (originais e variantes — continua PLANNED, keys
-determinísticas reduzem o impacto mas não eliminam o problema), `processing_version`/
-reprocessamento sob demanda.
+já era exposto desde o Prompt 030; URLs de `THUMBNAIL`/`CARD`/`DETAIL` eram PLANNED —
+implementadas no Prompt 035, ver abaixo), reconciliação de objetos órfãos no R2 (originais e
+variantes — continua PLANNED, keys determinísticas reduzem o impacto mas não eliminam o
+problema), `processing_version`/reprocessamento sob demanda.
+
+### Media variant HTTP exposure — IMPLEMENTED (Prompt 035)
+
+`PropertyMedia` (toda resposta HTTP que carrega mídia — `POST`/`GET .../media`,
+`PUT .../media/order`, `PATCH .../media/{mediaId}/cover`) ganhou `variants`, um objeto fixo com
+exatamente três chaves — `thumbnail`/`card`/`detail` — nunca um array genérico (seção 6 do
+prompt: tipos conhecidos, contrato previsível, sem o frontend precisar varrer um enum). Cada
+chave é `null` até a variante correspondente existir (`PROCESSING`, `FAILED`, ou uma mídia
+"legacy READY" migrada pelo Prompt 030 antes de qualquer worker rodar — seção 9: a API nunca
+assume que `READY` garante variantes) ou um objeto `{url, mime_type, width, height, size_bytes}`
+— nunca `id`/`property_media_id`/`object_key`/`created_at`/`updated_at` da linha de variante
+(seção 11). `url` (não `public_url`, seção 12) distingue a URL de uma variante da `public_url`
+do próprio original no nível superior. Sem fallback automático para o original
+(`variants.thumbnail.url` nunca vira `public_url` quando ausente, seção 10) e sem
+`variants.original` (seção 64) — o frontend escolhe explicitamente qual usar.
+
+```text
+PropertyMediaRepository.create()                 → variants sempre {null,null,null}
+                                                     (mídia recém-criada não pode ter variantes)
+PropertyMediaRepository.listByProperty()/reorder() → 1 query para as media + 1 query para
+                                                       TODAS as variantes dessas media
+                                                       (WHERE property_media_id IN (...)),
+                                                       agrupadas em memória — nunca 1 query por
+                                                       media (seções 13-15/45)
+PropertyMediaRepository.setCover()                → mesma estratégia, lote de 1 id
+```
+
+Nenhuma chamada ao R2 (`GetObject`/`HeadObject`/signed URL) durante leitura — as URLs já estão
+persistidas em `property_media_variants.public_url` (seções 20/21); banco é a única fonte de
+metadados, reconciliação de órfãos continua fora de escopo. Nenhuma rota nova, nenhuma migration
+(schema já existia desde o Prompt 030), nenhuma dependência nova.
 
 ## Princípios
 

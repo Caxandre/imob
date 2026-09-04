@@ -2,8 +2,8 @@
 
 ## Status
 
-Aceito. Implementação: **IMPLEMENTED** (Prompt 032) — processamento real de imagem com `sharp`,
-ponta a ponta. Histórico:
+Aceito. Implementação: **IMPLEMENTED** (Prompt 032 — processamento real de imagem com `sharp`,
+ponta a ponta; Prompt 035 — exposição HTTP das variantes). Histórico:
 
 - **Prompt 029 — PLANNED / DESIGNED**: esta ADR definiu a arquitetura; nenhum código de
   processamento de imagem foi implementado naquela tarefa. `sharp` era o provider escolhido,
@@ -25,6 +25,12 @@ ponta a ponta. Histórico:
   implementação real, não mais apenas o plano — os valores concretos (limite de pixels,
   qualidade WebP, tentativas/backoff) usados em produção estão registrados onde antes só havia
   uma sugestão.
+- **Prompt 035 — IMPLEMENTED**: Media variant HTTP exposure — antes **PLANNED**, agora real.
+  `PropertyMedia` ganhou `variants` (objeto fixo `thumbnail`/`card`/`detail`, nunca um array
+  genérico), cada chave `null` até a variante existir, ou `{url, mime_type, width, height,
+  size_bytes}` — nunca `id`/`object_key`/timestamps da linha. Sem fallback automático para o
+  original quando uma variante está ausente. Ver ARCHITECTURE.md "Media variant HTTP exposure"
+  para os detalhes completos.
 
 ## Context
 
@@ -448,11 +454,10 @@ worker deve impor um limite explícito de **pixels de entrada** (ex.: via `sharp
 imagens gigantes simultaneamente também deve ser evitado — outra razão para a concorrência do
 worker ser configurada deliberadamente, não deixada no default.
 
-## Public API strategy
+## Public API strategy — RESOLVIDO (Prompt 035)
 
-Não implementado nesta tarefa. Avaliado, sem fechar o contrato HTTP aqui: a resposta de
-`property_media` (ou uma projeção equivalente) precisará, no futuro, expor `processing_status`
-e alguma forma de referenciar as variantes disponíveis — por exemplo:
+Implementado. A especulação original desta seção (uma string bruta por variante, `"thumbnail":
+"..."`) foi refinada para um objeto com metadados, não só a URL — o formato real:
 
 ```json
 {
@@ -460,17 +465,22 @@ e alguma forma de referenciar as variantes disponíveis — por exemplo:
   "public_url": "...",
   "processing_status": "READY",
   "variants": {
-    "thumbnail": "...",
-    "card": "...",
-    "detail": "..."
+    "thumbnail": { "url": "...", "mime_type": "image/webp", "width": 320, "height": 213, "size_bytes": 12345 },
+    "card": { "url": "...", "mime_type": "image/webp", "width": 640, "height": 426, "size_bytes": 23456 },
+    "detail": { "url": "...", "mime_type": "image/webp", "width": 1280, "height": 853, "size_bytes": 45678 }
   }
 }
 ```
 
-ou uma forma equivalente (array em vez de objeto por chave). Essa decisão de contrato HTTP fica
-para o Prompt que implementar o processamento real, com o benefício de já ter um modelo de dados
-(`property_media_variants`) e uma constraint (`UNIQUE(property_media_id, variant)`) definidos
-aqui para se apoiar.
+Objeto fixo de três chaves (nunca um array) — decisão explícita a favor de tipos conhecidos e
+consumo previsível pelo frontend, sobre a alternativa "array de variantes" também cogitada
+aqui. Cada chave é `null` até a variante existir; nunca omitida. **Sem fallback automático para
+o original** quando uma variante está ausente — `variants.thumbnail.url` nunca vira
+`public_url` silenciosamente; o frontend decide explicitamente. Nunca expõe
+`id`/`property_media_id`/`object_key`/timestamps da linha de variante — só o necessário para
+renderizar. Ver ARCHITECTURE.md "Media variant HTTP exposure" para a estratégia de query (duas
+consultas O(1), nunca N+1) e `property-routes.ts`/`property-openapi.schema.ts` para a
+implementação.
 
 **Cover** continua referenciando `property_media` diretamente (Prompt 028) — nunca uma variant
 específica; o frontend decide qual variant exibir para qualquer contexto (incluindo a capa).

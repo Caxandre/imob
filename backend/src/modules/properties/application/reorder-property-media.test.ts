@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { PropertyMedia } from "../domain/property-media.js";
+import type { PropertyMediaWithVariants } from "../domain/property-media.js";
+import { emptyPropertyMediaVariantSet } from "../domain/property-media-variant.js";
 import { PropertyNotFoundError, type Property } from "../domain/property.js";
 import { reorderPropertyMedia } from "./reorder-property-media.js";
 import type { PropertyMediaRepository } from "./property-media-repository.js";
@@ -29,7 +30,7 @@ const FAKE_PROPERTY: Property = {
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 };
 
-const FAKE_MEDIA: PropertyMedia = {
+const FAKE_MEDIA: PropertyMediaWithVariants = {
   id: "22222222-2222-4222-8222-222222222222",
   propertyId: FAKE_PROPERTY.id,
   objectKey: "tenants/tenant-1/properties/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.jpg",
@@ -42,6 +43,7 @@ const FAKE_MEDIA: PropertyMedia = {
   processingStatus: "PROCESSING",
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+  variants: emptyPropertyMediaVariantSet(),
 };
 
 function fakePropertyRepository(overrides: Partial<PropertyRepository> = {}): PropertyRepository {

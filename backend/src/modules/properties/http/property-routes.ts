@@ -22,7 +22,12 @@ import { reorderPropertyMedia } from "../application/reorder-property-media.js";
 import { setPropertyMediaCover } from "../application/set-property-media-cover.js";
 import { updateProperty } from "../application/update-property.js";
 import { uploadPropertyMedia } from "../application/upload-property-media.js";
-import { ALLOWED_PROPERTY_MEDIA_MIME_TYPES, isAllowedPropertyMediaMimeType, type PropertyMedia } from "../domain/property-media.js";
+import {
+  ALLOWED_PROPERTY_MEDIA_MIME_TYPES,
+  isAllowedPropertyMediaMimeType,
+  type PropertyMediaWithVariants,
+} from "../domain/property-media.js";
+import type { PropertyMediaVariant } from "../domain/property-media-variant.js";
 import type { Property } from "../domain/property.js";
 import { createDrizzlePropertyMediaRepository } from "../infrastructure/drizzle-property-media-repository.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
@@ -74,9 +79,26 @@ function toPropertyResponse(property: Property) {
 }
 
 /** `object_key` deliberately never appears here — internal storage detail, not public API
- * contract (this task, section 44). `public_url` is the persisted value from the upload, never
- * recomputed on read. */
-function toPropertyMediaResponse(media: PropertyMedia) {
+ * contract (Prompt 027, section 44; Prompt 035, section 5: same rule now applies to every
+ * variant's own `object_key`, never exposed either). `id`/`property_media_id`/`created_at`/
+ * `updated_at` of the variant row are likewise never serialized (Prompt 035, section 11) — this
+ * is a public rendition DTO, not a database row dump. */
+function toVariantResponse(variant: PropertyMediaVariant) {
+  return {
+    url: variant.publicUrl,
+    mime_type: variant.mimeType,
+    width: variant.width,
+    height: variant.height,
+    size_bytes: variant.sizeBytes,
+  };
+}
+
+/** `public_url` is the persisted value from the upload, never recomputed on read. `variants`
+ * always carries exactly the three fixed keys (Prompt 035, section 6/7) — `null` for any variant
+ * not yet processed (or, for a "legacy READY" media from before Prompt 032's worker existed,
+ * possibly never processed at all, section 9) — never omitted, never a fallback to the
+ * original's own `public_url` (section 10). */
+function toPropertyMediaResponse(media: PropertyMediaWithVariants) {
   return {
     id: media.id,
     property_id: media.propertyId,
@@ -89,6 +111,11 @@ function toPropertyMediaResponse(media: PropertyMedia) {
     processing_status: media.processingStatus,
     created_at: media.createdAt.toISOString(),
     updated_at: media.updatedAt.toISOString(),
+    variants: {
+      thumbnail: media.variants.thumbnail ? toVariantResponse(media.variants.thumbnail) : null,
+      card: media.variants.card ? toVariantResponse(media.variants.card) : null,
+      detail: media.variants.detail ? toVariantResponse(media.variants.detail) : null,
+    },
   };
 }
 

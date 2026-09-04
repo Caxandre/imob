@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { Client, escapeIdentifier } from "pg";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -33,6 +33,10 @@ import { createPostgresTenantRoleProvisioner } from "../../provisioning/infrastr
 import { createInMemorySecretStore } from "../../provisioning/test-support/in-memory-secret-store.js";
 import type { Tenant } from "../../tenants/domain/tenant.js";
 import { createDrizzleTenantRepository } from "../../tenants/infrastructure/drizzle-tenant-repository.js";
+import type { TenantDatabase } from "../../tenant-runtime/application/tenant-database-connection-manager.js";
+import { createDrizzleTenantDatabaseResolver } from "../../tenant-runtime/infrastructure/drizzle-tenant-database-resolver.js";
+import { createPgTenantDatabaseConnectionManager } from "../../tenant-runtime/infrastructure/pg-tenant-database-connection-manager.js";
+import * as tenantSchema from "../../../infrastructure/database/tenant/schema.js";
 
 /**
  * Full HTTP integration tests, real infrastructure throughout (this task, sections 44-51):
@@ -164,6 +168,31 @@ async function provisionReadyTenant(slugPrefix: string, secretStore: SecretStore
   }
 
   return tenant;
+}
+
+/**
+ * Direct access to a real, already-provisioned tenant's own database (this task, sections 37-44)
+ * — never through the HTTP API, since nothing in this codebase's automated tests runs the real
+ * media processing worker (Prompt 032) to actually produce `property_media_variants` rows.
+ * Reuses the exact same resolver/connection-manager pieces `buildTestApp()` builds internally
+ * (never a second, parallel mechanism) — just constructed once more here so the test itself can
+ * seed/inspect rows the HTTP layer would never let it write directly.
+ */
+async function withTenantDb<T>(
+  secretStore: SecretStore,
+  tenantId: string,
+  fn: (db: TenantDatabase) => Promise<T>,
+): Promise<T> {
+  const resolver = createDrizzleTenantDatabaseResolver(controlPlaneDb);
+  const connectionManager = createPgTenantDatabaseConnectionManager({
+    credentialResolver: createTenantDatabaseCredentialResolver(secretStore),
+  });
+  try {
+    const target = await resolver.resolve(tenantId);
+    return await connectionManager.withTenantDatabase(target, fn);
+  } finally {
+    await connectionManager.close();
+  }
 }
 
 function samplePayload(overrides: Record<string, unknown> = {}) {
@@ -1223,6 +1252,26 @@ describe("Properties HTTP routes", () => {
       }
     });
 
+    it("returns variants with all three keys null — a new upload always starts PROCESSING (section 46)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-upload-variants", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+
+        const response = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        expect(response.statusCode).toBe(201);
+        const body = response.json();
+        expect(body.processing_status).toBe("PROCESSING");
+        expect(body.variants).toEqual({ thumbnail: null, card: null, detail: null });
+      } finally {
+        await app.close();
+      }
+    });
+
     it("assigns sequential positions across successive uploads to the same property", async () => {
       const { secretStore } = await setupCluster();
       const tenant = await provisionReadyTenant("media-position", secretStore);
@@ -1568,6 +1617,256 @@ describe("Properties HTTP routes", () => {
 
         expect(response.statusCode).toBe(200);
         expect(response.json().data.map((m: { id: string }) => m.id)).toEqual([uploaded.json().id]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    async function insertVariant(
+      db: TenantDatabase,
+      mediaId: string,
+      variant: "THUMBNAIL" | "CARD" | "DETAIL",
+      overrides: Partial<{ width: number; height: number; sizeBytes: number }> = {},
+    ) {
+      const suffix = variant.toLowerCase();
+      await db.insert(tenantSchema.propertyMediaVariants).values({
+        propertyMediaId: mediaId,
+        variant,
+        objectKey: `tenants/x/properties/y/${mediaId}/${suffix}.webp`,
+        publicUrl: `https://public-base.example/${mediaId}/${suffix}.webp`,
+        mimeType: "image/webp",
+        width: overrides.width ?? 320,
+        height: overrides.height ?? 213,
+        sizeBytes: overrides.sizeBytes ?? 12_345,
+      });
+    }
+
+    it("returns thumbnail/card/detail all null while PROCESSING (section 37)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-processing", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+
+        expect(response.json().data[0].processing_status).toBe("PROCESSING");
+        expect(response.json().data[0].variants).toEqual({ thumbnail: null, card: null, detail: null });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns all three variants with full metadata for a fully READY media (section 38/42)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-ready", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const mediaId = uploaded.json().id;
+
+        await withTenantDb(secretStore, tenant.id, async (db) => {
+          await insertVariant(db, mediaId, "THUMBNAIL", { width: 320, height: 213, sizeBytes: 12_345 });
+          await insertVariant(db, mediaId, "CARD", { width: 640, height: 426, sizeBytes: 23_456 });
+          await insertVariant(db, mediaId, "DETAIL", { width: 1280, height: 853, sizeBytes: 45_678 });
+          await db
+            .update(tenantSchema.propertyMedia)
+            .set({ processingStatus: "READY" })
+            .where(eq(tenantSchema.propertyMedia.id, mediaId));
+        });
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const media = response.json().data[0];
+
+        expect(media.processing_status).toBe("READY");
+        expect(media.variants.thumbnail).toMatchObject({ mime_type: "image/webp", width: 320, height: 213, size_bytes: 12_345 });
+        expect(typeof media.variants.thumbnail.url).toBe("string");
+        expect(media.variants.card).toMatchObject({ width: 640, height: 426, size_bytes: 23_456 });
+        expect(media.variants.detail).toMatchObject({ width: 1280, height: 853, size_bytes: 45_678 });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns all-null variants for a legacy READY media with zero variant rows, never 500 (section 39)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-legacy", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const mediaId = uploaded.json().id;
+
+        // Simulates the Prompt 030 backfill: READY, but zero property_media_variants rows.
+        await withTenantDb(secretStore, tenant.id, (db) =>
+          db.update(tenantSchema.propertyMedia).set({ processingStatus: "READY" }).where(eq(tenantSchema.propertyMedia.id, mediaId)),
+        );
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+
+        expect(response.statusCode).toBe(200);
+        const media = response.json().data[0];
+        expect(media.processing_status).toBe("READY");
+        expect(media.variants).toEqual({ thumbnail: null, card: null, detail: null });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns a partial variant set (thumbnail + detail only, card null) without failing (section 40)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-partial", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const mediaId = uploaded.json().id;
+
+        await withTenantDb(secretStore, tenant.id, async (db) => {
+          await insertVariant(db, mediaId, "THUMBNAIL");
+          await insertVariant(db, mediaId, "DETAIL");
+          await db.update(tenantSchema.propertyMedia).set({ processingStatus: "READY" }).where(eq(tenantSchema.propertyMedia.id, mediaId));
+        });
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const media = response.json().data[0];
+
+        expect(response.statusCode).toBe(200);
+        expect(media.variants.thumbnail).not.toBeNull();
+        expect(media.variants.card).toBeNull();
+        expect(media.variants.detail).not.toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("returns all-null variants for a FAILED media (section 41)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-failed", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const mediaId = uploaded.json().id;
+
+        await withTenantDb(secretStore, tenant.id, (db) =>
+          db.update(tenantSchema.propertyMedia).set({ processingStatus: "FAILED" }).where(eq(tenantSchema.propertyMedia.id, mediaId)),
+        );
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const media = response.json().data[0];
+
+        expect(response.statusCode).toBe(200);
+        expect(media.processing_status).toBe("FAILED");
+        expect(media.variants).toEqual({ thumbnail: null, card: null, detail: null });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("never includes object_key/objectKey anywhere in the response, including per-variant (section 43/48)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-no-key", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const mediaId = uploaded.json().id;
+
+        await withTenantDb(secretStore, tenant.id, async (db) => {
+          await insertVariant(db, mediaId, "THUMBNAIL");
+          await db.update(tenantSchema.propertyMedia).set({ processingStatus: "READY" }).where(eq(tenantSchema.propertyMedia.id, mediaId));
+        });
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const raw = JSON.stringify(response.json());
+
+        expect(raw).not.toContain("object_key");
+        expect(raw).not.toContain("objectKey");
+        // Every internal identifier of the variant row itself (id/property_media_id/
+        // created_at/updated_at) is likewise absent — only the fixed public DTO shape.
+        expect(response.json().data[0].variants.thumbnail).toEqual({
+          url: expect.any(String),
+          mime_type: "image/webp",
+          width: 320,
+          height: 213,
+          size_bytes: 12_345,
+        });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("associates each variant with the correct media across multiple media (section 44)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("media-variants-multi", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const first = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const second = await uploadPropertyMediaRequest(app, tenant.id, propertyId, buildMultipartUpload({ content: PNG_BYTES, contentType: "image/png" }));
+        const firstId = first.json().id;
+        const secondId = second.json().id;
+
+        await withTenantDb(secretStore, tenant.id, async (db) => {
+          await insertVariant(db, firstId, "THUMBNAIL", { width: 111 });
+          await insertVariant(db, secondId, "THUMBNAIL", { width: 222 });
+          await insertVariant(db, secondId, "CARD", { width: 333 });
+          await db
+            .update(tenantSchema.propertyMedia)
+            .set({ processingStatus: "READY" })
+            .where(inArray(tenantSchema.propertyMedia.id, [firstId, secondId]));
+        });
+
+        const response = await listPropertyMediaRequest(app, tenant.id, propertyId);
+        const byId = new Map(response.json().data.map((m: { id: string; variants: unknown }) => [m.id, m.variants]));
+
+        expect((byId.get(firstId) as { thumbnail: { width: number } | null; card: unknown }).thumbnail?.width).toBe(111);
+        expect((byId.get(firstId) as { card: unknown }).card).toBeNull();
+        expect((byId.get(secondId) as { thumbnail: { width: number } | null }).thumbnail?.width).toBe(222);
+        expect((byId.get(secondId) as { card: { width: number } | null }).card?.width).toBe(333);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("never leaks tenant A's variants to tenant B (section 47)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("media-variants-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("media-variants-cross-b", secretStore);
+      const app = buildTestApp(secretStore, createInMemoryObjectStorage());
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+        const uploaded = await uploadPropertyMediaRequest(app, tenantA.id, propertyId, buildMultipartUpload({ content: JPEG_BYTES }));
+        const mediaId = uploaded.json().id;
+
+        await withTenantDb(secretStore, tenantA.id, async (db) => {
+          await insertVariant(db, mediaId, "THUMBNAIL");
+          await db.update(tenantSchema.propertyMedia).set({ processingStatus: "READY" }).where(eq(tenantSchema.propertyMedia.id, mediaId));
+        });
+
+        const response = await listPropertyMediaRequest(app, tenantB.id, propertyId);
+
+        expect(response.statusCode).toBe(404);
+        expect(JSON.stringify(response.json())).not.toContain("thumbnail.webp");
       } finally {
         await app.close();
       }
