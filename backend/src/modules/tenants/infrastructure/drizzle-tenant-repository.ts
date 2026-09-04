@@ -8,7 +8,9 @@ import {
   tenants,
 } from "../../../infrastructure/database/control-plane/schema.js";
 import { isUniqueViolation } from "../../../infrastructure/database/postgres-errors.js";
-import type { TenantListItem } from "../domain/tenant.js";
+import type { TenantDatabaseClusterSummary } from "../domain/tenant-database-summary.js";
+import type { ProvisioningJobSummary } from "../domain/tenant-provisioning-job-summary.js";
+import type { TenantDetails, TenantListItem } from "../domain/tenant.js";
 import { TenantSlugAlreadyExistsError, type Tenant } from "../domain/tenant.js";
 import type {
   CreateTenantInput,
@@ -47,6 +49,7 @@ function buildTenantListConditions(filters: TenantListFilters): SQL[] {
 type TenantRow = typeof tenants.$inferSelect;
 type TenantDatabaseRow = typeof tenantDatabases.$inferSelect;
 type DatabaseClusterRow = typeof databaseClusters.$inferSelect;
+type ProvisioningJobRow = typeof provisioningJobs.$inferSelect;
 
 function toTenant(row: TenantRow): Tenant {
   return {
@@ -57,6 +60,15 @@ function toTenant(row: TenantRow): Tenant {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/**
+ * Identical shape needed by both `TenantListItem.database.cluster` (Prompt 033) and
+ * `TenantDetails.database.cluster` (Prompt 034, this task, section 26) — the one genuinely
+ * shared mapping between the two, factored out to avoid drift.
+ */
+function toClusterSummary(row: DatabaseClusterRow): TenantDatabaseClusterSummary {
+  return { id: row.id, name: row.name, provider: row.provider, region: row.region, status: row.status };
 }
 
 /**
@@ -76,17 +88,23 @@ function toTenantListItem(row: {
           status: row.database.status,
           databaseName: row.database.databaseName,
           schemaVersion: row.database.schemaVersion,
-          cluster: row.cluster
-            ? {
-                id: row.cluster.id,
-                name: row.cluster.name,
-                provider: row.cluster.provider,
-                region: row.cluster.region,
-                status: row.cluster.status,
-              }
-            : null,
+          cluster: row.cluster ? toClusterSummary(row.cluster) : null,
         }
       : null,
+  };
+}
+
+function toProvisioningJobSummary(row: ProvisioningJobRow): ProvisioningJobSummary {
+  return {
+    id: row.id,
+    type: row.type,
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    dispatchedAt: row.dispatchedAt,
+    startedAt: row.startedAt,
+    finishedAt: row.finishedAt,
+    errorMessage: row.errorMessage,
   };
 }
 
@@ -96,7 +114,9 @@ function toTenantListItem(row: {
  * database (this task, section 31). The LEFT JOINs never multiply a tenant across rows:
  * `tenant_databases.tenant_id` carries a `UNIQUE` constraint (schema.ts), so at most one
  * `tenant_databases` row — and therefore at most one `database_clusters` row, via its `NOT
- * NULL` FK — can match per tenant (this task, section 23).
+ * NULL` FK — can match per tenant (this task, section 23). `findDetailsById` (Prompt 034)
+ * reuses the same joins for one tenant, plus a second, independent query for the latest
+ * `provisioning_jobs` row — two fixed queries, never proportional to job history (section 18).
  */
 export function createDrizzleTenantRepository(db: ControlPlaneDatabase): TenantRepository {
   return {
@@ -155,6 +175,44 @@ export function createDrizzleTenantRepository(db: ControlPlaneDatabase): TenantR
       ]);
 
       return { data: rows.map(toTenantListItem), total: Number(totalRows[0]?.count ?? 0) };
+    },
+
+    async findDetailsById(id: string): Promise<TenantDetails | null> {
+      const [row] = await db
+        .select({ tenant: tenants, database: tenantDatabases, cluster: databaseClusters })
+        .from(tenants)
+        .leftJoin(tenantDatabases, eq(tenantDatabases.tenantId, tenants.id))
+        .leftJoin(databaseClusters, eq(databaseClusters.id, tenantDatabases.clusterId))
+        .where(eq(tenants.id, id));
+
+      if (!row) return null;
+
+      // Independent query, deliberately not a third JOIN (this task, section 18): a tenant may
+      // have many historical provisioning jobs, and joining them in would either multiply the
+      // single tenant row across every job or require a much less obvious lateral-join query
+      // for no real benefit — `ORDER BY ... LIMIT 1` here is already O(1), never proportional
+      // to job history (section 12: created_at DESC, id DESC, deterministic).
+      const [jobRow] = await db
+        .select()
+        .from(provisioningJobs)
+        .where(eq(provisioningJobs.tenantId, id))
+        .orderBy(desc(provisioningJobs.createdAt), desc(provisioningJobs.id))
+        .limit(1);
+
+      return {
+        ...toTenant(row.tenant),
+        database: row.database
+          ? {
+              status: row.database.status,
+              databaseName: row.database.databaseName,
+              schemaVersion: row.database.schemaVersion,
+              createdAt: row.database.createdAt,
+              updatedAt: row.database.updatedAt,
+              cluster: row.cluster ? toClusterSummary(row.cluster) : null,
+            }
+          : null,
+        latestProvisioningJob: jobRow ? toProvisioningJobSummary(jobRow) : null,
+      };
     },
   };
 }

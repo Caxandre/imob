@@ -33,3 +33,14 @@ export interface TenantDatabaseSummary {
   schemaVersion: number;
   cluster: TenantDatabaseClusterSummary | null;
 }
+
+/**
+ * `TenantDatabaseSummary` plus its own `createdAt`/`updatedAt` — the tenant details endpoint
+ * (Prompt 034, section 7) surfaces these; the listing endpoint's summary (Prompt 033) does
+ * not. Kept as a separate type rather than folding the extra fields into
+ * `TenantDatabaseSummary` itself, since the listing response shape must not change.
+ */
+export interface TenantDatabaseDetails extends TenantDatabaseSummary {
+  createdAt: Date;
+  updatedAt: Date;
+}

@@ -27,6 +27,10 @@ async function listTenantsRequest(query = "") {
   return await app.inject({ method: "GET", url: `/api/v1/tenants${query}` });
 }
 
+async function getTenantDetailsRequest(id: string) {
+  return await app.inject({ method: "GET", url: `/api/v1/tenants/${id}` });
+}
+
 async function insertTenant(
   overrides: Partial<{ name: string; slug: string; status: TenantStatus; createdAt: Date }> = {},
 ) {
@@ -80,6 +84,35 @@ async function insertTenantDatabase(
     })
     .returning();
   if (!row) throw new Error("tenant database insert returned no row");
+  return row;
+}
+
+async function insertProvisioningJob(
+  tenantId: string,
+  overrides: Partial<{
+    status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+    createdAt: Date;
+    dispatchedAt: Date | null;
+    startedAt: Date | null;
+    finishedAt: Date | null;
+    errorMessage: string | null;
+  }> = {},
+) {
+  const createdAt = overrides.createdAt;
+  const [row] = await controlPlaneDb
+    .insert(provisioningJobs)
+    .values({
+      tenantId,
+      type: "CREATE_DATABASE",
+      status: overrides.status ?? "PENDING",
+      dispatchedAt: overrides.dispatchedAt ?? null,
+      startedAt: overrides.startedAt ?? null,
+      finishedAt: overrides.finishedAt ?? null,
+      errorMessage: overrides.errorMessage ?? null,
+      ...(createdAt ? { createdAt, updatedAt: createdAt } : {}),
+    })
+    .returning();
+  if (!row) throw new Error("provisioning job insert returned no row");
   return row;
 }
 
@@ -462,5 +495,147 @@ describe("GET /api/v1/tenants", () => {
     const expectedOrder = [first.id, second.id].sort().reverse();
     expect(page1.json().data[0].id).toBe(expectedOrder[0]);
     expect(page2.json().data[0].id).toBe(expectedOrder[1]);
+  });
+});
+
+describe("GET /api/v1/tenants/:id", () => {
+  it("rejects an invalid id with 400 (section 27)", async () => {
+    const response = await getTenantDetailsRequest("not-a-uuid");
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("returns 404 for a well-formed but non-existent id (section 28)", async () => {
+    const response = await getTenantDetailsRequest("11111111-1111-4111-8111-111111111111");
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ statusCode: 404, error: "Not Found" });
+  });
+
+  it("returns a basic tenant with database:null and latestProvisioningJob:null (section 29)", async () => {
+    const tenant = await insertTenant({ name: "Acme", slug: "acme", status: "PROVISIONING" });
+
+    const response = await getTenantDetailsRequest(tenant.id);
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toMatchObject({
+      id: tenant.id,
+      name: "Acme",
+      slug: "acme",
+      status: "PROVISIONING",
+      database: null,
+      latestProvisioningJob: null,
+    });
+    expect(Date.parse(body.createdAt)).not.toBeNaN();
+    expect(Date.parse(body.updatedAt)).not.toBeNaN();
+  });
+
+  it("returns database fields (section 30)", async () => {
+    const cluster = await insertCluster();
+    const tenant = await insertTenant({ slug: "with-db", status: "READY" });
+    const database = await insertTenantDatabase(tenant.id, cluster.id, {
+      databaseName: "tenant_with_db",
+      schemaVersion: 7,
+      status: "READY",
+    });
+
+    const response = await getTenantDetailsRequest(tenant.id);
+    const body = response.json();
+
+    expect(body.database).toMatchObject({
+      status: "READY",
+      databaseName: "tenant_with_db",
+      schemaVersion: 7,
+    });
+    expect(Date.parse(body.database.createdAt)).toBe(database.createdAt.getTime());
+    expect(Date.parse(body.database.updatedAt)).toBe(database.updatedAt.getTime());
+  });
+
+  it("returns cluster fields (section 31)", async () => {
+    const cluster = await insertCluster({ name: "local-tenants", provider: "local", region: "local" });
+    const tenant = await insertTenant({ slug: "with-cluster" });
+    await insertTenantDatabase(tenant.id, cluster.id);
+
+    const response = await getTenantDetailsRequest(tenant.id);
+
+    expect(response.json().database.cluster).toEqual({
+      id: cluster.id,
+      name: "local-tenants",
+      provider: "local",
+      region: "local",
+      status: "ACTIVE",
+    });
+  });
+
+  it("returns only the latest provisioning job by created_at DESC, id DESC (section 32)", async () => {
+    const tenant = await insertTenant({ slug: "multi-job" });
+    await insertProvisioningJob(tenant.id, {
+      status: "FAILED",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      errorMessage: "first attempt failed",
+    });
+    const latest = await insertProvisioningJob(tenant.id, {
+      status: "SUCCEEDED",
+      createdAt: new Date("2026-01-02T00:00:00.000Z"),
+      dispatchedAt: new Date("2026-01-02T00:00:05.000Z"),
+      startedAt: new Date("2026-01-02T00:00:06.000Z"),
+      finishedAt: new Date("2026-01-02T00:05:00.000Z"),
+    });
+
+    const response = await getTenantDetailsRequest(tenant.id);
+    const job = response.json().latestProvisioningJob;
+
+    expect(job).toMatchObject({
+      id: latest.id,
+      type: "CREATE_DATABASE",
+      status: "SUCCEEDED",
+      errorMessage: null,
+    });
+    expect(Date.parse(job.dispatchedAt)).toBe(latest.dispatchedAt?.getTime());
+    expect(Date.parse(job.startedAt)).toBe(latest.startedAt?.getTime());
+    expect(Date.parse(job.finishedAt)).toBe(latest.finishedAt?.getTime());
+  });
+
+  it("uses id as a deterministic tie-breaker for the latest job when created_at is equal (section 33)", async () => {
+    const tenant = await insertTenant({ slug: "tie-job" });
+    const sameInstant = new Date("2026-01-01T00:00:00.000Z");
+    const first = await insertProvisioningJob(tenant.id, { createdAt: sameInstant });
+    const second = await insertProvisioningJob(tenant.id, { createdAt: sameInstant });
+
+    const response = await getTenantDetailsRequest(tenant.id);
+
+    const expectedLatestId = [first.id, second.id].sort().reverse()[0];
+    expect(response.json().latestProvisioningJob.id).toBe(expectedLatestId);
+  });
+
+  it.each(["PENDING", "RUNNING", "SUCCEEDED", "FAILED"] as const)(
+    "surfaces a provisioning job with status=%s (section 34)",
+    async (status) => {
+      const tenant = await insertTenant({ slug: `job-status-${status.toLowerCase()}` });
+      await insertProvisioningJob(tenant.id, { status });
+
+      const response = await getTenantDetailsRequest(tenant.id);
+
+      expect(response.json().latestProvisioningJob.status).toBe(status);
+    },
+  );
+
+  it("never includes secret_reference/host/port/password/credential in the response (section 35)", async () => {
+    const cluster = await insertCluster();
+    const tenant = await insertTenant({ slug: "secrets-check" });
+    await insertTenantDatabase(tenant.id, cluster.id);
+    await insertProvisioningJob(tenant.id);
+
+    const response = await getTenantDetailsRequest(tenant.id);
+    const raw = JSON.stringify(response.json());
+
+    expect(raw).not.toContain("secret_reference");
+    expect(raw).not.toContain("secretReference");
+    expect(raw.toLowerCase()).not.toContain("password");
+    expect(raw.toLowerCase()).not.toContain("credential");
+    expect(raw).not.toContain("localhost");
+    expect(raw).not.toMatch(/"host"/);
+    expect(raw).not.toMatch(/"port"/);
   });
 });

@@ -1,11 +1,21 @@
 import type { FastifyInstance } from "fastify";
 
 import { createTenant } from "../application/create-tenant.js";
+import { getTenantDetails } from "../application/get-tenant-details.js";
 import { listTenants } from "../application/list-tenants.js";
 import type { TenantRepository } from "../application/tenant-repository.js";
-import { TenantSlugAlreadyExistsError, type Tenant, type TenantListItem } from "../domain/tenant.js";
+import type { TenantDatabaseClusterSummary } from "../domain/tenant-database-summary.js";
+import type { ProvisioningJobSummary } from "../domain/tenant-provisioning-job-summary.js";
+import {
+  TenantNotFoundError,
+  TenantSlugAlreadyExistsError,
+  type Tenant,
+  type TenantDetails,
+  type TenantListItem,
+} from "../domain/tenant.js";
 import { createTenantBodySchema } from "./create-tenant.schema.js";
 import { listTenantsQuerySchema, MAX_PAGE_LIMIT } from "./list-tenants.schema.js";
+import { tenantIdParamsSchema } from "./tenant-id-params.schema.js";
 
 function toResponse(tenant: Tenant) {
   return {
@@ -18,6 +28,16 @@ function toResponse(tenant: Tenant) {
   };
 }
 
+function toClusterResponse(cluster: TenantDatabaseClusterSummary) {
+  return {
+    id: cluster.id,
+    name: cluster.name,
+    provider: cluster.provider,
+    region: cluster.region,
+    status: cluster.status,
+  };
+}
+
 function toListItemResponse(item: TenantListItem) {
   return {
     ...toResponse(item),
@@ -26,16 +46,41 @@ function toListItemResponse(item: TenantListItem) {
           status: item.database.status,
           databaseName: item.database.databaseName,
           schemaVersion: item.database.schemaVersion,
-          cluster: item.database.cluster
-            ? {
-                id: item.database.cluster.id,
-                name: item.database.cluster.name,
-                provider: item.database.cluster.provider,
-                region: item.database.cluster.region,
-                status: item.database.cluster.status,
-              }
-            : null,
+          cluster: item.database.cluster ? toClusterResponse(item.database.cluster) : null,
         }
+      : null,
+  };
+}
+
+function toProvisioningJobResponse(job: ProvisioningJobSummary) {
+  return {
+    id: job.id,
+    type: job.type,
+    status: job.status,
+    createdAt: job.createdAt.toISOString(),
+    updatedAt: job.updatedAt.toISOString(),
+    dispatchedAt: job.dispatchedAt ? job.dispatchedAt.toISOString() : null,
+    startedAt: job.startedAt ? job.startedAt.toISOString() : null,
+    finishedAt: job.finishedAt ? job.finishedAt.toISOString() : null,
+    errorMessage: job.errorMessage,
+  };
+}
+
+function toDetailsResponse(details: TenantDetails) {
+  return {
+    ...toResponse(details),
+    database: details.database
+      ? {
+          status: details.database.status,
+          databaseName: details.database.databaseName,
+          schemaVersion: details.database.schemaVersion,
+          createdAt: details.database.createdAt.toISOString(),
+          updatedAt: details.database.updatedAt.toISOString(),
+          cluster: details.database.cluster ? toClusterResponse(details.database.cluster) : null,
+        }
+      : null,
+    latestProvisioningJob: details.latestProvisioningJob
+      ? toProvisioningJobResponse(details.latestProvisioningJob)
       : null,
   };
 }
@@ -178,6 +223,64 @@ export function tenantRoutes(repository: TenantRepository) {
             total_pages: result.pagination.totalPages,
           },
         });
+      },
+    );
+
+    app.get(
+      "/tenants/:id",
+      {
+        schema: {
+          operationId: "getTenantDetails",
+          summary: "Get tenant details",
+          description:
+            "Administrative operational details for one tenant: itself, its registered " +
+            "database/cluster (null when not provisioned yet), and its most recent " +
+            "provisioning job (null when none exists) — created_at DESC, id DESC. Reads " +
+            "exclusively from the Control Plane — never opens a connection to any tenant's " +
+            "own database. Administrative authorization is PLANNED — no auth is enforced on " +
+            "this route yet.",
+          tags: ["Tenants"],
+          params: {
+            type: "object",
+            properties: { id: { type: "string", format: "uuid" } },
+            required: ["id"],
+          },
+          response: {
+            200: { description: "Tenant details", $ref: "TenantDetails#" },
+            400: { description: "Invalid id", $ref: "ErrorResponse#" },
+            404: { description: "Tenant not found", $ref: "ErrorResponse#" },
+            500: { description: "Unexpected server error", $ref: "ErrorResponse#" },
+          },
+        },
+      },
+      async (request, reply) => {
+        const parsedParams = tenantIdParamsSchema.safeParse(request.params);
+        if (!parsedParams.success) {
+          return reply.status(400).send({
+            statusCode: 400,
+            error: "Bad Request",
+            message: "Invalid tenant id",
+            details: parsedParams.error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
+          });
+        }
+
+        try {
+          const details = await getTenantDetails(repository, parsedParams.data.id);
+          return reply.send(toDetailsResponse(details));
+        } catch (error) {
+          if (error instanceof TenantNotFoundError) {
+            return reply.status(404).send({
+              statusCode: 404,
+              error: "Not Found",
+              message: error.message,
+            });
+          }
+
+          throw error;
+        }
       },
     );
   };

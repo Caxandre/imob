@@ -10,6 +10,7 @@ function fakeRepository(result: ListTenantsResult): TenantRepository {
       throw new Error("not used in this test");
     },
     list: async () => result,
+    findDetailsById: async () => null,
   };
 }
 
@@ -41,6 +42,7 @@ describe("listTenants", () => {
         received.push(input);
         return { data: [], total: 0 };
       },
+      findDetailsById: async () => null,
     };
 
     const input = sampleInput({ page: 3, limit: 50, filters: { status: "READY", query: "central" } });

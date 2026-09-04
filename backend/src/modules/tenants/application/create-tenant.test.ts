@@ -14,6 +14,7 @@ function fakeRepository(overrides: Partial<TenantRepository> = {}): TenantReposi
       updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     }),
     list: async () => ({ data: [], total: 0 }),
+    findDetailsById: async () => null,
     ...overrides,
   };
 }

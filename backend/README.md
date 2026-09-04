@@ -192,6 +192,13 @@ resumo do database/cluster associado (`database: null` enquanto o provisionament
 É uma rota administrativa do Control Plane, sem autenticação implementada ainda (ver
 `ARCHITECTURE.md`) — nunca consulta o database de nenhum tenant.
 
+Use **Tenants → GET /api/v1/tenants/{id}** para o detalhe operacional de um único tenant —
+returns Control Plane operational details for one tenant: o tenant, seu database/cluster
+(com timestamps, diferente da listagem) e seu `latestProvisioningJob` (o mais recente por
+`created_at DESC, id DESC`). `database`/`latestProvisioningJob` são `null` quando ainda não
+existem — nunca 404 por causa disso; só um `id` inexistente retorna 404. Mesma rota
+administrativa do Control Plane, mesma ausência de autenticação.
+
 ### Testando Properties (requer `pnpm dev:full` e um tenant READY)
 
 ```text
@@ -260,9 +267,10 @@ Sem `pnpm dev:full` (ou seja, com `pnpm dev` sozinho), `POST/GET /api/v1/propert
 tenant provisionado pelo worker separado falha ao resolver a credencial do tenant — ver a
 seção "Local development runtime" em `ARCHITECTURE.md`.
 
-Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` (tag
-**Tenants** — `GET` é uma listagem administrativa do Control Plane, sem autenticação ainda; ver
-`ARCHITECTURE.md`), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`,
+Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` e
+`GET /api/v1/tenants/{id}` (tag **Tenants** — ambos `GET` são administrativos, só o Control
+Plane, sem autenticação ainda; ver `ARCHITECTURE.md`), e `POST/GET /api/v1/properties`,
+`GET/PATCH/DELETE /api/v1/properties/{id}`,
 `POST/GET /api/v1/properties/{id}/media`, `PUT /api/v1/properties/{id}/media/order`,
 `PATCH /api/v1/properties/{id}/media/{mediaId}/cover`,
 `DELETE /api/v1/properties/{id}/media/{mediaId}` (tag **Properties**) — `DELETE /properties/{id}`

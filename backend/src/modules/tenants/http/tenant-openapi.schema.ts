@@ -65,6 +65,28 @@ export const tenantSchema = {
   ],
 } as const;
 
+/**
+ * Shared between `TenantListItem.database.cluster` (Prompt 033) and
+ * `TenantDetails.database.cluster` (Prompt 034) — the one piece of these two response shapes
+ * that is genuinely identical, factored out here to avoid drift (this task, section 26). Not a
+ * separate named `$ref` component: combining `nullable: true` with `$ref` is untested in this
+ * codebase's response serialization (fast-json-stringify) and not worth risking for a purely
+ * internal (non-`$id`) piece of two otherwise-different schemas.
+ */
+const CLUSTER_SUMMARY_PROPERTY = {
+  type: "object",
+  nullable: true,
+  description: "null only if the registered cluster could not be resolved.",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    name: { type: "string" },
+    provider: { type: "string" },
+    region: { type: "string" },
+    status: { type: "string", enum: ["ACTIVE", "INACTIVE"] },
+  },
+  required: ["id", "name", "provider", "region", "status"],
+} as const;
+
 const EXAMPLE_TENANT_LIST_ITEM = {
   id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   name: "Imobiliária Central",
@@ -112,19 +134,7 @@ export const tenantListItemSchema = {
         status: { type: "string", enum: ["PROVISIONING", "READY", "FAILED"] },
         databaseName: { type: "string" },
         schemaVersion: { type: "integer", minimum: 0 },
-        cluster: {
-          type: "object",
-          nullable: true,
-          description: "null only if the registered cluster could not be resolved.",
-          properties: {
-            id: { type: "string", format: "uuid" },
-            name: { type: "string" },
-            provider: { type: "string" },
-            region: { type: "string" },
-            status: { type: "string", enum: ["ACTIVE", "INACTIVE"] },
-          },
-          required: ["id", "name", "provider", "region", "status"],
-        },
+        cluster: CLUSTER_SUMMARY_PROPERTY,
       },
       required: ["status", "databaseName", "schemaVersion", "cluster"],
     },
@@ -160,4 +170,110 @@ export const tenantListSchema = {
       pagination: { page: 1, limit: DEFAULT_PAGE_LIMIT, total: 1, total_pages: 1 },
     },
   ],
+} as const;
+
+const EXAMPLE_TENANT_DETAILS = {
+  id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  name: "Imobiliária Central",
+  slug: "imobiliaria-central",
+  status: "READY",
+  createdAt: "2026-09-03T12:00:00.000Z",
+  updatedAt: "2026-09-03T12:05:00.000Z",
+  database: {
+    status: "READY",
+    databaseName: "tenant_imobiliaria_central",
+    schemaVersion: 7,
+    createdAt: "2026-09-03T12:05:00.000Z",
+    updatedAt: "2026-09-03T12:05:00.000Z",
+    cluster: {
+      id: "9c3b1f6e-2a8c-4d9f-9e3b-2d1a5c8f0e11",
+      name: "local-tenants",
+      provider: "local",
+      region: "local",
+      status: "ACTIVE",
+    },
+  },
+  latestProvisioningJob: {
+    id: "7c2e5a1b-4d6f-4a8c-b3e7-1f9a2d5c8e40",
+    type: "CREATE_DATABASE",
+    status: "SUCCEEDED",
+    createdAt: "2026-09-03T12:00:00.000Z",
+    updatedAt: "2026-09-03T12:05:00.000Z",
+    dispatchedAt: "2026-09-03T12:00:05.000Z",
+    startedAt: "2026-09-03T12:00:06.000Z",
+    finishedAt: "2026-09-03T12:05:00.000Z",
+    errorMessage: null,
+  },
+} as const;
+
+/**
+ * `GET /api/v1/tenants/{id}` (Prompt 034) — one tenant's operational state: itself, its
+ * database/cluster (with timestamps, unlike `TenantListItem`), and its most recent
+ * provisioning job. `database`/`latestProvisioningJob` are `null` exactly when no
+ * corresponding row exists yet (sections 8/13) — never a 404 just because one of them is
+ * absent (only a missing tenant itself is a 404). Never includes `secret_reference`, a
+ * password, `host`/`port`, or any other credential/connection detail (section 9/22) — same
+ * contract as `TenantListItem`. `latestProvisioningJob` deliberately excludes every internal
+ * dispatch/execution-lease field (section 14) — see `ProvisioningJobSummary` in
+ * `domain/tenant-provisioning-job-summary.ts`.
+ */
+export const tenantDetailsSchema = {
+  $id: "TenantDetails",
+  title: "TenantDetails",
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    name: { type: "string" },
+    slug: { type: "string" },
+    status: { type: "string", enum: [...TENANT_STATUSES] },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+    database: {
+      type: "object",
+      nullable: true,
+      description: "null when this tenant has no tenant_databases row yet.",
+      properties: {
+        status: { type: "string", enum: ["PROVISIONING", "READY", "FAILED"] },
+        databaseName: { type: "string" },
+        schemaVersion: { type: "integer", minimum: 0 },
+        createdAt: { type: "string", format: "date-time" },
+        updatedAt: { type: "string", format: "date-time" },
+        cluster: CLUSTER_SUMMARY_PROPERTY,
+      },
+      required: ["status", "databaseName", "schemaVersion", "createdAt", "updatedAt", "cluster"],
+    },
+    latestProvisioningJob: {
+      type: "object",
+      nullable: true,
+      description: "null when this tenant has no provisioning_jobs row yet. The most recent by created_at DESC, id DESC.",
+      properties: {
+        id: { type: "string", format: "uuid" },
+        type: { type: "string", enum: ["CREATE_DATABASE"] },
+        status: { type: "string", enum: ["PENDING", "RUNNING", "SUCCEEDED", "FAILED"] },
+        createdAt: { type: "string", format: "date-time" },
+        updatedAt: { type: "string", format: "date-time" },
+        dispatchedAt: { type: "string", format: "date-time", nullable: true },
+        startedAt: { type: "string", format: "date-time", nullable: true },
+        finishedAt: { type: "string", format: "date-time", nullable: true },
+        errorMessage: {
+          type: "string",
+          nullable: true,
+          description: "Short failure summary only — never a stack trace or raw SQL error.",
+        },
+      },
+      required: [
+        "id",
+        "type",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "dispatchedAt",
+        "startedAt",
+        "finishedAt",
+        "errorMessage",
+      ],
+    },
+  },
+  required: ["id", "name", "slug", "status", "createdAt", "updatedAt", "database", "latestProvisioningJob"],
+  examples: [EXAMPLE_TENANT_DETAILS],
 } as const;
