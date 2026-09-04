@@ -93,6 +93,21 @@ describe("OpenAPI specification", () => {
     );
   });
 
+  it("documents GET /api/v1/tenants with pagination/status/q query params and expected responses", () => {
+    const spec = getSpec();
+    const operation = spec.paths["/api/v1/tenants"]?.get;
+
+    expect(operation).toBeDefined();
+    expect(operation?.operationId).toBe("listTenants");
+    expect(operation?.tags).toEqual(["Tenants"]);
+    expect(Object.keys(operation?.responses ?? {})).toEqual(expect.arrayContaining(["200", "400", "500"]));
+
+    const queryParamNames = (operation?.parameters ?? [])
+      .filter((param) => param.in === "query")
+      .map((param) => param.name);
+    expect(queryParamNames).toEqual(expect.arrayContaining(["page", "limit", "status", "q"]));
+  });
+
   it("documents the Properties routes with the temporary X-Tenant-Id header and expected responses", () => {
     const spec = getSpec();
 
@@ -204,6 +219,8 @@ describe("OpenAPI specification", () => {
         "HealthResponse",
         "CreateTenantRequest",
         "Tenant",
+        "TenantListItem",
+        "TenantList",
         "CreatePropertyRequest",
         "UpdatePropertyRequest",
         "Property",

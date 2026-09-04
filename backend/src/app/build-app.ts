@@ -20,7 +20,12 @@ import type { TenantDatabaseConnectionManager } from "../modules/tenant-runtime/
 import { createDrizzleTenantDatabaseResolver } from "../modules/tenant-runtime/infrastructure/drizzle-tenant-database-resolver.js";
 import { createDrizzleTenantRepository } from "../modules/tenants/infrastructure/drizzle-tenant-repository.js";
 import { tenantRoutes } from "../modules/tenants/http/tenant-routes.js";
-import { createTenantRequestSchema, tenantSchema } from "../modules/tenants/http/tenant-openapi.schema.js";
+import {
+  createTenantRequestSchema,
+  tenantListItemSchema,
+  tenantListSchema,
+  tenantSchema,
+} from "../modules/tenants/http/tenant-openapi.schema.js";
 import { healthRoute } from "./routes/health.route.js";
 import { errorResponseSchema } from "./schemas/error-response.schema.js";
 import { healthResponseSchema } from "./schemas/health-response.schema.js";
@@ -112,6 +117,8 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(healthResponseSchema);
   app.addSchema(createTenantRequestSchema);
   app.addSchema(tenantSchema);
+  app.addSchema(tenantListItemSchema);
+  app.addSchema(tenantListSchema);
   app.addSchema(createPropertyRequestSchema);
   app.addSchema(updatePropertyRequestSchema);
   app.addSchema(propertySchema);

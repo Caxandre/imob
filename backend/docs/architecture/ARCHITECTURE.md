@@ -449,6 +449,52 @@ ADR-003 "Finalization". **IMPLEMENTED** (Prompt 019): recovery de jobs `RUNNING`
 (inclui o caso de crash durante a finalização) — ver "Execution lease, heartbeat e recovery"
 acima. **PLANNED**: política de retry para jobs `FAILED`.
 
+### Tenant administrative listing — IMPLEMENTED (Prompt 033)
+
+```http
+GET /api/v1/tenants
+```
+
+Listagem administrativa de tenants, lida **exclusivamente do Control Plane**
+(`src/modules/tenants/`) — nunca abre conexão com o database de nenhum tenant individual
+(seção 31/32 do Prompt 033: uma única consulta estruturada, sem N+1).
+
+```text
+tenants
+    LEFT JOIN tenant_databases ON tenant_databases.tenant_id = tenants.id
+    LEFT JOIN database_clusters ON database_clusters.id = tenant_databases.cluster_id
+```
+
+Os dois `LEFT JOIN` nunca duplicam um tenant na listagem: `tenant_databases.tenant_id` tem
+constraint `UNIQUE` (no máximo um database por tenant) e `tenant_databases.cluster_id` é uma FK
+`NOT NULL` para `database_clusters` — então, no máximo, um tenant casa com uma linha de cada
+tabela. `database` no item de resposta é `null` exatamente quando não existe
+`tenant_databases` ainda (tenant em `PROVISIONING`, por exemplo) — nunca um objeto artificial;
+`cluster` seria `null` apenas no caso defensivo de um `tenant_databases` apontar para um
+cluster não resolvido pelo JOIN, o que a FK `NOT NULL` já torna inalcançável hoje.
+
+Filtros (opcionais, combinados com AND): `status` (exato, um dos 4 valores do enum
+`tenant_status`) e `q` (substring case-insensitive via `ILIKE '%...%'` sobre `name`/`slug` —
+nunca full-text search, section 7 do prompt). Paginação: `page`/`limit` (mesma convenção já
+usada por `GET /api/v1/properties` — não `page_size`, para não introduzir um segundo padrão de
+paginação no projeto). Ordenação fixa e determinística: `created_at DESC, id DESC` — sem
+`sort` exposto nesta primeira versão.
+
+**Nunca retorna secret/credencial**: `secret_reference` (de `database_clusters` e de
+`tenant_databases`), senha, connection string — nenhum desses campos chega à porta
+`TenantRepository.list()` nem à resposta HTTP. `database_name` é devolvido (identificador
+técnico, não segredo).
+
+**Desvio do rascunho original do prompt**: o schema `tenants` não tem colunas `email`/`plan_id`
+(nunca existiram, nem no `POST /api/v1/tenants` atual). Adicioná-las exigiria uma migration —
+decisão explicitamente interrompida e confirmada com o usuário antes de prosseguir (nenhuma
+migration foi criada nesta tarefa). A busca `q` e a resposta cobrem apenas `name`/`slug`.
+
+**Autorização administrativa: PLANNED.** Esta rota pertence conceitualmente ao Control Plane/
+API administrativa, não à API pública por tenant (`X-Tenant-Id`) — mas nenhuma autenticação é
+aplicada a ela ainda, e nenhum mecanismo temporário (`X-Admin-Id` ou similar) foi inventado
+para simular uma. A ausência é uma lacuna conhecida e documentada, não mascarada.
+
 ## Tenant Data Plane
 
 Cada tenant possui seu **próprio database PostgreSQL exclusivo**. Ver
