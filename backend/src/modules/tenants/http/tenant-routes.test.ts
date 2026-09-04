@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -5,10 +7,13 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildTestApp } from "../../../app/test-support/build-test-app.js";
 import { controlPlaneDb, controlPlanePool } from "../../../infrastructure/database/control-plane/client.js";
 import {
+  databaseClusters,
   provisioningJobs,
   tenantDatabases,
   tenants,
 } from "../../../infrastructure/database/control-plane/schema.js";
+import type { DatabaseClusterStatus, TenantDatabaseStatus } from "../domain/tenant-database-summary.js";
+import type { TenantStatus } from "../domain/tenant.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -18,9 +23,69 @@ async function createTenantRequest(body: Record<string, unknown>) {
   return await app.inject({ method: "POST", url: "/api/v1/tenants", payload: body });
 }
 
+async function listTenantsRequest(query = "") {
+  return await app.inject({ method: "GET", url: `/api/v1/tenants${query}` });
+}
+
+async function insertTenant(
+  overrides: Partial<{ name: string; slug: string; status: TenantStatus; createdAt: Date }> = {},
+) {
+  const createdAt = overrides.createdAt;
+  const [row] = await controlPlaneDb
+    .insert(tenants)
+    .values({
+      name: overrides.name ?? "Tenant",
+      slug: overrides.slug ?? `tenant-${randomUUID()}`,
+      status: overrides.status ?? "READY",
+      ...(createdAt ? { createdAt, updatedAt: createdAt } : {}),
+    })
+    .returning();
+  if (!row) throw new Error("tenant insert returned no row");
+  return row;
+}
+
+async function insertCluster(
+  overrides: Partial<{ name: string; status: DatabaseClusterStatus; provider: string; region: string }> = {},
+) {
+  const [row] = await controlPlaneDb
+    .insert(databaseClusters)
+    .values({
+      name: overrides.name ?? `cluster-${randomUUID()}`,
+      status: overrides.status ?? "ACTIVE",
+      provider: overrides.provider ?? "local",
+      region: overrides.region ?? "local",
+      host: "localhost",
+      port: 5432,
+      secretReference: `clusters/${randomUUID()}`,
+    })
+    .returning();
+  if (!row) throw new Error("database cluster insert returned no row");
+  return row;
+}
+
+async function insertTenantDatabase(
+  tenantId: string,
+  clusterId: string,
+  overrides: Partial<{ status: TenantDatabaseStatus; databaseName: string; schemaVersion: number }> = {},
+) {
+  const [row] = await controlPlaneDb
+    .insert(tenantDatabases)
+    .values({
+      tenantId,
+      clusterId,
+      databaseName: overrides.databaseName ?? `tenant_${randomUUID().replace(/-/g, "_")}`,
+      secretReference: `tenants/${tenantId}`,
+      schemaVersion: overrides.schemaVersion ?? 0,
+      status: overrides.status ?? "READY",
+    })
+    .returning();
+  if (!row) throw new Error("tenant database insert returned no row");
+  return row;
+}
+
 beforeEach(async () => {
   await controlPlaneDb.execute(
-    sql`TRUNCATE TABLE ${provisioningJobs}, ${tenantDatabases}, ${tenants} CASCADE`,
+    sql`TRUNCATE TABLE ${provisioningJobs}, ${tenantDatabases}, ${tenants}, ${databaseClusters} CASCADE`,
   );
   app = buildTestApp();
   await app.ready();
@@ -204,5 +269,198 @@ describe("POST /api/v1/tenants — transactional rollback", () => {
 
     expect(tenantRows).toHaveLength(0);
     expect(jobRows).toHaveLength(0);
+  });
+});
+
+describe("GET /api/v1/tenants", () => {
+  it("returns an empty list when there are no tenants (section 35)", async () => {
+    const response = await listTenantsRequest();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      data: [],
+      pagination: { page: 1, limit: 20, total: 0, total_pages: 0 },
+    });
+  });
+
+  it("returns a single tenant with no database (section 36/46)", async () => {
+    const tenant = await insertTenant({ name: "Acme", slug: "acme", status: "PROVISIONING" });
+
+    const response = await listTenantsRequest();
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toMatchObject({
+      id: tenant.id,
+      name: "Acme",
+      slug: "acme",
+      status: "PROVISIONING",
+      database: null,
+    });
+    expect(Date.parse(body.data[0].createdAt)).not.toBeNaN();
+    expect(Date.parse(body.data[0].updatedAt)).not.toBeNaN();
+  });
+
+  it("orders multiple tenants by created_at DESC, id DESC (section 37)", async () => {
+    const older = await insertTenant({ slug: "older", createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    const newer = await insertTenant({ slug: "newer", createdAt: new Date("2026-01-02T00:00:00.000Z") });
+
+    const response = await listTenantsRequest();
+
+    const ids = response.json().data.map((t: { id: string }) => t.id);
+    expect(ids).toEqual([newer.id, older.id]);
+  });
+
+  it("paginates results (section 38)", async () => {
+    for (let i = 0; i < 25; i += 1) {
+      await insertTenant({ slug: `tenant-${String(i).padStart(2, "0")}` });
+    }
+
+    const page1 = await listTenantsRequest("?page=1&limit=20");
+    const page2 = await listTenantsRequest("?page=2&limit=20");
+
+    expect(page1.json().data).toHaveLength(20);
+    expect(page1.json().pagination).toEqual({ page: 1, limit: 20, total: 25, total_pages: 2 });
+    expect(page2.json().data).toHaveLength(5);
+    expect(page2.json().pagination).toEqual({ page: 2, limit: 20, total: 25, total_pages: 2 });
+
+    const page1Ids = new Set(page1.json().data.map((t: { id: string }) => t.id));
+    const page2Ids = new Set(page2.json().data.map((t: { id: string }) => t.id));
+    expect(page1Ids.size + page2Ids.size).toBe(25);
+    for (const id of page2Ids) expect(page1Ids.has(id)).toBe(false);
+  });
+
+  it("finds by name via q (section 39)", async () => {
+    await insertTenant({ name: "Imobiliária Central", slug: "central" });
+    await insertTenant({ name: "Outra Empresa", slug: "outra" });
+
+    const response = await listTenantsRequest("?q=Central");
+
+    expect(response.json().data).toHaveLength(1);
+    expect(response.json().data[0].slug).toBe("central");
+  });
+
+  it("finds by slug via q (section 40)", async () => {
+    await insertTenant({ name: "Imobiliária Central", slug: "imobiliaria-central" });
+    await insertTenant({ name: "Outra Empresa", slug: "outra-empresa" });
+
+    const response = await listTenantsRequest("?q=imobiliaria-central");
+
+    expect(response.json().data).toHaveLength(1);
+    expect(response.json().data[0].slug).toBe("imobiliaria-central");
+  });
+
+  it("matches q case-insensitively (section 42)", async () => {
+    await insertTenant({ name: "Imobiliaria Central", slug: "central" });
+
+    const response = await listTenantsRequest("?q=IMOBILIARIA");
+
+    expect(response.json().data).toHaveLength(1);
+  });
+
+  it.each(["PROVISIONING", "READY", "FAILED", "SUSPENDED"] as const)(
+    "filters by status=%s (section 43)",
+    async (status) => {
+      await insertTenant({ slug: "match", status });
+      await insertTenant({ slug: "no-match", status: status === "READY" ? "FAILED" : "READY" });
+
+      const response = await listTenantsRequest(`?status=${status}`);
+
+      expect(response.json().data).toHaveLength(1);
+      expect(response.json().data[0].slug).toBe("match");
+    },
+  );
+
+  it("combines q and status with AND (section 44)", async () => {
+    await insertTenant({ name: "Imobiliária Central", slug: "central-ready", status: "READY" });
+    await insertTenant({ name: "Imobiliária Central", slug: "central-failed", status: "FAILED" });
+    await insertTenant({ name: "Outra Empresa", slug: "outra-ready", status: "READY" });
+
+    const response = await listTenantsRequest("?q=Central&status=READY");
+
+    expect(response.json().data).toHaveLength(1);
+    expect(response.json().data[0].slug).toBe("central-ready");
+  });
+
+  it("returns database and cluster summary for a tenant with a registered database (section 45)", async () => {
+    const cluster = await insertCluster({ name: "local-tenants", provider: "local", region: "local" });
+    const tenant = await insertTenant({ slug: "with-db", status: "READY" });
+    await insertTenantDatabase(tenant.id, cluster.id, {
+      databaseName: "tenant_with_db",
+      schemaVersion: 7,
+      status: "READY",
+    });
+
+    const response = await listTenantsRequest();
+
+    expect(response.json().data[0].database).toEqual({
+      status: "READY",
+      databaseName: "tenant_with_db",
+      schemaVersion: 7,
+      cluster: {
+        id: cluster.id,
+        name: "local-tenants",
+        provider: "local",
+        region: "local",
+        status: "ACTIVE",
+      },
+    });
+  });
+
+  it("never includes secret_reference/password/credential in the response (section 47)", async () => {
+    const cluster = await insertCluster();
+    const tenant = await insertTenant({ slug: "secrets-check" });
+    await insertTenantDatabase(tenant.id, cluster.id);
+
+    const response = await listTenantsRequest();
+    const raw = JSON.stringify(response.json());
+
+    expect(raw).not.toContain("secret_reference");
+    expect(raw).not.toContain("secretReference");
+    expect(raw.toLowerCase()).not.toContain("password");
+    expect(raw.toLowerCase()).not.toContain("credential");
+  });
+
+  it.each([
+    ["page=0", "?page=0"],
+    ["page=-1", "?page=-1"],
+    ["limit=0", "?limit=0"],
+    ["limit=101", "?limit=101"],
+  ])("rejects invalid pagination (%s) with 400 (section 48)", async (_label, query) => {
+    const response = await listTenantsRequest(query);
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects an invalid status with 400 (section 49)", async () => {
+    const response = await listTenantsRequest("?status=UNKNOWN");
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects an unknown query parameter with 400 (section 50)", async () => {
+    const response = await listTenantsRequest("?unknown=value");
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects q that is empty after trim with 400", async () => {
+    const response = await listTenantsRequest("?q=%20%20");
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("uses id as a deterministic tie-breaker when created_at is equal (section 51)", async () => {
+    const sameInstant = new Date("2026-01-01T00:00:00.000Z");
+    const first = await insertTenant({ slug: "tie-a", createdAt: sameInstant });
+    const second = await insertTenant({ slug: "tie-b", createdAt: sameInstant });
+
+    const page1 = await listTenantsRequest("?page=1&limit=1");
+    const page2 = await listTenantsRequest("?page=2&limit=1");
+
+    const expectedOrder = [first.id, second.id].sort().reverse();
+    expect(page1.json().data[0].id).toBe(expectedOrder[0]);
+    expect(page2.json().data[0].id).toBe(expectedOrder[1]);
   });
 });

@@ -186,6 +186,12 @@ Swagger UI
 Para observar o `409 Conflict` documentado, execute o mesmo request novamente sem alterar o
 `slug` — a segunda tentativa retorna `409` porque o slug já está em uso.
 
+Use **Tenants → GET /api/v1/tenants** para listar os tenants já criados (paginado; filtros
+opcionais `status`, `q` — substring case-insensitive sobre `name`/`slug`). Cada item traz um
+resumo do database/cluster associado (`database: null` enquanto o provisionamento não terminou).
+É uma rota administrativa do Control Plane, sem autenticação implementada ainda (ver
+`ARCHITECTURE.md`) — nunca consulta o database de nenhum tenant.
+
 ### Testando Properties (requer `pnpm dev:full` e um tenant READY)
 
 ```text
@@ -254,8 +260,9 @@ Sem `pnpm dev:full` (ou seja, com `pnpm dev` sozinho), `POST/GET /api/v1/propert
 tenant provisionado pelo worker separado falha ao resolver a credencial do tenant — ver a
 seção "Local development runtime" em `ARCHITECTURE.md`.
 
-Rotas documentadas hoje: `GET /health` (tag **System**), `POST /api/v1/tenants` (tag
-**Tenants**), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`,
+Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` (tag
+**Tenants** — `GET` é uma listagem administrativa do Control Plane, sem autenticação ainda; ver
+`ARCHITECTURE.md`), e `POST/GET /api/v1/properties`, `GET/PATCH/DELETE /api/v1/properties/{id}`,
 `POST/GET /api/v1/properties/{id}/media`, `PUT /api/v1/properties/{id}/media/order`,
 `PATCH /api/v1/properties/{id}/media/{mediaId}/cover`,
 `DELETE /api/v1/properties/{id}/media/{mediaId}` (tag **Properties**) — `DELETE /properties/{id}`
