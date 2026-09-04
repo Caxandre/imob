@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Property } from "../domain/property.js";
+import type { PropertyWithCover } from "../domain/property-cover.js";
 import { listProperties } from "./list-properties.js";
 import type { ListPropertiesInput, ListPropertiesResult, PropertyRepository } from "./property-repository.js";
 
@@ -22,7 +22,7 @@ function sampleInput(overrides: Partial<ListPropertiesInput> = {}): ListProperti
 
 describe("listProperties", () => {
   it("computes totalPages from total/limit — never a separate database round trip", async () => {
-    const data: Property[] = [];
+    const data: PropertyWithCover[] = [];
     const output = await listProperties(fakeRepository({ data, total: 45 }), sampleInput({ page: 2, limit: 20 }));
 
     expect(output).toEqual({ data, pagination: { page: 2, limit: 20, total: 45, totalPages: 3 } });

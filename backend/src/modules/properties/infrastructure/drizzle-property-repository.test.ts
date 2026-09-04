@@ -159,6 +159,183 @@ describe("createDrizzlePropertyRepository", () => {
     await expect(repository.list(listInput())).resolves.toEqual({ data: [], total: 0 });
   });
 
+  describe("list cover (Prompt 037A)", () => {
+    async function insertMedia(
+      db: Awaited<ReturnType<typeof createMigratedTenantDatabase>>,
+      propertyId: string,
+      overrides: Partial<{
+        position: number;
+        isCover: boolean;
+        processingStatus: "PROCESSING" | "READY" | "FAILED";
+      }> = {},
+    ) {
+      const id = randomUUID();
+      const [row] = await db
+        .insert(tenantSchema.propertyMedia)
+        .values({
+          id,
+          propertyId,
+          objectKey: `tenants/x/properties/${propertyId}/${id}.jpg`,
+          publicUrl: `https://public-base.example/${id}.jpg`,
+          mimeType: "image/jpeg",
+          sizeBytes: 12_345,
+          originalFilename: "foto.jpg",
+          position: overrides.position ?? 0,
+          isCover: overrides.isCover ?? false,
+          processingStatus: overrides.processingStatus ?? "READY",
+        })
+        .returning();
+      if (!row) throw new Error("property_media insert returned no row");
+      return row;
+    }
+
+    async function insertVariant(
+      db: Awaited<ReturnType<typeof createMigratedTenantDatabase>>,
+      mediaId: string,
+      variant: "THUMBNAIL" | "CARD" | "DETAIL",
+      overrides: Partial<{ width: number }> = {},
+    ) {
+      await db.insert(tenantSchema.propertyMediaVariants).values({
+        propertyMediaId: mediaId,
+        variant,
+        objectKey: `tenants/x/properties/y/${mediaId}/${variant.toLowerCase()}-${randomUUID()}.webp`,
+        publicUrl: `https://public-base.example/${mediaId}/${variant.toLowerCase()}.webp`,
+        mimeType: "image/webp",
+        width: overrides.width ?? 320,
+        height: 213,
+        sizeBytes: 12_345,
+      });
+    }
+
+    it("is null when the property has no media (section 34/48)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      await repository.create(sampleInput());
+
+      const result = await repository.list(listInput());
+
+      expect(result.data[0]?.cover).toBeNull();
+    });
+
+    it("prefers the media with is_cover=true even if another has a lower position (section 36/49)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      await insertMedia(db, property.id, { position: 0, isCover: false });
+      const cover = await insertMedia(db, property.id, { position: 1, isCover: true });
+
+      const result = await repository.list(listInput());
+
+      expect(result.data[0]?.cover?.id).toBe(cover.id);
+    });
+
+    it("falls back to the lowest position when no media has is_cover=true (section 8/19/35/50)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      await insertMedia(db, property.id, { position: 1, isCover: false });
+      const lowest = await insertMedia(db, property.id, { position: 0, isCover: false });
+
+      const result = await repository.list(listInput());
+
+      expect(result.data[0]?.cover?.id).toBe(lowest.id);
+    });
+
+    // Section 51 ("fallback tie — same position, id ASC desempata") is not exercised here: two
+    // property_media rows can never share the same position for the same property —
+    // `property_media_property_id_position_key` (UNIQUE(property_id, position)) makes it a
+    // genuine database invariant, not just an assumption. The `id ASC` tie-break in
+    // `loadCoversByPropertyIds`'s ORDER BY exists purely defensively, the same documented
+    // stance already taken for the identical situation in
+    // `drizzle-property-media-repository.ts`'s `listByProperty` — never forced via a real test
+    // that would first have to violate a real constraint to set up.
+
+    it("returns thumbnail/card only — never detail — for a fully-processed cover (section 9/38/52)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      const media = await insertMedia(db, property.id, { isCover: true });
+      await insertVariant(db, media.id, "THUMBNAIL", { width: 320 });
+      await insertVariant(db, media.id, "CARD", { width: 640 });
+      await insertVariant(db, media.id, "DETAIL", { width: 1280 });
+
+      const result = await repository.list(listInput());
+      const cover = result.data[0]?.cover;
+
+      expect(cover?.variants.thumbnail?.width).toBe(320);
+      expect(cover?.variants.card?.width).toBe(640);
+      expect(cover?.variants).not.toHaveProperty("detail");
+    });
+
+    it("returns null thumbnail/card while the cover is still PROCESSING (section 11/53)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      await insertMedia(db, property.id, { isCover: true, processingStatus: "PROCESSING" });
+
+      const result = await repository.list(listInput());
+      const cover = result.data[0]?.cover;
+
+      expect(cover?.processingStatus).toBe("PROCESSING");
+      expect(cover?.variants).toEqual({ thumbnail: null, card: null });
+    });
+
+    it("returns null thumbnail/card for a legacy READY cover with zero variant rows, never throwing (section 13/54)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      await insertMedia(db, property.id, { isCover: true, processingStatus: "READY" });
+
+      const result = await repository.list(listInput());
+      const cover = result.data[0]?.cover;
+
+      expect(cover?.processingStatus).toBe("READY");
+      expect(cover?.variants).toEqual({ thumbnail: null, card: null });
+    });
+
+    it("returns a partial variant set when only one variant was generated (section 55)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      const media = await insertMedia(db, property.id, { isCover: true });
+      await insertVariant(db, media.id, "CARD", { width: 640 });
+
+      const result = await repository.list(listInput());
+      const cover = result.data[0]?.cover;
+
+      expect(cover?.variants.thumbnail).toBeNull();
+      expect(cover?.variants.card?.width).toBe(640);
+    });
+
+    it("never associates one property's cover with another (section 56)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const propertyA = await repository.create(sampleInput({ title: "A" }));
+      const propertyB = await repository.create(sampleInput({ title: "B" }));
+      const mediaA = await insertMedia(db, propertyA.id, { isCover: true });
+      const mediaB = await insertMedia(db, propertyB.id, { isCover: true });
+
+      const result = await repository.list(listInput());
+      const byId = new Map(result.data.map((p) => [p.id, p.cover]));
+
+      expect(byId.get(propertyA.id)?.id).toBe(mediaA.id);
+      expect(byId.get(propertyB.id)?.id).toBe(mediaB.id);
+    });
+
+    it("never changes total/total_pages — cover enrichment never touches the count query (section 26/57)", async () => {
+      const db = await createMigratedTenantDatabase();
+      const repository = createDrizzlePropertyRepository(db);
+      const property = await repository.create(sampleInput());
+      await insertMedia(db, property.id, { isCover: true });
+      await insertMedia(db, property.id, { position: 1 });
+
+      const result = await repository.list(listInput());
+
+      expect(result.total).toBe(1);
+      expect(result.data).toHaveLength(1);
+    });
+  });
+
   describe("list filters", () => {
     it("filters by status", async () => {
       const db = await createMigratedTenantDatabase();

@@ -212,6 +212,9 @@ Swagger UI (com pnpm dev:full em execução)
     → conferir 201, com o property criado
   → Properties → GET /api/v1/properties → Try it out
     → preencher X-Tenant-Id com o mesmo id → Execute → conferir a listagem paginada
+    → cada item traz "cover": um resumo da mídia de capa (thumbnail/card, nunca detail) —
+      null enquanto a mídia ainda não existe ou não terminou de processar (ver "Cover media
+      na listagem" abaixo)
     → opcional: testar filtros e ordenação, ex. status=ACTIVE&property_type=APARTMENT&
       city=São Paulo&price_min=300000.00&price_max=600000.00&sort=price&order=asc
       (parâmetros desconhecidos retornam 400 — ver a descrição da rota no Swagger para a
@@ -321,6 +324,13 @@ R2_PUBLIC_URL
   `pnpm dev:media-worker` (ou `pnpm dev:full`, que já inclui os dois) — desde o Prompt 035, as
   três variantes são expostas em toda resposta HTTP que carrega uma mídia (`variants.thumbnail`/
   `variants.card`/`variants.detail`, cada uma `null` até existir; nunca `object_key`).
+- Desde o Prompt 037A, `GET /api/v1/properties` (listagem) inclui um `cover` resumido por
+  imóvel — apenas `thumbnail`/`card` (nunca `detail`, que a listagem não precisa), selecionado
+  preferindo `is_cover=true` e caindo de volta para a mídia de menor `position` quando nenhuma
+  está marcada como capa. `cover: null` quando o imóvel ainda não tem mídia. Carregado com um
+  número fixo de queries por página (nunca N+1) e sem nenhuma chamada ao R2 durante a leitura —
+  só os outros endpoints de Properties (`GET .../{id}`, `PATCH`, `DELETE`) permanecem sem
+  `cover`, que é exclusivo da listagem.
 
 Teste de integração real (opcional, nunca roda em CI): ver
 `src/infrastructure/object-storage/cloudflare-r2-object-storage.integration.test.ts` —

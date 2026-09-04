@@ -47,7 +47,9 @@ function toPropertyMedia(row: typeof propertyMedia.$inferSelect): PropertyMedia 
   };
 }
 
-function toPropertyMediaVariant(row: typeof propertyMediaVariants.$inferSelect): PropertyMediaVariant {
+/** Exported for reuse by `drizzle-property-repository.ts`'s cover-media enrichment (Prompt
+ * 037A) — the same row → domain mapping, never duplicated. */
+export function toPropertyMediaVariant(row: typeof propertyMediaVariants.$inferSelect): PropertyMediaVariant {
   return {
     id: row.id,
     propertyMediaId: row.propertyMediaId,

@@ -31,6 +31,12 @@ ponta a ponta; Prompt 035 — exposição HTTP das variantes). Histórico:
   size_bytes}` — nunca `id`/`object_key`/timestamps da linha. Sem fallback automático para o
   original quando uma variante está ausente. Ver ARCHITECTURE.md "Media variant HTTP exposure"
   para os detalhes completos.
+- **Prompt 037A — IMPLEMENTED**: `GET /api/v1/properties` (listagem) ganhou `cover`, um resumo
+  mínimo (`thumbnail`/`card` apenas, nunca `detail`) da mídia de capa de cada imóvel — sem isso
+  o catálogo do frontend precisaria de uma chamada de mídia por imóvel (N+1). Carregado com um
+  número fixo de queries por página, nunca proporcional à quantidade de imóveis. Ver
+  ARCHITECTURE.md "Property list cover enrichment" para a query e a estratégia de fallback
+  (`is_cover` → `position ASC, id ASC`).
 
 ## Context
 

@@ -879,6 +879,183 @@ describe("Properties HTTP routes", () => {
         await app.close();
       }
     });
+
+    it("includes cover: null for a property with no media (Prompt 037A, section 34)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("list-cover-null", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        await createProperty(app, tenant.id);
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data[0].cover).toBeNull();
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("includes a real cover with thumbnail/card metadata, never detail (Prompt 037A, section 43/45/46)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("list-cover-real", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const mediaId = randomUUID();
+
+        await withTenantDb(secretStore, tenant.id, async (db) => {
+          await db.insert(tenantSchema.propertyMedia).values({
+            id: mediaId,
+            propertyId,
+            objectKey: `tenants/x/properties/${propertyId}/${mediaId}.jpg`,
+            publicUrl: `https://public-base.example/${mediaId}.jpg`,
+            mimeType: "image/jpeg",
+            sizeBytes: 12_345,
+            originalFilename: "foto.jpg",
+            position: 0,
+            isCover: true,
+            processingStatus: "READY",
+          });
+          await db.insert(tenantSchema.propertyMediaVariants).values([
+            {
+              propertyMediaId: mediaId,
+              variant: "THUMBNAIL",
+              objectKey: `tenants/x/properties/${propertyId}/${mediaId}/thumbnail.webp`,
+              publicUrl: `https://public-base.example/${mediaId}/thumbnail.webp`,
+              mimeType: "image/webp",
+              width: 320,
+              height: 213,
+              sizeBytes: 12_345,
+            },
+            {
+              propertyMediaId: mediaId,
+              variant: "CARD",
+              objectKey: `tenants/x/properties/${propertyId}/${mediaId}/card.webp`,
+              publicUrl: `https://public-base.example/${mediaId}/card.webp`,
+              mimeType: "image/webp",
+              width: 640,
+              height: 426,
+              sizeBytes: 23_456,
+            },
+          ]);
+        });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const cover = response.json().data[0].cover;
+        expect(cover).toMatchObject({ id: mediaId, processing_status: "READY" });
+        expect(cover.variants.thumbnail).toMatchObject({ width: 320, height: 213, mime_type: "image/webp" });
+        expect(cover.variants.card).toMatchObject({ width: 640, height: 426, mime_type: "image/webp" });
+        expect(cover.variants).not.toHaveProperty("detail");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("never includes object_key anywhere in the response, including the cover (Prompt 037A, section 39/60)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenant = await provisionReadyTenant("list-cover-no-key", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenant.id);
+        const propertyId = created.json().id;
+        const mediaId = randomUUID();
+
+        await withTenantDb(secretStore, tenant.id, async (db) => {
+          await db.insert(tenantSchema.propertyMedia).values({
+            id: mediaId,
+            propertyId,
+            objectKey: `tenants/x/properties/${propertyId}/${mediaId}.jpg`,
+            publicUrl: `https://public-base.example/${mediaId}.jpg`,
+            mimeType: "image/jpeg",
+            sizeBytes: 12_345,
+            originalFilename: "foto.jpg",
+            position: 0,
+            isCover: true,
+            processingStatus: "READY",
+          });
+          await db.insert(tenantSchema.propertyMediaVariants).values({
+            propertyMediaId: mediaId,
+            variant: "THUMBNAIL",
+            objectKey: `tenants/x/properties/${propertyId}/${mediaId}/thumbnail.webp`,
+            publicUrl: `https://public-base.example/${mediaId}/thumbnail.webp`,
+            mimeType: "image/webp",
+            width: 320,
+            height: 213,
+            sizeBytes: 12_345,
+          });
+        });
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties",
+          headers: { [TENANT_ID_HEADER]: tenant.id },
+        });
+        const raw = JSON.stringify(response.json());
+
+        expect(raw).not.toContain("object_key");
+        expect(raw).not.toContain("objectKey");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("never leaks tenant A's cover to tenant B (Prompt 037A, section 61)", async () => {
+      const { secretStore } = await setupCluster();
+      const tenantA = await provisionReadyTenant("list-cover-cross-a", secretStore);
+      const tenantB = await provisionReadyTenant("list-cover-cross-b", secretStore);
+      const app = buildTestApp(secretStore);
+
+      try {
+        const created = await createProperty(app, tenantA.id);
+        const propertyId = created.json().id;
+        const mediaId = randomUUID();
+
+        await withTenantDb(secretStore, tenantA.id, (db) =>
+          db.insert(tenantSchema.propertyMedia).values({
+            id: mediaId,
+            propertyId,
+            objectKey: `tenants/x/properties/${propertyId}/${mediaId}.jpg`,
+            publicUrl: `https://public-base.example/${mediaId}.jpg`,
+            mimeType: "image/jpeg",
+            sizeBytes: 12_345,
+            originalFilename: "foto.jpg",
+            position: 0,
+            isCover: true,
+            processingStatus: "READY",
+          }),
+        );
+
+        await createProperty(app, tenantB.id);
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/v1/properties",
+          headers: { [TENANT_ID_HEADER]: tenantB.id },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data).toHaveLength(1);
+        expect(response.json().data[0].cover).toBeNull();
+        expect(JSON.stringify(response.json())).not.toContain(mediaId);
+      } finally {
+        await app.close();
+      }
+    });
   });
 
   describe("GET /api/v1/properties/:id", () => {

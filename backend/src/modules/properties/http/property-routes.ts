@@ -28,6 +28,7 @@ import {
   type PropertyMediaWithVariants,
 } from "../domain/property-media.js";
 import type { PropertyMediaVariant } from "../domain/property-media-variant.js";
+import type { PropertyCover, PropertyWithCover } from "../domain/property-cover.js";
 import type { Property } from "../domain/property.js";
 import { createDrizzlePropertyMediaRepository } from "../infrastructure/drizzle-property-media-repository.js";
 import { createDrizzlePropertyRepository } from "../infrastructure/drizzle-property-repository.js";
@@ -75,6 +76,31 @@ function toPropertyResponse(property: Property) {
     postal_code: property.postalCode,
     created_at: property.createdAt.toISOString(),
     updated_at: property.updatedAt.toISOString(),
+  };
+}
+
+/** Cover-only projection for `GET /api/v1/properties` items (Prompt 037A) — `thumbnail`/`card`
+ * only, never `detail` (section 5), and never `object_key`/`position`/`original_filename`/
+ * timestamps of the underlying media row (section 6). */
+function toPropertyCoverResponse(cover: PropertyCover) {
+  return {
+    id: cover.id,
+    public_url: cover.publicUrl,
+    processing_status: cover.processingStatus,
+    variants: {
+      thumbnail: cover.variants.thumbnail ? toVariantResponse(cover.variants.thumbnail) : null,
+      card: cover.variants.card ? toVariantResponse(cover.variants.card) : null,
+    },
+  };
+}
+
+/** `GET /api/v1/properties` item shape only (Prompt 037A) — `toPropertyResponse`'s fields plus
+ * `cover`. Never used for the single-property responses (create/get/patch/archive), which never
+ * carry a cover (section 23/24). */
+function toPropertyListItemResponse(property: PropertyWithCover) {
+  return {
+    ...toPropertyResponse(property),
+    cover: property.cover ? toPropertyCoverResponse(property.cover) : null,
   };
 }
 
@@ -390,7 +416,7 @@ export function propertyRoutes(deps: PropertyRoutesDependencies) {
         });
 
         return reply.send({
-          data: result.data.map(toPropertyResponse),
+          data: result.data.map(toPropertyListItemResponse),
           pagination: {
             page: result.pagination.page,
             limit: result.pagination.limit,

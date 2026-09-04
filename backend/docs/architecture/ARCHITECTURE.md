@@ -1188,6 +1188,7 @@ Sharp image processing            = IMPLEMENTED  (Prompt 032 — ver abaixo)
 Media processing worker           = IMPLEMENTED  (Prompt 032 — ver abaixo)
 THUMBNAIL/CARD/DETAIL generation  = IMPLEMENTED  (Prompt 032)
 Media variant HTTP exposure       = IMPLEMENTED  (Prompt 035 — ver abaixo)
+Property list cover enrichment    = IMPLEMENTED  (Prompt 037A — ver abaixo)
 Orphan reconciliation             = PLANNED
 Signed/private media URLs         = PLANNED
 ```
@@ -1446,6 +1447,38 @@ Nenhuma chamada ao R2 (`GetObject`/`HeadObject`/signed URL) durante leitura — 
 persistidas em `property_media_variants.public_url` (seções 20/21); banco é a única fonte de
 metadados, reconciliação de órfãos continua fora de escopo. Nenhuma rota nova, nenhuma migration
 (schema já existia desde o Prompt 030), nenhuma dependência nova.
+
+### Property list cover enrichment — IMPLEMENTED (Prompt 037A)
+
+`GET /api/v1/properties` (listagem) ganhou `cover` por item — um resumo mínimo da mídia de
+capa, nunca a galeria completa e nunca `variants.detail` (a listagem só precisa de
+`thumbnail`/`card` para montar um card de grid). Motivado por um bloqueio real do frontend
+(Prompt 037): sem essa enriquecimento, montar o catálogo exigiria uma chamada
+`GET .../media` por imóvel visível na página — N+1 no navegador. `PropertyListItem` (novo
+componente OpenAPI) é usado só por essa rota; `Property` (create/get/patch/archive) nunca
+carrega `cover`.
+
+```text
+PropertyRepository.list() — 2 queries fixas, adicionais às 2 já existentes (data + count),
+nunca uma por imóvel:
+
+query 3: 1 property_media candidato por property_id — ROW_NUMBER() OVER
+         (PARTITION BY property_id ORDER BY is_cover DESC, position ASC, id ASC), filtrado a
+         rank = 1 — is_cover=true vence quando existe; sem nenhuma, a menor position vence
+         (fallback defensivo, nunca assume o banco perfeito)
+query 4: THUMBNAIL/CARD (nunca DETAIL) para exatamente as cover media selecionadas —
+         WHERE property_media_id IN (...), agrupadas em memória
+
+página sem nenhum resultado → query 3/4 puladas inteiramente (nenhuma property_id para buscar)
+```
+
+`cover` é `null` exatamente quando o imóvel não tem `property_media` nenhum — nunca um objeto
+artificial. Nenhuma chamada ao R2, nenhum `object_key` exposto (mesmas garantias do Prompt 035).
+O enriquecimento nunca toca a query de `count(*)` nem a ordenação/paginação/filtros/full-text
+já existentes — só anexa `cover` às linhas que as duas queries originais já selecionaram.
+Nenhuma migration (schema já existia desde o Prompt 030); os índices que a seleção de cover
+usa já existiam (`UNIQUE(property_id, position)` em `property_media`,
+`UNIQUE(property_media_id, variant)` em `property_media_variants`).
 
 ## Princípios
 
