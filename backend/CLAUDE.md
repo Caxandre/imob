@@ -100,6 +100,10 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   o nome da variante, nunca um UUID novo por tentativa), para que um retry sobrescreva o mesmo
   objeto em vez de criar um objeto duplicado. Ver `buildPropertyMediaVariantObjectKey` (Prompt
   032, ADR-008 "Idempotency") como exemplo aplicado.
+- Respostas HTTP da API de mídia de propriedade podem expor URLs públicas e dimensões de
+  variantes, mas nunca podem expor object-storage keys (do original ou de qualquer variante) —
+  são detalhe interno de armazenamento, nunca parte do contrato público. Ver
+  `toPropertyMediaResponse`/`toVariantResponse` (Prompt 035) como exemplo aplicado.
 
 ## Multi-tenancy — regra crítica
 

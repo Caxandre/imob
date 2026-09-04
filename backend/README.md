@@ -233,7 +233,9 @@ Swagger UI (com pnpm dev:full em execução)
       validado pelo header e pelos magic bytes do arquivo, nunca só pela extensão) → Execute
       → conferir 201 (property INACTIVE retorna 409 — arquivar bloqueia novos uploads)
   → Properties → GET /api/v1/properties/{id}/media → Try it out
-    → preencher X-Tenant-Id e o id → Execute → conferir a galeria (ordenada por position)
+    → preencher X-Tenant-Id e o id → Execute → conferir a galeria (ordenada por position),
+      cada item com "variants": {"thumbnail": ..., "card": ..., "detail": ...} — null em cada
+      chave até a variante correspondente existir (ver parágrafo abaixo)
   → Properties → PUT /api/v1/properties/{id}/media/order → Try it out
     → preencher X-Tenant-Id e o id → body {"media_ids": ["<id2>", "<id1>"]} com exatamente os
       ids da galeria atual, na nova ordem → Execute → conferir 200 com a galeria reordenada
@@ -248,15 +250,17 @@ Swagger UI (com pnpm dev:full em execução)
       gerada são removidos do R2 também, best-effort, após o commit — ver ADR-007 "Delete")
 ```
 
-Logo após o upload, `GET .../media` mostra `"processing_status": "PROCESSING"`. Com
-`pnpm dev:full` (que já inclui o dispatcher de outbox de mídia e o worker de processamento —
-ver acima), em poucos segundos o mesmo `GET` deve mostrar `"processing_status": "READY"` — as
-variantes (`THUMBNAIL`/`CARD`/`DETAIL`, WebP) já foram geradas e enviadas ao R2 nesse meio
-tempo, mesmo que ainda não apareçam no corpo da resposta (variantes não são expostas via HTTP
-nesta tarefa). Um original que o `sharp` não consegue decodificar (ou que excede o limite de
-pixels configurado) termina como `"processing_status": "FAILED"` em vez de `"READY"` — nunca
-fica preso em `"PROCESSING"` indefinidamente.
-```
+Logo após o upload, `GET .../media` mostra `"processing_status": "PROCESSING"` e
+`"variants": {"thumbnail": null, "card": null, "detail": null}`. Com `pnpm dev:full` (que já
+inclui o dispatcher de outbox de mídia e o worker de processamento — ver acima), em poucos
+segundos o mesmo `GET` deve mostrar `"processing_status": "READY"` com as três variantes
+preenchidas (`THUMBNAIL`/`CARD`/`DETAIL`, WebP), cada uma com `url`/`mime_type`/`width`/
+`height`/`size_bytes` — nunca `object_key`. Um original que o `sharp` não consegue decodificar
+(ou que excede o limite de pixels configurado) termina como `"processing_status": "FAILED"`
+com as três variantes `null`, em vez de `"READY"` — nunca fica preso em `"PROCESSING"`
+indefinidamente. Uma mídia migrada pelo Prompt 030 (antes de o worker existir) pode ficar
+`"READY"` sem nenhuma variante — a API nunca assume que `READY` garante variantes para essas
+mídias legadas, e nunca falha com 500 por causa disso.
 
 `X-Tenant-Id` é **temporário** — um mecanismo de desenvolvimento/integração enquanto
 autenticação real não existe, não uma decisão definitiva de produto (ver
@@ -314,8 +318,9 @@ R2_PUBLIC_URL
   [ADR-009](docs/architecture/adr/ADR-009-multi-tenant-outbox-dispatch.md) para a arquitetura
   completa. Toda mídia enviada gera automaticamente as variantes `THUMBNAIL`/`CARD`/`DETAIL`
   (WebP) no mesmo bucket R2 do original, via `pnpm dev:media-dispatcher` +
-  `pnpm dev:media-worker` (ou `pnpm dev:full`, que já inclui os dois) — as variantes ainda não
-  são expostas em nenhuma resposta HTTP (só `processing_status`).
+  `pnpm dev:media-worker` (ou `pnpm dev:full`, que já inclui os dois) — desde o Prompt 035, as
+  três variantes são expostas em toda resposta HTTP que carrega uma mídia (`variants.thumbnail`/
+  `variants.card`/`variants.detail`, cada uma `null` até existir; nunca `object_key`).
 
 Teste de integração real (opcional, nunca roda em CI): ver
 `src/infrastructure/object-storage/cloudflare-r2-object-storage.integration.test.ts` —

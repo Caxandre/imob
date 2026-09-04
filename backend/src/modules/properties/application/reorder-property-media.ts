@@ -1,4 +1,4 @@
-import type { PropertyMedia } from "../domain/property-media.js";
+import type { PropertyMediaWithVariants } from "../domain/property-media.js";
 import { PropertyNotFoundError } from "../domain/property.js";
 import type { PropertyMediaRepository } from "./property-media-repository.js";
 import type { PropertyRepository } from "./property-repository.js";
@@ -20,7 +20,7 @@ export async function reorderPropertyMedia(
   propertyMediaRepository: PropertyMediaRepository,
   propertyId: string,
   mediaIds: string[],
-): Promise<PropertyMedia[]> {
+): Promise<PropertyMediaWithVariants[]> {
   const property = await propertyRepository.findById(propertyId);
   if (!property) {
     throw new PropertyNotFoundError(propertyId);

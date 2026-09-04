@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import type { ObjectStorage } from "../../../infrastructure/object-storage/object-storage.js";
-import { extensionForMimeType, type PropertyMedia, type PropertyMediaMimeType } from "../domain/property-media.js";
+import {
+  extensionForMimeType,
+  type PropertyMediaMimeType,
+  type PropertyMediaWithVariants,
+} from "../domain/property-media.js";
 import { PropertyArchivedError, PropertyNotFoundError } from "../domain/property.js";
 import type { CreatePropertyMediaInput, PropertyMediaRepository } from "./property-media-repository.js";
 import type { PropertyRepository } from "./property-repository.js";
@@ -71,7 +75,7 @@ export async function uploadPropertyMedia(
   propertyMediaRepository: PropertyMediaRepository,
   objectStorage: ObjectStorage,
   input: UploadPropertyMediaInput,
-): Promise<PropertyMedia> {
+): Promise<PropertyMediaWithVariants> {
   const property = await propertyRepository.findById(input.propertyId);
   if (!property) {
     throw new PropertyNotFoundError(input.propertyId);

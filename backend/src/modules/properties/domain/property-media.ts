@@ -1,3 +1,5 @@
+import type { PropertyMediaVariantSet } from "./property-media-variant.js";
+
 /**
  * Media (photos) attached to a property (Prompt 027) — metadata only, exactly as persisted in
  * `property_media` (Tenant Data Plane, `infrastructure/database/tenant/schema.ts`). The binary
@@ -36,6 +38,17 @@ export interface PropertyMedia {
 }
 
 export type PropertyMediaProcessingStatus = "PROCESSING" | "READY" | "FAILED";
+
+/**
+ * `PropertyMedia` plus its derived variants (Prompt 035) — what every media-returning
+ * repository method (`create`/`listByProperty`/`reorder`/`setCover`) actually returns, so every
+ * HTTP response that carries media gets the same shape (this task, section 19). `variants` is
+ * always the fixed three-key `PropertyMediaVariantSet`, never omitted and never partially
+ * populated by guesswork — see `toPropertyMediaVariantSet()` in `property-media-variant.ts`.
+ */
+export interface PropertyMediaWithVariants extends PropertyMedia {
+  variants: PropertyMediaVariantSet;
+}
 
 /** Raised when a media id does not exist, or exists but belongs to a different property/tenant
  * — the two cases are deliberately indistinguishable to the caller (404 either way, this task,

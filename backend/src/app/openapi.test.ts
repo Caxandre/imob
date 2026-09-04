@@ -228,6 +228,38 @@ describe("OpenAPI specification", () => {
     expect(propertyMedia?.required).toContain("processing_status");
   });
 
+  it("documents PropertyMedia.variants with fixed, nullable thumbnail/card/detail keys (Prompt 035)", () => {
+    const spec = getSpec();
+
+    interface VariantSlotSchema {
+      type?: string;
+      nullable?: boolean;
+      properties?: Record<string, unknown>;
+      required?: string[];
+    }
+    const propertyMedia = spec.components?.schemas?.PropertyMedia as
+      | {
+          properties?: {
+            variants?: { properties?: Record<string, VariantSlotSchema>; required?: string[] };
+          };
+          required?: string[];
+        }
+      | undefined;
+
+    expect(propertyMedia?.required).toContain("variants");
+    const variants = propertyMedia?.properties?.variants;
+    expect(variants?.required).toEqual(["thumbnail", "card", "detail"]);
+
+    for (const key of ["thumbnail", "card", "detail"] as const) {
+      const slot = variants?.properties?.[key];
+      expect(slot?.nullable).toBe(true);
+      expect(Object.keys(slot?.properties ?? {})).toEqual(
+        expect.arrayContaining(["url", "mime_type", "width", "height", "size_bytes"]),
+      );
+      expect(slot?.required).toEqual(["url", "mime_type", "width", "height", "size_bytes"]);
+    }
+  });
+
   it("exposes named, reusable components instead of anonymous inline schemas", () => {
     const spec = getSpec();
 

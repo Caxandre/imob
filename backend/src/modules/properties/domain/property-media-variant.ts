@@ -31,6 +31,48 @@ export interface PropertyMediaVariant {
   updatedAt: Date;
 }
 
+/**
+ * A media's three variant slots, keyed by fixed lowercase names (Prompt 035, section 6) — never
+ * a generic array. Each slot is `null` exactly when no `property_media_variants` row exists for
+ * that variant yet — during `PROCESSING`, after a `FAILED` original, or (this task, section 9)
+ * for a "legacy `READY`" media backfilled by the Prompt 030 migration before any worker ever
+ * wrote variant rows. `READY` normally implies all three are present, but this type/its
+ * constructors never assume that — the HTTP layer (`property-routes.ts`) reads exactly whatever
+ * the repository found, never synthesizing a missing slot and never 500ing over one.
+ */
+export interface PropertyMediaVariantSet {
+  thumbnail: PropertyMediaVariant | null;
+  card: PropertyMediaVariant | null;
+  detail: PropertyMediaVariant | null;
+}
+
+/** Every slot absent — the correct starting point for a freshly uploaded media (always
+ * `PROCESSING`, this task, section 18) and the fallback when a `SELECT` finds zero variant rows. */
+export function emptyPropertyMediaVariantSet(): PropertyMediaVariantSet {
+  return { thumbnail: null, card: null, detail: null };
+}
+
+const VARIANT_SET_KEYS: Record<PropertyMediaVariantName, keyof PropertyMediaVariantSet> = {
+  THUMBNAIL: "thumbnail",
+  CARD: "card",
+  DETAIL: "detail",
+};
+
+/**
+ * Groups a flat list of variant rows (any order, this task, section 17 — HTTP consumers never
+ * depend on row order, only on the fixed key it lands under) into a `PropertyMediaVariantSet`.
+ * Never assumes exactly three rows — a "legacy READY"/partially-processed media naturally
+ * produces fewer (this task, sections 9/40), and the DB's own `UNIQUE(property_media_id,
+ * variant)` constraint makes more than one row per slot unreachable.
+ */
+export function toPropertyMediaVariantSet(variants: readonly PropertyMediaVariant[]): PropertyMediaVariantSet {
+  const set = emptyPropertyMediaVariantSet();
+  for (const variant of variants) {
+    set[VARIANT_SET_KEYS[variant.variant]] = variant;
+  }
+  return set;
+}
+
 const VARIANT_OBJECT_KEY_FILENAMES: Record<PropertyMediaVariantName, string> = {
   THUMBNAIL: "thumbnail.webp",
   CARD: "card.webp",

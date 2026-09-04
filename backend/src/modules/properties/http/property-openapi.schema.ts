@@ -234,6 +234,37 @@ export const propertyListSchema = {
   ],
 } as const;
 
+const EXAMPLE_PROPERTY_MEDIA_VARIANT = {
+  url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a.../thumbnail.webp",
+  mime_type: "image/webp",
+  width: 320,
+  height: 213,
+  size_bytes: 12_345,
+} as const;
+
+/**
+ * One processed rendition (Prompt 035) — `null` when this slot has no
+ * `property_media_variants` row yet (section 7/8/9: `PROCESSING`, `FAILED`, or a "legacy READY"
+ * media from before Prompt 032's worker ever ran). Deliberately excludes `id`/
+ * `property_media_id`/`object_key`/`created_at`/`updated_at` (section 11) — a public rendition
+ * DTO, never a row dump. `url` (not `public_url`, section 12) distinguishes a variant's own URL
+ * from the original media's `public_url` at the top level. `mime_type` is whatever the worker
+ * actually persisted (currently always `image/webp`, ADR-008) — never hardcoded here (section
+ * 27).
+ */
+const VARIANT_PROPERTY = {
+  type: "object",
+  nullable: true,
+  properties: {
+    url: { type: "string", format: "uri" },
+    mime_type: { type: "string" },
+    width: { type: "integer", minimum: 1 },
+    height: { type: "integer", minimum: 1 },
+    size_bytes: { type: "integer", minimum: 1 },
+  },
+  required: ["url", "mime_type", "width", "height", "size_bytes"],
+} as const;
+
 const EXAMPLE_PROPERTY_MEDIA = {
   id: "3b1f6e2a-8c9d-4f7a-9e3b-2d1a5c8f0e11",
   property_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -243,9 +274,26 @@ const EXAMPLE_PROPERTY_MEDIA = {
   original_filename: "foto-sala.jpg",
   position: 0,
   is_cover: true,
-  processing_status: "PROCESSING",
+  processing_status: "READY",
   created_at: "2026-08-28T12:00:00.000Z",
   updated_at: "2026-08-28T12:00:00.000Z",
+  variants: {
+    thumbnail: EXAMPLE_PROPERTY_MEDIA_VARIANT,
+    card: {
+      url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a.../card.webp",
+      mime_type: "image/webp",
+      width: 640,
+      height: 426,
+      size_bytes: 23_456,
+    },
+    detail: {
+      url: "https://public-base.example/tenants/.../properties/.../3b1f6e2a.../detail.webp",
+      mime_type: "image/webp",
+      width: 1280,
+      height: 853,
+      size_bytes: 45_678,
+    },
+  },
 } as const;
 
 /**
@@ -253,7 +301,10 @@ const EXAMPLE_PROPERTY_MEDIA = {
  * detail, not part of the public contract. `public_url` is the persisted value from the upload
  * (`ObjectStorage.putObject()`), never recomputed on read (section 8). `is_cover` (Prompt 028):
  * at most one `true` per property, enforced by a database partial unique index — never only an
- * application convention.
+ * application convention. `variants` (Prompt 035) always carries exactly the three fixed keys
+ * `thumbnail`/`card`/`detail` — never a generic array (section 6) — each independently
+ * `null`able (section 7/8/9); never a fallback to the original's own `public_url` (section 10),
+ * and never `variants.original` (section 64).
  */
 export const propertyMediaSchema = {
   $id: "PropertyMedia",
@@ -275,12 +326,26 @@ export const propertyMediaSchema = {
       description:
         "Lifecycle of this media's derived variants (thumbnail/card/detail) — never about the " +
         "original itself, which is already usable via public_url in every state. New uploads " +
-        "start PROCESSING. No variant processing is implemented yet — every media currently " +
-        "either starts PROCESSING (new uploads) or was migrated to READY (media that existed " +
-        "before this field, meaning \"original operational,\" not \"variants exist\").",
+        "start PROCESSING and converge to READY (all three variants present) or FAILED (all " +
+        "three null) via the media processing worker (ADR-008). A 'legacy READY' media — " +
+        "migrated by the Prompt 030 backfill before any worker ever ran — may still have some " +
+        "or all variants null despite being READY; the variants object always reflects exactly " +
+        "what exists, never an assumption based on processing_status alone.",
     },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
+    variants: {
+      type: "object",
+      description:
+        "Always present with exactly these three keys. Each is null until that variant has " +
+        "been generated (or if generation permanently failed).",
+      properties: {
+        thumbnail: VARIANT_PROPERTY,
+        card: VARIANT_PROPERTY,
+        detail: VARIANT_PROPERTY,
+      },
+      required: ["thumbnail", "card", "detail"],
+    },
   },
   required: [
     "id",
@@ -294,6 +359,7 @@ export const propertyMediaSchema = {
     "processing_status",
     "created_at",
     "updated_at",
+    "variants",
   ],
   examples: [EXAMPLE_PROPERTY_MEDIA],
 } as const;

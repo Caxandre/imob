@@ -1,4 +1,4 @@
-import type { PropertyMedia, PropertyMediaMimeType } from "../domain/property-media.js";
+import type { PropertyMediaMimeType, PropertyMediaWithVariants } from "../domain/property-media.js";
 
 /**
  * `id`/`objectKey`/`publicUrl` are generated/resolved by the caller (`upload-property-media.ts`)
@@ -42,10 +42,12 @@ export interface PropertyMediaRepository {
    * not part of this contract; `CreatePropertyMediaInput` deliberately has no `isCover` field —
    * callers never decide it.
    */
-  create(input: CreatePropertyMediaInput): Promise<PropertyMedia>;
+  create(input: CreatePropertyMediaInput): Promise<PropertyMediaWithVariants>;
   /** Ordered `position ASC, id ASC` (this task, section 46) — deterministic even though
-   * `UNIQUE(property_id, position)` makes an actual position tie impossible. */
-  listByProperty(propertyId: string): Promise<PropertyMedia[]>;
+   * `UNIQUE(property_id, position)` makes an actual position tie impossible. Loads every
+   * returned media's variants in one additional query, never one per media (Prompt 035, section
+   * 14/15) — two fixed queries total, regardless of how many media the property has. */
+  listByProperty(propertyId: string): Promise<PropertyMediaWithVariants[]>;
   /**
    * Replaces the property's entire gallery order (Prompt 028, sections 15-22). `mediaIds` must
    * be exactly the property's current media ids, as a permutation — no more, no fewer.
@@ -54,14 +56,14 @@ export interface PropertyMediaRepository {
    * set doesn't exactly match the current gallery. Never touches `isCover` (section 23). Returns
    * the gallery in its new order.
    */
-  reorder(propertyId: string, mediaIds: string[]): Promise<PropertyMedia[]>;
+  reorder(propertyId: string, mediaIds: string[]): Promise<PropertyMediaWithVariants[]>;
   /**
    * Sets exactly one media as the property's cover, unsetting any previous one in the same
    * transaction (Prompt 028, sections 25-27). Idempotent — selecting the current cover again
    * still succeeds. Rejects with {@link PropertyMediaNotFoundError} if `mediaId` does not
    * belong to this property. Returns the now-cover media.
    */
-  setCover(propertyId: string, mediaId: string): Promise<PropertyMedia>;
+  setCover(propertyId: string, mediaId: string): Promise<PropertyMediaWithVariants>;
   /**
    * Removes one media's metadata row and reindexes the remaining gallery back to a gapless
    * `0..N-1` (Prompt 028, sections 31/35/42) — all inside one transaction, under the same
