@@ -5,7 +5,8 @@ Plataforma SaaS imobiliária multi-tenant.
 ```text
 imob/
 ├── backend/     API HTTP + workers (Node.js, TypeScript, Fastify, PostgreSQL)
-└── frontend/    aplicação web (ainda não inicializada)
+└── frontend/    aplicação web (React, TypeScript, Vite — fundação inicializada; ainda sem
+                  features de negócio)
 ```
 
 ## Organização do repositório
@@ -27,7 +28,8 @@ cd backend && pnpm install
 
 A documentação técnica detalhada do backend (stack, execução local, Docker, variáveis de
 ambiente, migrations, testes e arquitetura) está em
-[`backend/README.md`](backend/README.md).
+[`backend/README.md`](backend/README.md). A do frontend (stack, execução local, env, testes,
+estrutura) está em [`frontend/README.md`](frontend/README.md).
 
 ## Versão do Node
 
@@ -39,7 +41,10 @@ autônoma. Hoje as três versões são idênticas.
 
 O workflow [`.github/workflows/backend-ci.yml`](.github/workflows/backend-ci.yml) executa
 `typecheck`, `lint`, `test` e `build` do backend em pull requests e em pushes para `main`,
-somente quando há alteração em `backend/**`. Ainda não existe pipeline de deploy (CD).
+somente quando há alteração em `backend/**`. O workflow
+[`.github/workflows/frontend-ci.yml`](.github/workflows/frontend-ci.yml) faz o mesmo para o
+frontend, somente quando há alteração em `frontend/**` — os dois são independentes, cada um
+dispara apenas pelas mudanças do seu próprio projeto. Ainda não existe pipeline de deploy (CD).
 
 ## Conexão com o GitHub
 
