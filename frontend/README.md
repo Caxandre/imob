@@ -23,10 +23,10 @@ pnpm install
 pnpm dev
 ```
 
-Sobe em `http://localhost:5173` por padrão. Compila e roda de forma independente do backend
-(this task, section 72) — nenhuma chamada de rede acontece na home; features futuras que
-consumirem a API real precisarão do backend rodando (ver `backend/README.md`) e de
-`VITE_API_URL` apontando para ele.
+Sobe em `http://localhost:5173` por padrão (ou a próxima porta livre, se ocupada). A Home
+continua sem nenhuma chamada de rede; `/properties` precisa do backend rodando (ver
+`backend/README.md`, modo `pnpm dev:full` para exercitar Properties com tenant `READY`) e de
+`VITE_API_URL`/`VITE_TENANT_ID` configurados.
 
 ## Typecheck / lint / test / build
 
@@ -48,11 +48,18 @@ Copie `.env.example` para `.env` (nunca versionado) e ajuste se necessário:
 
 ```env
 VITE_API_URL=http://localhost:3000
+VITE_TENANT_ID=
 ```
 
 Todo acesso a variáveis de ambiente passa por `src/lib/env.ts` (validado com Zod, falha rápido
 na inicialização se algo estiver ausente/inválido) — nenhum outro módulo lê
 `import.meta.env` diretamente (regra reforçada por ESLint, ver `CLAUDE.md`).
+
+`VITE_TENANT_ID` é **opcional** no boot da aplicação — a Home continua funcionando sem ele.
+Só é exigido pela página `/properties` (feature Properties, Tenant Data Plane), que mostra um
+estado dedicado ("Tenant de desenvolvimento não configurado.") e não faz nenhuma requisição
+quando ele está ausente ou inválido. Deve ser o UUID de um tenant `READY` provisionado
+localmente (ver `backend/README.md`, seção "Testando Properties").
 
 ## Architecture summary
 
@@ -68,8 +75,9 @@ src/
 ├── components/
 │   ├── ui/             gerado/adaptado do shadcn — nunca lógica de negócio
 │   └── common/          componentes genéricos da aplicação
-├── features/           lógica específica de negócio, uma pasta por feature — vazio até a
-│                        primeira feature real (Properties/Tenants/Auth) começar
+├── features/
+│   └── properties/     catálogo de imóveis (api/components/schemas/hooks/lib) — primeira
+│                        feature real; demais features (Tenants/Auth) ainda não começaram
 ├── lib/
 │   ├── env.ts           único ponto de leitura de import.meta.env
 │   └── http/             apiFetch() + ApiError — fetch nativo, sem Axios
@@ -84,14 +92,35 @@ navegável/compartilhável → URL; estado de UI local → `useState`/`useReduce
 deliberadamente **não instalado** — só entra quando surgir uma necessidade real de estado
 cliente global cruzando features.
 
-**Rotas hoje**: `/` (home mínima, prova que o toolchain funciona) e `*` (404). Nada além disso
-— sem dashboard, sem listagem de imóveis, sem tenants, sem login.
+**Rotas hoje**: `/` (home mínima, com um link "Ver imóveis") , `/properties` (catálogo de
+imóveis) e `*` (404). Sem dashboard, sem tenants, sem login, sem detalhe/CRUD de imóvel ainda.
 
 **UI**: Tailwind CSS v4 + shadcn/ui (`components.json`, alias `@/*` → `src/*` consistente em
 TypeScript/Vite/Vitest/shadcn). Componentes instalados: `button`, `card`, `input`, `label`,
-`badge`, `separator`, `skeleton`, `sonner`. Tema claro; a arquitetura de tokens (CSS variables)
-não impede um tema escuro futuro, mas nenhum toggle existe ainda.
+`badge`, `separator`, `select`, `skeleton`, `sonner`. Tema claro; a arquitetura de tokens (CSS
+variables) não impede um tema escuro futuro, mas nenhum toggle existe ainda.
 
-**Autenticação**: não implementada. **Tenant handling**: não implementado — o mecanismo
-temporário `X-Tenant-Id` do backend será decidido explicitamente pela futura feature Properties,
-nunca configurado globalmente aqui.
+**Autenticação**: não implementada.
+
+### Catálogo de imóveis (`/properties`)
+
+- Consome `GET /api/v1/properties` (`backend/src/modules/properties/http/property-routes.ts`)
+  através de `listProperties()` (`src/features/properties/api/list-properties.ts`) — uma única
+  chamada HTTP por carregamento lógico da página. A capa de cada card vem embutida na própria
+  listagem (campo `cover`, com `variants.thumbnail`/`variants.card`) — **nunca** existe uma
+  chamada `GET /properties/:id/media` por card (sem N+1).
+- **Tenant context**: o backend ainda usa um header temporário `X-Tenant-Id` (Tenant Data
+  Plane, sem autenticação real) — ver `backend/README.md`. Esse header é enviado **apenas**
+  pela função de API da feature Properties, nunca globalmente por `apiFetch()` (Control Plane e
+  Tenant Data Plane são contextos diferentes — ver `CLAUDE.md`). O tenant id vem de
+  `VITE_TENANT_ID` (ver "Env" acima); sem ele, `/properties` mostra um estado dedicado e não
+  faz nenhuma requisição.
+- **Filtros, ordenação e paginação vivem na URL** (`?q=&status=&property_type=&
+  transaction_type=&city=&state=&price_min=&price_max=&bedrooms_min=&bathrooms_min=&
+  parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que o backend
+  aceita) — um link copiado reproduz o mesmo resultado. Só um subconjunto (busca, tipo,
+  transação, cidade, estado, preço mín/máx, quartos mín) tem controle visual; o restante
+  continua aceito via URL. Valores inválidos (`page=-1`, `price_min=abc`, `status=banana`) são
+  ignorados silenciosamente em vez de quebrar a página.
+- Server state via TanStack Query (`useProperties`, `src/features/properties/hooks/`) — a
+  query key inclui o tenant id, então o cache nunca mistura dados de tenants diferentes.

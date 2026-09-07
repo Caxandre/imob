@@ -52,6 +52,17 @@ específicas do frontend.
 - Não invente autenticação (`Authorization`, `Bearer` fake, `X-User`, `X-Admin`) nem o header
   temporário de tenant (`X-Tenant-Id`) neste nível genérico — cada mecanismo real é decidido
   explicitamente pela feature que primeiro precisar dele.
+- Feature de Tenant Data Plane (ex.: Properties) deve passar o contexto de tenant
+  explicitamente, sempre escopado à própria chamada de API da feature — nunca injetar
+  `X-Tenant-Id` globalmente em `apiFetch()`. Control Plane e Tenant Data Plane são contextos
+  diferentes (ver `backend/CLAUDE.md`/`ARCHITECTURE.md`); nada que só o Tenant Data Plane usa
+  pertence à camada HTTP genérica. Ver `src/features/properties/api/list-properties.ts` como
+  exemplo aplicado (Prompt 037B).
+- Filtros, ordenação e paginação de um catálogo compartilhável (ex.: `/properties`) pertencem à
+  URL, não a estado local/global — um link copiado deve reproduzir o mesmo resultado. Ver
+  `src/features/properties/schemas/property-filters.schema.ts` (Prompt 037B) como exemplo
+  aplicado: parsing tolerante (valor inválido é ignorado, nunca quebra a página) e serialização
+  que omite parâmetros vazios/default.
 
 ## Componentes shadcn
 
