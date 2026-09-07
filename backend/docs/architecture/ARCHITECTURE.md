@@ -932,65 +932,89 @@ iniciar especificamente sob `NODE_ENV=production`, por não existir ainda um pro
 `SecretStore` de produção (ver seção Control Plane) — essa trava não mudou com o Prompt 019.
 **PLANNED**: `SecretStore` de produção em si ([ADR-004](adr/ADR-004-production-secret-store.md)).
 
-### Local development runtime — o gap de SecretStore entre processos
+### Local development runtime — persistent local SecretStore
 
-A API HTTP (`src/main/server.ts`), o worker de provisionamento
-(`src/workers/provisioning-worker.ts`) e o dispatcher
-(`src/workers/provisioning-dispatcher.ts`) são **processos separados de verdade** — essa é a
-topologia real, inclusive em produção. Cada um constrói sua própria instância de
-`createInMemorySecretStore()` (o único `SecretStore` que existe hoje — ADR-004). Como essa
-implementação é apenas um `Map` em memória de processo, **um secret de tenant escrito pelo
-worker durante o provisioning não é visível para a API rodando como outro processo** — e
-vice-versa. Isso não é um bug: é a consequência honesta e esperada de não existir ainda um
-`SecretStore` de produção real compartilhado (AWS Secrets Manager, ADR-004) nem qualquer
-outro mecanismo de compartilhamento local seguro. Nenhum fallback para a credencial
-administrativa do cluster existe ou é permitido para contornar isso.
+**IMPLEMENTED** (Prompt 039): local dev/test tenant and cluster secrets persist across process
+restarts and are shared between separate local processes via `LocalFileSecretStore` — see
+`src/modules/provisioning/infrastructure/local-file-secret-store.ts`.
 
-**IMPLEMENTED** (Prompt 021; Prompt 031 acrescentou o dispatcher de outbox de mídia; Prompt 032
-acrescentou o worker de processamento de imagens) — `src/main/dev-full.ts` (`pnpm dev:full`), um
-runtime **somente de desenvolvimento** que sobe a API HTTP, o worker de provisionamento, o
-dispatcher de outbox de mídia, e o worker de processamento de imagens no mesmo processo,
-compartilhando a mesma instância de `SecretStore`:
+The API HTTP (`src/main/server.ts`), o worker de provisionamento
+(`src/workers/provisioning-worker.ts`), o dispatcher (`src/workers/provisioning-dispatcher.ts`),
+o dispatcher de outbox de mídia (`src/workers/media-outbox-dispatcher.ts`) e o worker de
+processamento de imagens (`src/workers/media-processing-worker.ts`) são **processos separados
+de verdade** — essa é a topologia real, inclusive em produção. Antes do Prompt 039, cada um
+construía sua própria instância de `createInMemorySecretStore()`: um `Map` em memória de
+processo, sem durabilidade e sem compartilhamento entre processos — um secret de tenant escrito
+pelo worker durante o provisioning não era visível para a API rodando como outro processo, e um
+restart de qualquer processo perdia todos os secrets que ele havia escrito.
+
+Desde o Prompt 039, `createRuntimeSecretStore()`
+(`src/modules/provisioning/infrastructure/runtime-secret-store.ts`) centraliza a decisão de
+provider para todo entrypoint não-produção: fora de `NODE_ENV=production`, sempre um
+`LocalFileSecretStore` apontando para `env.DEV_SECRET_STORE_PATH` (default
+`.local/secrets.json`, resolvido de forma determinística contra a raiz do pacote `backend/` —
+nunca contra `process.cwd()`, ver `src/config/project-root.ts`). Como o arquivo é o mesmo para
+todo processo que usa o default (ou uma configuração explicitamente igual), **um secret escrito
+por um processo agora é lido por qualquer outro** — o worker de provisionamento escreve a
+credencial de um tenant; a API, rodando como processo genuinamente separado, resolve essa mesma
+credencial sem nenhum truque de memória compartilhada. Isso fecha, para desenvolvimento local, o
+gap que este documento descrevia antes deste Prompt — sem implementar nenhum provider de
+produção (ADR-004 continua `PLANNED`; ver `docs/architecture/adr/ADR-004-production-secret-store.md`,
+atualizado por este Prompt para deixar essa distinção explícita).
+
+`createRuntimeSecretStore()` nunca seleciona o arquivo local sob `NODE_ENV=production` — lança
+`ProductionSecretStoreNotConfiguredError` nesse caso, e cada entrypoint captura esse erro
+especificamente para um `logger.fatal()` + `process.exit(1)` com sua própria tag de operação
+(mesma convenção que já existia). Nenhum entrypoint decide isso sozinho com um `if (NODE_ENV
+=== ...)` espalhado — a decisão vive num único lugar.
+
+`src/main/dev-full.ts` (`pnpm dev:full`) continua existindo como um runtime **somente de
+desenvolvimento** que sobe a API HTTP, o worker de provisionamento, o dispatcher de outbox de
+mídia, e o worker de processamento de imagens no mesmo processo — agora uma conveniência (um
+terminal em vez de quatro), não mais a única forma de obter compartilhamento de secrets local:
 
 ```text
 pnpm dev:full
     ↓
 uma única composição de dependências
     ↓
-InMemorySecretStore compartilhado
+LocalFileSecretStore (env.DEV_SECRET_STORE_PATH — persistente, compartilhável)
     ├── HTTP API (build-app.ts → TenantDatabaseConnectionManager)
     ├── provisioning worker (createProvisioningWorkerRuntime)
     ├── media outbox dispatcher (createMediaOutboxDispatcherRuntime — Prompt 031)
     └── media processing worker (createMediaProcessingWorkerRuntime — Prompt 032)
 ```
 
-`createProvisioningWorkerRuntime()` (`src/workers/provisioning-worker-runtime.ts`) foi
-extraído de `provisioning-worker.ts` especificamente para isso: recebe o `SecretStore` (e o
-logger) do chamador em vez de construí-los internamente, para que `provisioning-worker.ts`
-(processo isolado) e `dev-full.ts` (processo combinado) montem exatamente o mesmo pipeline a
-partir de instâncias diferentes — sem duplicar a composição. Testado diretamente
+`createProvisioningWorkerRuntime()` (`src/workers/provisioning-worker-runtime.ts`) foi extraído
+de `provisioning-worker.ts` especificamente para isso: recebe o `SecretStore` (e o logger) do
+chamador em vez de construí-los internamente, para que `provisioning-worker.ts` (processo
+isolado) e `dev-full.ts` (processo combinado) montem exatamente o mesmo pipeline a partir de
+instâncias diferentes — sem duplicar a composição. Testado diretamente
 (`src/workers/provisioning-worker-runtime.test.ts`): um `TenantDatabaseConnectionManager`
-construído a partir do **mesmo** `SecretStore` que o worker usou resolve e conecta com
-sucesso; construído a partir de um `SecretStore` **diferente**, falha com
-`TenantSecretNotFoundError` — nunca recorrendo à credencial administrativa.
+construído a partir do **mesmo** `SecretStore` que o worker usou resolve e conecta com sucesso;
+construído a partir de um `SecretStore` **diferente**, falha com `TenantSecretNotFoundError` —
+nunca recorrendo à credencial administrativa. O mesmo arquivo de teste prova agora também
+(Prompt 039) que uma **nova instância** de `LocalFileSecretStore` apontando para o mesmo
+arquivo — simulando um restart de processo — resolve a credencial que uma instância anterior
+escreveu, usando PostgreSQL real de ponta a ponta.
 `createMediaOutboxDispatcherRuntime()` (`src/workers/media-outbox-dispatcher-runtime.ts`, Prompt
 031) e `createMediaProcessingWorkerRuntime()` (`src/workers/media-processing-worker-runtime.ts`,
 Prompt 032) seguem exatamente o mesmo padrão de extração, pela mesma razão: os dois precisam
-resolver credencial de aplicação por tenant (para abrir cada Tenant Data Plane), então herdam o
-mesmo gap de `SecretStore` entre processos que o worker de provisionamento já tem —
-`provisioning-dispatcher.ts`, por não tocar credencial de tenant nenhuma (só Control Plane +
-Redis), permanece deliberadamente fora de `dev-full.ts` (seção "Media outbox dispatcher" acima
+resolver credencial de aplicação por tenant (para abrir cada Tenant Data Plane), então se
+beneficiam do mesmo `SecretStore` persistente — `provisioning-dispatcher.ts`, por não tocar
+credencial de tenant nenhuma (só Control Plane + Redis), permanece deliberadamente fora de
+`dev-full.ts` e sem nenhuma dependência de `SecretStore` (seção "Media outbox dispatcher" acima
 detalha o porquê).
 
-`dev-full.ts` recusa-se a iniciar sob `NODE_ENV=production` com seu próprio fail-fast
-explícito (não depende só do guard interno do `InMemorySecretStore`) — este runtime **não
-representa a topologia de produção** e nunca deve ser usado como se representasse. Os cinco
-entrypoints independentes (`server.ts`, `provisioning-worker.ts`, `provisioning-dispatcher.ts`,
+`dev-full.ts` recusa-se a iniciar sob `NODE_ENV=production` com seu próprio fail-fast explícito
+(não depende só do guard interno da fábrica de `SecretStore`) — este runtime **não representa a
+topologia de produção** e nunca deve ser usado como se representasse. Os cinco entrypoints
+independentes (`server.ts`, `provisioning-worker.ts`, `provisioning-dispatcher.ts`,
 `media-outbox-dispatcher.ts`, `media-processing-worker.ts`) continuam existindo, inalterados em
-intenção — eles continuam não compartilhando `SecretStore` entre si quando executados
-separadamente, e essa é uma limitação documentada, não corrigida por este runtime combinado (que
-é uma conveniência local temporária, não uma correção da arquitetura real). `dev-full.ts` deixa
-de ser necessário quando o Prompt de ADR-004 (AWS Secrets Manager) for implementado.
+intenção — cada um continua um processo genuinamente separado; o que mudou é que, quando
+apontados para o mesmo `DEV_SECRET_STORE_PATH`, eles agora *podem* compartilhar secrets sem
+`dev-full.ts`. `dev-full.ts` deixa de ser necessário (mas continua funcionando) quando o Prompt
+de ADR-004 (AWS Secrets Manager) for implementado.
 
 Fluxo local recomendado para testar `POST/GET /api/v1/properties` manualmente via Swagger
 (ver também README.md):
@@ -999,7 +1023,7 @@ Fluxo local recomendado para testar `POST/GET /api/v1/properties` manualmente vi
 docker compose up -d
 pnpm db:migrate
 pnpm dev:dispatcher     # terminal separado — continua processo independente
-pnpm dev:full           # API + provisioning worker, SecretStore compartilhado
+pnpm dev:full           # API + provisioning worker, SecretStore local persistente
 ```
 
 **IMPLEMENTED** (Prompt 024) — `bootstrapLocalDevCluster()`
@@ -1009,42 +1033,45 @@ specifically. Called once at `dev-full.ts` startup, before `app.listen()`:
 ```text
 dev-full.ts startup
     ↓
-createInMemorySecretStore()  (fresh, empty — every process restart)
+createRuntimeSecretStore()  (LocalFileSecretStore — persistent, shared, survives restart)
     ↓
 bootstrapLocalDevCluster(secretStore, logger, { clusterName, host, port, adminUsername, adminPassword })
     ├── database_clusters row for TENANT_DATABASE_DEFAULT_CLUSTER: insert only if missing
     │   (onConflictDoNothing on the unique name — idempotent by discovery, CLAUDE.md; never
     │   overwrites an already-existing row, so a locally-customized one is never reset)
     └── secretStore.put(cluster.secretReference, {username, password}): unconditional, every
-        call — the SecretStore itself never survives a restart even though the
-        database_clusters row does, so this is what actually re-closes the gap each time
+        call — deliberately kept unconditional even though the store is now persistent (Prompt
+        039, section 36): cheap, idempotent, and lets a locally-changed
+        DEV_BOOTSTRAP_CLUSTER_ADMIN_PASSWORD actually take effect on the next startup
     ↓
 POST /api/v1/tenants → provisioning succeeds without any manual step
 ```
 
-**Important corollary**: `bootstrapLocalDevCluster()` only re-seeds the *cluster's admin*
-credential (needed to provision new tenants) — it has no knowledge of, and never re-seeds, any
-individual tenant's own application-role secret from a previous run. So after a `dev-full.ts`
-restart, provisioning a brand-new tenant works immediately, but every tenant provisioned by a
-*previous* process instance is permanently unusable in the new one: `GET/POST
-/api/v1/properties` for that `tenantId` returns `503 { message: "Tenant infrastructure is not
-currently available" }` (`TenantSecretNotFoundError`, mapped in
-`property-error-mapper.ts`) even though the tenant still shows `READY` in the Control Plane and
-its database still physically exists. This is not a transient failure — retrying does not help;
-the only fix is provisioning a new tenant under the currently-running process (see README.md,
-"Testando Properties").
+**Historical note (resolved by Prompt 039)**: before this Prompt, `bootstrapLocalDevCluster()`
+re-seeding only the *cluster's admin* credential (never an individual tenant's own
+application-role secret) meant that, since the `SecretStore` itself was in-memory and never
+survived a restart, every tenant provisioned by a *previous* `dev-full.ts` process instance
+became permanently unusable in a new one: `GET/POST /api/v1/properties` for that `tenantId`
+returned `503 { message: "Tenant infrastructure is not currently available" }`
+(`TenantSecretNotFoundError`) even though the tenant still showed `READY` in the Control Plane.
+Since Prompt 039, this corollary no longer applies to tenants provisioned with
+`LocalFileSecretStore`: the store itself survives the restart, so `bootstrapLocalDevCluster()`
+re-seeding only the cluster admin credential is no longer a problem — no tenant secret was ever
+at risk of being lost by a restart in the first place. A tenant whose secret was already lost by
+the *old* `InMemorySecretStore`-based runtime (i.e., provisioned before adopting Prompt 039)
+still cannot be recovered — it must be provisioned one last time (see README.md, "Testando
+Properties").
 
-Connection details come from four new **dev-only** env vars, read exclusively by
+Connection details come from four **dev-only** env vars, read exclusively by
 `dev-full.ts` — `DEV_BOOTSTRAP_CLUSTER_HOST`/`_PORT`/`_ADMIN_USERNAME`/`_ADMIN_PASSWORD`
 (all optional, defaulting to `postgres-tenants`'s Docker Compose values). `server.ts`,
 `provisioning-worker.ts` and `provisioning-dispatcher.ts` never read them and never call
 `bootstrapLocalDevCluster()` — running them as separate processes still requires the
-`database_clusters` row and admin secret to be seeded manually, exactly as before this Prompt;
-this task changes nothing about production behavior or about any entrypoint other than
-`dev-full.ts`. Proven end to end
-(`src/main/dev-full-bootstrap.test.ts`): after only `bootstrapLocalDevCluster()` (no other
-manual step), `POST /api/v1/tenants` through the real HTTP app provisions a real tenant
-database and the tenant reaches `READY`.
+`database_clusters` row to be seeded manually (the admin *secret* itself is now shared
+automatically via `DEV_SECRET_STORE_PATH`, as long as every process points at the same file).
+Proven end to end (`src/main/dev-full-bootstrap.test.ts`): after only
+`bootstrapLocalDevCluster()` (no other manual step), `POST /api/v1/tenants` through the real
+HTTP app provisions a real tenant database and the tenant reaches `READY`.
 
 ## Transactional Outbox **(futuro)**
 

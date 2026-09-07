@@ -115,6 +115,16 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   uma allowlist vazia/ausente significa nenhuma origem de browser autorizada, nunca um fallback
   permissivo, mesmo localmente. Ver `src/app/build-app.ts`/`src/config/env.ts` (Prompt 037C)
   como exemplo aplicado.
+- Development may use the persistent `LocalFileSecretStore`, but production runtimes must never
+  fall back to file-based or in-memory secret storage. A real production-grade `SecretStore`
+  provider remains ADR-004, status PLANNED. Ver `createRuntimeSecretStore()`
+  (`src/modules/provisioning/infrastructure/runtime-secret-store.ts`, Prompt 039) como exemplo
+  aplicado — a decisão de provider vive num único lugar, nunca espalhada em `if (NODE_ENV ===
+  ...)` por entrypoint.
+- Local secret files must remain gitignored and must never be printed in logs, test reports,
+  documentation examples, or PR descriptions. Ver `.gitignore` (`.local/`) e
+  `local-file-secret-store.ts` (Prompt 039) — mensagens de erro nunca incluem o conteúdo do
+  arquivo nem valores de secret, apenas o caminho e uma razão fixa e não sensível.
 
 ## Multi-tenancy — regra crítica
 

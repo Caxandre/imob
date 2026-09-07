@@ -6,40 +6,40 @@ import { createLoggerOptions } from "../infrastructure/logger/logger.js";
 import { createCloudflareR2ObjectStorage } from "../infrastructure/object-storage/cloudflare-r2-object-storage.js";
 import { ObjectStorageConfigurationError } from "../infrastructure/object-storage/object-storage.js";
 import { createTenantDatabaseCredentialResolver } from "../modules/provisioning/application/tenant-database-credential-resolver.js";
-import { createInMemorySecretStore } from "../modules/provisioning/test-support/in-memory-secret-store.js";
+import {
+  createRuntimeSecretStore,
+  ProductionSecretStoreNotConfiguredError,
+} from "../modules/provisioning/infrastructure/runtime-secret-store.js";
 import { createPgTenantDatabaseConnectionManager } from "../modules/tenant-runtime/infrastructure/pg-tenant-database-connection-manager.js";
 
 /**
  * Standalone API entrypoint — a real, separate process from `provisioning-worker.ts`/
- * `provisioning-dispatcher.ts` (this task, Prompt 021, sections 33-36). Its `SecretStore` is
- * private, in-memory, and constructed fresh right here: a tenant secret written by the
- * provisioning worker running as its own process is NOT visible to this one. That means
- * `POST /api/v1/properties` against a tenant provisioned by the standalone worker will fail
- * to resolve that tenant's credential in this configuration — an honest, documented gap, not
- * silently worked around (never falls back to the cluster admin credential). Use
- * `dev-full.ts` (`pnpm dev:full`) for local manual testing that needs both provisioning and
- * property routes to share the same tenant secrets — see ARCHITECTURE.md/README.md.
+ * `provisioning-dispatcher.ts` (Prompt 021, sections 33-36). Its `SecretStore` (Prompt 039:
+ * `LocalFileSecretStore` at `env.DEV_SECRET_STORE_PATH`) is persistent and shared with every
+ * other local process pointed at the same file — a tenant secret written by the provisioning
+ * worker running as its own separate process IS visible here, as long as both use the default
+ * (or an explicitly matching) `DEV_SECRET_STORE_PATH`. `dev-full.ts` (`pnpm dev:full`) remains
+ * the simpler single-process convenience for local manual testing — see
+ * ARCHITECTURE.md/README.md — but is no longer the only way to get secret-sharing locally.
  *
- * Refuses to start in production for the same reason `provisioning-worker.ts` already does:
- * no production-grade `SecretStore` provider exists yet (ADR-004: AWS Secrets Manager, status
- * PLANNED). `createInMemorySecretStore()` already refuses to construct under
- * `NODE_ENV=production` on its own; this entrypoint checks explicitly first so the failure is
- * a clean, logged `process.exit(1)` rather than an uncaught construction error.
+ * Refuses to start in production for the same reason `provisioning-worker.ts` already does: no
+ * production-grade `SecretStore` provider exists yet (ADR-004: AWS Secrets Manager, status
+ * PLANNED) — `createRuntimeSecretStore()` throws `ProductionSecretStoreNotConfiguredError`
+ * rather than ever selecting the dev-only file store there.
  */
 const logger = pino(createLoggerOptions());
 
-if (env.NODE_ENV === "production") {
-  logger.fatal(
-    { operation: "server.startup", reason: "no-production-secret-store" },
-    "Refusing to start in production: no production-grade SecretStore provider exists yet " +
-      "(createInMemorySecretStore is test/dev support only, and refuses to construct under " +
-      "NODE_ENV=production on its own). See ADR-004 and " +
-      "src/modules/provisioning/test-support/in-memory-secret-store.ts.",
-  );
-  process.exit(1);
+let secretStore;
+try {
+  secretStore = createRuntimeSecretStore();
+} catch (error) {
+  if (error instanceof ProductionSecretStoreNotConfiguredError) {
+    logger.fatal({ operation: "server.startup", reason: "no-production-secret-store" }, error.message);
+    process.exit(1);
+  }
+  throw error;
 }
 
-const secretStore = createInMemorySecretStore();
 const tenantDatabaseConnectionManager = createPgTenantDatabaseConnectionManager({
   credentialResolver: createTenantDatabaseCredentialResolver(secretStore),
 });

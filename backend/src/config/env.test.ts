@@ -127,3 +127,27 @@ describe("env — CORS_ALLOWED_ORIGINS", () => {
     await expect(import("./env.js")).rejects.toThrow("process.exit(1) called");
   });
 });
+
+describe("env — DEV_SECRET_STORE_PATH", () => {
+  it("defaults to .local/secrets.json when unset", async () => {
+    const { env } = await import("./env.js");
+
+    expect(env.DEV_SECRET_STORE_PATH).toBe(".local/secrets.json");
+  });
+
+  it("accepts a custom relative path", async () => {
+    vi.stubEnv("DEV_SECRET_STORE_PATH", ".local/custom-secrets.json");
+
+    const { env } = await import("./env.js");
+
+    expect(env.DEV_SECRET_STORE_PATH).toBe(".local/custom-secrets.json");
+  });
+
+  it("accepts a custom absolute path", async () => {
+    vi.stubEnv("DEV_SECRET_STORE_PATH", "/tmp/imob-secrets.json");
+
+    const { env } = await import("./env.js");
+
+    expect(env.DEV_SECRET_STORE_PATH).toBe("/tmp/imob-secrets.json");
+  });
+});

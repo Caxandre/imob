@@ -66,7 +66,7 @@ const envSchema = z
 
     // DEV-ONLY (Prompt 024): consumed exclusively by src/main/dev-full.ts, to idempotently
     // bootstrap the local database_clusters row (named TENANT_DATABASE_DEFAULT_CLUSTER) and
-    // seed its admin credential into the in-memory SecretStore on startup. server.ts,
+    // seed its admin credential into the local SecretStore on startup. server.ts,
     // provisioning-worker.ts and provisioning-dispatcher.ts never read these — this changes
     // nothing about their behavior. Defaults match docker-compose.yml's postgres-tenants
     // service.
@@ -74,6 +74,17 @@ const envSchema = z
     DEV_BOOTSTRAP_CLUSTER_PORT: z.coerce.number().int().positive().default(5433),
     DEV_BOOTSTRAP_CLUSTER_ADMIN_USERNAME: z.string().default("postgres"),
     DEV_BOOTSTRAP_CLUSTER_ADMIN_PASSWORD: z.string().default("postgres"),
+
+    // DEV-ONLY (Prompt 039): where `createRuntimeSecretStore()` persists the local
+    // `LocalFileSecretStore` JSON file — every non-production entrypoint (server.ts,
+    // dev-full.ts, provisioning-worker.ts, media-outbox-dispatcher.ts,
+    // media-processing-worker.ts) reads this and, as long as they all point at the same path
+    // (the default), share tenant/cluster secrets across separate local processes without any
+    // in-memory sharing trick. Never read/selected under NODE_ENV=production — see
+    // `runtime-secret-store.ts`. Resolved relative to the backend package root (never the
+    // process's current working directory) unless already absolute — see
+    // `config/project-root.ts`.
+    DEV_SECRET_STORE_PATH: z.string().min(1).default(".local/secrets.json"),
 
     // Cloudflare R2 (Prompt 026, ADR-006) — every field is optional here, deliberately: no
     // entrypoint that doesn't touch object storage should fail to start just because R2 isn't
