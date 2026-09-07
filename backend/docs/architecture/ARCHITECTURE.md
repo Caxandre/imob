@@ -1022,6 +1022,18 @@ bootstrapLocalDevCluster(secretStore, logger, { clusterName, host, port, adminUs
 POST /api/v1/tenants → provisioning succeeds without any manual step
 ```
 
+**Important corollary**: `bootstrapLocalDevCluster()` only re-seeds the *cluster's admin*
+credential (needed to provision new tenants) — it has no knowledge of, and never re-seeds, any
+individual tenant's own application-role secret from a previous run. So after a `dev-full.ts`
+restart, provisioning a brand-new tenant works immediately, but every tenant provisioned by a
+*previous* process instance is permanently unusable in the new one: `GET/POST
+/api/v1/properties` for that `tenantId` returns `503 { message: "Tenant infrastructure is not
+currently available" }` (`TenantSecretNotFoundError`, mapped in
+`property-error-mapper.ts`) even though the tenant still shows `READY` in the Control Plane and
+its database still physically exists. This is not a transient failure — retrying does not help;
+the only fix is provisioning a new tenant under the currently-running process (see README.md,
+"Testando Properties").
+
 Connection details come from four new **dev-only** env vars, read exclusively by
 `dev-full.ts` — `DEV_BOOTSTRAP_CLUSTER_HOST`/`_PORT`/`_ADMIN_USERNAME`/`_ADMIN_PASSWORD`
 (all optional, defaulting to `postgres-tenants`'s Docker Compose values). `server.ts`,
