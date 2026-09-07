@@ -312,6 +312,20 @@ Sem `pnpm dev:full` (ou seja, com `pnpm dev` sozinho), `POST/GET /api/v1/propert
 tenant provisionado pelo worker separado falha ao resolver a credencial do tenant — ver a
 seção "Local development runtime" em `ARCHITECTURE.md`.
 
+**Troubleshooting: `503 { "message": "Tenant infrastructure is not currently available" }`
+para um tenant que funcionava antes.** O `SecretStore` de `pnpm dev:full` é em memória e
+**não sobrevive a um restart do processo** (ver "Local development runtime" em
+`ARCHITECTURE.md`) — ao reiniciar `pnpm dev:full` (nova sessão, crash, `--watch` recarregando
+após uma edição, etc.), a credencial de aplicação de qualquer tenant provisionado por uma
+execução *anterior* deixa de existir nesse processo, mesmo o tenant continuando `READY` no
+Control Plane e seu database continuando a existir de fato. Isso é permanente para aquele
+`tenantId` **nesse novo processo** — não é um erro transitório, não adianta tentar de novo.
+A correção é sempre provisionar um tenant novo (`POST /api/v1/tenants`, aguardar `READY`) sob
+o processo `dev:full` atualmente em execução, e apontar o cliente (Swagger, `curl`,
+`VITE_TENANT_ID` do frontend) para esse novo id — nunca reutilizar um `tenantId` antigo através
+de um restart. Isso é uma limitação conhecida da arquitetura de desenvolvimento atual (nenhum
+`SecretStore` de produção existe ainda — ADR-004), não um bug de uma feature específica.
+
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` e
 `GET /api/v1/tenants/{id}` (tag **Tenants** — ambos `GET` são administrativos, só o Control
 Plane, sem autenticação ainda; ver `ARCHITECTURE.md`), e `POST/GET /api/v1/properties`,
