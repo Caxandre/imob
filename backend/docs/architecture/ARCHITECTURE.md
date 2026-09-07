@@ -655,6 +655,21 @@ exposição pública enquanto autenticação real não existir; e o fail-fast de
   como mecanismo definitivo de produto. Nunca a partir de parâmetros informados livremente
   pelo cliente (`databaseName`, `databaseUrl`, etc.).
 
+### HTTP CORS allowlist — IMPLEMENTED (Prompt 037C)
+
+Browser origins são configuradas explicitamente por ambiente (`CORS_ALLOWED_ORIGINS`, ver
+README.md) — `@fastify/cors` registrado dentro de `buildApp()` (`src/app/build-app.ts`), então
+`Fastify.inject()` em testes exercita exatamente a mesma política que o servidor real. Aplica-se
+a toda a aplicação HTTP (Control Plane e Tenant Data Plane), não apenas a Properties: CORS é
+política de transporte, não uma regra de um módulo de domínio específico. Match exato por
+origem, sem wildcard e sem `Access-Control-Allow-Credentials` (nenhuma autenticação baseada em
+cookie/sessão de browser existe ainda) — o preflight do header temporário `X-Tenant-Id`
+(seção anterior) funciona como qualquer outro header solicitado por uma origem já autorizada.
+Uma allowlist vazia/ausente significa nenhuma origem de browser autorizada, nunca um fallback
+permissivo — a API continua subindo normalmente mesmo assim. CORS não é autenticação: apenas
+controla se o *browser* pode ler a resposta; chamadas sem header `Origin` (curl, workers, testes,
+server-to-server) nunca são afetadas.
+
 ## Properties (primeiro módulo de domínio)
 
 **IMPLEMENTED** (Prompts 021-022) — primeiro módulo funcional do domínio imobiliário

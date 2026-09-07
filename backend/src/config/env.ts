@@ -89,6 +89,71 @@ const envSchema = z
     R2_SECRET_ACCESS_KEY: z.string().min(1, "R2_SECRET_ACCESS_KEY must be a non-empty string").optional(),
     R2_BUCKET: z.string().min(1, "R2_BUCKET must be a non-empty string").optional(),
     R2_PUBLIC_URL: z.string().url("R2_PUBLIC_URL must be a valid URL").optional(),
+
+    // CORS allowlist (Prompt 037C) — the browser origins allowed to call this API at all
+    // (Control Plane and Tenant Data Plane routes alike; CORS is an HTTP-layer policy, not a
+    // per-module concern). Comma-separated in the raw env var; parsed here into a deduplicated
+    // array of canonical origins (`new URL(entry).origin` — a trailing slash or an otherwise
+    // equivalent URL collapses to the same entry), which is the only shape the rest of the app
+    // ever sees (`buildApp()`'s `corsAllowedOrigins` dependency, see src/app/build-app.ts).
+    // Each entry must be an absolute http(s) URL with no path/query/fragment — "localhost:5173"
+    // or "http://localhost:5173/app" are rejected rather than silently guessed at, since a
+    // wrong allowlist entry is a security-relevant misconfiguration, not a convenience default.
+    // Missing/empty (the default) means no browser origin is authorized — the API still starts;
+    // it just isn't reachable from a browser until this is set (section 27: no implicit
+    // wildcard fallback).
+    CORS_ALLOWED_ORIGINS: z
+      .string()
+      .default("")
+      .transform((value, ctx) => {
+        const origins: string[] = [];
+        let hasError = false;
+
+        for (const rawEntry of value.split(",")) {
+          const entry = rawEntry.trim();
+          if (entry.length === 0) {
+            continue;
+          }
+
+          let parsed: URL;
+          try {
+            parsed = new URL(entry);
+          } catch {
+            ctx.addIssue({
+              code: "custom",
+              message: `CORS_ALLOWED_ORIGINS entry "${entry}" must be a valid absolute URL (e.g. http://localhost:5173)`,
+            });
+            hasError = true;
+            continue;
+          }
+
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+            ctx.addIssue({
+              code: "custom",
+              message: `CORS_ALLOWED_ORIGINS entry "${entry}" must use http or https`,
+            });
+            hasError = true;
+            continue;
+          }
+
+          if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+            ctx.addIssue({
+              code: "custom",
+              message: `CORS_ALLOWED_ORIGINS entry "${entry}" must be an origin only, with no path/query/fragment`,
+            });
+            hasError = true;
+            continue;
+          }
+
+          origins.push(parsed.origin);
+        }
+
+        if (hasError) {
+          return z.NEVER;
+        }
+
+        return Array.from(new Set(origins));
+      }),
   })
   .refine(
     (data) =>

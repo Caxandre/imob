@@ -72,7 +72,11 @@ try {
   throw error;
 }
 
-const app = buildApp({ tenantDatabaseConnectionManager, objectStorage });
+const app = buildApp({
+  tenantDatabaseConnectionManager,
+  objectStorage,
+  corsAllowedOrigins: env.CORS_ALLOWED_ORIGINS,
+});
 
 try {
   await app.listen({ host: env.HOST, port: env.PORT });

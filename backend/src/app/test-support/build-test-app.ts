@@ -19,14 +19,20 @@ import { buildApp } from "../build-app.js";
  * itself never provides one on its own; this is the one explicit place tests get one without
  * needing real R2 credentials. Tests that specifically need to observe/control uploads (media
  * routes) pass their own instance.
+ *
+ * `corsAllowedOrigins` defaults to the same local Vite dev origin documented in `.env.example`
+ * (Prompt 037C) — convenient for the many unrelated tests in this suite that don't care about
+ * CORS at all. Tests that specifically exercise the CORS allowlist (single/multiple origins,
+ * empty, unauthorized) pass their own array explicitly.
  */
 export function buildTestApp(
   secretStore: SecretStore = createInMemorySecretStore(),
   objectStorage: ObjectStorage = createInMemoryObjectStorage(),
+  corsAllowedOrigins: string[] = ["http://localhost:5173"],
 ) {
   const tenantDatabaseConnectionManager = createPgTenantDatabaseConnectionManager({
     credentialResolver: createTenantDatabaseCredentialResolver(secretStore),
   });
 
-  return buildApp({ tenantDatabaseConnectionManager, objectStorage });
+  return buildApp({ tenantDatabaseConnectionManager, objectStorage, corsAllowedOrigins });
 }
