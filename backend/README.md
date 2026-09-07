@@ -57,11 +57,49 @@ cp .env.example .env
 | `LOG_LEVEL`                  | Nível de log do Pino                                     |
 | `CONTROL_PLANE_DATABASE_URL` | Connection string do banco do Control Plane               |
 | `REDIS_URL`                  | Connection string do Redis                                |
+| `CORS_ALLOWED_ORIGINS`       | Lista de origens de browser autorizadas (ver seção CORS abaixo) |
 
 A aplicação valida essas variáveis na inicialização (Zod) e falha imediatamente se algo
 obrigatório estiver ausente ou inválido.
 
 `.env` nunca é versionado.
+
+## CORS
+
+A API usa `@fastify/cors` (registrado dentro de `buildApp()`, então vale tanto para o servidor
+real quanto para os testes HTTP via `Fastify.inject()`) com uma allowlist explícita de origens
+de browser, configurada por `CORS_ALLOWED_ORIGINS`:
+
+```env
+CORS_ALLOWED_ORIGINS=http://localhost:5173
+```
+
+Múltiplas origens, separadas por vírgula:
+
+```env
+CORS_ALLOWED_ORIGINS=http://localhost:5173,https://app.example.com,https://admin.example.com
+```
+
+Comportamento:
+
+- **Match exato**: `http://localhost:5173` autoriza exatamente essa origem — não
+  `http://localhost:5174`, não `https://localhost:5173`, não um subdomínio.
+- **Sem wildcard**: `origin: "*"` e o equivalente a `origin: true` (refletir qualquer origem)
+  nunca são usados, nem como default de desenvolvimento — uma allowlist vazia significa que
+  nenhuma origem de browser é autorizada, não "permitir tudo" (a API continua subindo
+  normalmente mesmo assim).
+- **Sem credentials**: `Access-Control-Allow-Credentials` nunca é enviado — não existe
+  autenticação baseada em cookie/sessão de browser ainda.
+- **Preflight**: `OPTIONS` é respondido automaticamente pelo plugin para qualquer rota (nunca
+  uma rota `OPTIONS` manual por endpoint), incluindo o header customizado `X-Tenant-Id` que o
+  Tenant Data Plane usa — o preflight reflete os headers realmente solicitados pelo browser em
+  vez de uma allowlist fixa de headers, mas só para uma origem já autorizada.
+- **Requests sem `Origin`** (curl, chamada server-to-server, testes, workers) nunca são
+  bloqueadas por isso — CORS é uma política aplicada pelo browser, não autenticação.
+- Cada entrada é validada como URL http/https absoluta (sem path/query/fragment) na
+  inicialização — `localhost:5173` ou `http://localhost:5173/app` falham explicitamente,
+  em vez de serem aceitas silenciosamente. Uma barra final é normalizada para a origem canônica
+  (`http://localhost:5173/` vira `http://localhost:5173`), e duplicatas são removidas.
 
 ## Docker (infraestrutura local)
 

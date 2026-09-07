@@ -109,6 +109,12 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   nem expor object-storage keys. Ver `loadCoversByPropertyIds`/`toPropertyCoverResponse`
   (Prompt 037A) como exemplo aplicado — número fixo de queries por página, apenas
   `thumbnail`/`card` (nunca `detail`, que o catálogo não precisa).
+- Acesso CORS de browser deve usar uma allowlist explícita de origens configurada por ambiente
+  (`CORS_ALLOWED_ORIGINS`) — nunca `origin: "*"` nem o equivalente a `origin: true` (refletir
+  qualquer origem). Modo de desenvolvimento não deve permitir implicitamente qualquer origem —
+  uma allowlist vazia/ausente significa nenhuma origem de browser autorizada, nunca um fallback
+  permissivo, mesmo localmente. Ver `src/app/build-app.ts`/`src/config/env.ts` (Prompt 037C)
+  como exemplo aplicado.
 
 ## Multi-tenancy — regra crítica
 

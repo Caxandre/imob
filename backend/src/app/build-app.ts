@@ -1,3 +1,4 @@
+import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import fastify, { type FastifyError, type FastifyInstance } from "fastify";
@@ -51,6 +52,15 @@ export interface BuildAppDependencies {
    * itself never falls back to one on its own.
    */
   objectStorage: ObjectStorage;
+  /**
+   * Explicit browser origin allowlist for CORS (Prompt 037C) — already parsed/canonicalized by
+   * `env.ts`'s `CORS_ALLOWED_ORIGINS` (deduplicated exact origins, e.g.
+   * `["http://localhost:5173"]`), never the raw env string. Passed in explicitly, same
+   * convention as the dependencies above, rather than `buildApp()` reading the `env` singleton
+   * itself — so tests can exercise different allowlists (including an empty one) without being
+   * coupled to process-wide env state.
+   */
+  corsAllowedOrigins: string[];
 }
 
 export function buildApp(deps: BuildAppDependencies): FastifyInstance {
@@ -77,6 +87,30 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
       error: "Internal Server Error",
       message: "An unexpected error occurred",
     });
+  });
+
+  // CORS (Prompt 037C) — registered here, inside buildApp(), so `Fastify.inject()`-based tests
+  // exercise the exact same policy as the real server, not something bolted on only in
+  // server.ts/dev-full.ts. `origin: deps.corsAllowedOrigins` is exact-match only (an array, not
+  // "*" and not `true`/a function that reflects anything) — @fastify/cors compares the request's
+  // `Origin` header against this list with strict equality per entry (section 8/9); an origin
+  // not in the list gets no `Access-Control-Allow-Origin` header at all, never a wildcard
+  // fallback, even when the list is empty (section 27/28 — no implicit "allow everything" in
+  // development). `credentials: false` (the plugin's own default, set explicitly here as a
+  // deliberate decision, not an oversight) because no cookie/browser-session auth exists yet
+  // (section 12) — never pairs a permissive origin list with `Allow-Credentials: true`.
+  // `allowedHeaders` is deliberately left unset: the plugin's default (`null`) reflects whatever
+  // the browser's own preflight actually asked for (`Access-Control-Request-Headers`) instead of
+  // a hardcoded list — safe here because it only ever applies to a request whose origin already
+  // passed the allowlist check above, and it means a future header (e.g. a new custom header a
+  // feature starts sending) never needs a matching change in this file. Requests without an
+  // `Origin` header (curl, server-to-server, tests, workers) are never blocked by any of this —
+  // CORS is enforced entirely client-side by browsers; a request with no `Origin` simply never
+  // triggers the check `@fastify/cors` performs (section 18).
+  void app.register(cors, {
+    origin: deps.corsAllowedOrigins,
+    credentials: false,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
 
   void app.register(swagger, {
