@@ -16,6 +16,10 @@ out/
 !.env.example
 !.env.*.example
 
+# Local development secrets (backend LocalFileSecretStore, Prompt 039) — real dev-only
+# credentials in plaintext JSON, never committed.
+.local/
+
 # Testing / coverage
 coverage/
 *.lcov

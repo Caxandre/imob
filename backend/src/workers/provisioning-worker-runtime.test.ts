@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { sql } from "drizzle-orm";
 import { Client, escapeIdentifier } from "pg";
@@ -8,8 +11,10 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env } from "../config/env.js";
 import { controlPlaneDb, controlPlanePool } from "../infrastructure/database/control-plane/client.js";
 import { databaseClusters, provisioningJobs, tenantDatabases, tenants } from "../infrastructure/database/control-plane/schema.js";
+import type { SecretStore } from "../modules/provisioning/application/secret-store.js";
 import { createTenantDatabaseCredentialResolver } from "../modules/provisioning/application/tenant-database-credential-resolver.js";
 import { buildProvisioningResourceNames } from "../modules/provisioning/application/provisioning-resource-names.js";
+import { createLocalFileSecretStore } from "../modules/provisioning/infrastructure/local-file-secret-store.js";
 import { createInMemorySecretStore } from "../modules/provisioning/test-support/in-memory-secret-store.js";
 import { createPgTenantDatabaseConnectionManager } from "../modules/tenant-runtime/infrastructure/pg-tenant-database-connection-manager.js";
 import { createDrizzleTenantRepository } from "../modules/tenants/infrastructure/drizzle-tenant-repository.js";
@@ -85,7 +90,7 @@ afterAll(async () => {
   await controlPlanePool.end();
 });
 
-async function setupClusterAndTenant(secretStore: ReturnType<typeof createInMemorySecretStore>) {
+async function setupClusterAndTenant(secretStore: SecretStore) {
   await controlPlaneDb.insert(databaseClusters).values({
     name: CLUSTER_NAME,
     status: "ACTIVE",
@@ -189,6 +194,61 @@ describe("createProvisioningWorkerRuntime — SecretStore sharing (dev-full comp
       }
     } finally {
       await workerRuntime.shutdown();
+    }
+  });
+
+  it("survives a process restart: a fresh LocalFileSecretStore instance at the same file resolves the credential a prior instance wrote (Prompt 039, section 54)", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "imob-secret-store-restart-test-"));
+    const secretStoreFilePath = path.join(tempDir, "secrets.json");
+
+    try {
+      // "Process A": provisions a real tenant, writing its credential to the persistent file.
+      const firstProcessSecretStore = createLocalFileSecretStore(secretStoreFilePath);
+      const tenant = await setupClusterAndTenant(firstProcessSecretStore);
+      const workerRuntime = createProvisioningWorkerRuntime(firstProcessSecretStore, silentLogger);
+
+      let provisioned;
+      try {
+        provisioned = await workerRuntime.databaseProvisioner.provision({
+          provisioningJobId: randomUUID(),
+          tenantId: tenant.id,
+        });
+      } finally {
+        await workerRuntime.shutdown();
+      }
+
+      // "Process A restarts" (or "process B starts separately"): a brand-new
+      // LocalFileSecretStore instance — no shared in-memory state whatsoever — pointed at the
+      // exact same file. This is the central claim of Prompt 039: the tenant's credential is
+      // not lost.
+      const secondProcessSecretStore = createLocalFileSecretStore(secretStoreFilePath);
+      const connectionManager = createPgTenantDatabaseConnectionManager({
+        credentialResolver: createTenantDatabaseCredentialResolver(secondProcessSecretStore),
+      });
+
+      try {
+        const currentDatabase = await connectionManager.withTenantDatabase(
+          {
+            tenantId: tenant.id,
+            clusterId: provisioned.clusterId,
+            host: TENANTS_HOST,
+            port: TENANTS_PORT,
+            databaseName: provisioned.databaseName,
+            secretReference: provisioned.secretReference,
+            schemaVersion: provisioned.schemaVersion,
+          },
+          async (db) => {
+            const rows = await db.execute<{ current_database: string }>(sql`select current_database()`);
+            return rows.rows[0]?.current_database;
+          },
+        );
+
+        expect(currentDatabase).toBe(provisioned.databaseName);
+      } finally {
+        await connectionManager.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 });

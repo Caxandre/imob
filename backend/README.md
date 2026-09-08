@@ -58,6 +58,7 @@ cp .env.example .env
 | `CONTROL_PLANE_DATABASE_URL` | Connection string do banco do Control Plane               |
 | `REDIS_URL`                  | Connection string do Redis                                |
 | `CORS_ALLOWED_ORIGINS`       | Lista de origens de browser autorizadas (ver seção CORS abaixo) |
+| `DEV_SECRET_STORE_PATH`      | Caminho do arquivo local de secrets de desenvolvimento (ver seção abaixo) |
 
 A aplicação valida essas variáveis na inicialização (Zod) e falha imediatamente se algo
 obrigatório estiver ausente ou inválido.
@@ -100,6 +101,39 @@ Comportamento:
   inicialização — `localhost:5173` ou `http://localhost:5173/app` falham explicitamente,
   em vez de serem aceitas silenciosamente. Uma barra final é normalizada para a origem canônica
   (`http://localhost:5173/` vira `http://localhost:5173`), e duplicatas são removidas.
+
+## SecretStore local (desenvolvimento)
+
+Credenciais de banco de tenant/cluster (`SecretStore`, ADR-003/ADR-004) são resolvidas por
+referência (`secretReference` → `{ username, password }`) — nunca persistidas no Control Plane.
+Em desenvolvimento, isso é um `LocalFileSecretStore` (Prompt 039): um arquivo JSON local,
+gitignored, criado automaticamente na primeira escrita.
+
+```env
+DEV_SECRET_STORE_PATH=.local/secrets.json
+```
+
+- **Persiste entre restarts**: reiniciar `pnpm dev:full` (ou qualquer entrypoint) não perde mais
+  a credencial de um tenant já provisionado — o mesmo `tenantId` continua funcionando.
+- **Compartilhado entre processos locais**: `server.ts`, `dev-full.ts`,
+  `provisioning-worker.ts`, `media-outbox-dispatcher.ts` e `media-processing-worker.ts` resolvem
+  o caminho a partir da mesma env var — apontando todos para o mesmo arquivo (o default já faz
+  isso), uma credencial escrita por um processo é lida por outro, sem precisar de
+  `pnpm dev:full` para "juntar" tudo em um processo só.
+- **Nunca em produção**: sob `NODE_ENV=production`, a fábrica que decide o provider
+  (`createRuntimeSecretStore()`) sempre falha explicitamente — nenhum fallback para arquivo ou
+  para o `InMemorySecretStore` de teste. Nenhum provider de produção existe ainda (ADR-004,
+  status `PLANNED`).
+- **Nunca commitado, nunca logado**: o caminho é relativo à raiz do `backend/` (não ao diretório
+  de onde o processo foi iniciado). Este README nunca mostra o conteúdo do arquivo — apenas o
+  caminho de configuração.
+- **Plaintext, e isso é aceitável aqui**: é um arquivo de desenvolvimento, na sua própria
+  máquina — não é criptografado (criptografar ao lado de uma chave guardada no mesmo lugar não
+  adicionaria segurança real). Nunca use este mecanismo como modelo para produção.
+- **Tenants antigos**: um tenant cujo secret já foi perdido por uma execução anterior do
+  `InMemorySecretStore` (antes deste Prompt) não é recuperável magicamente — ele precisa ser
+  reprovisionado uma última vez. A partir daí, com `LocalFileSecretStore`, isso não volta a
+  acontecer.
 
 ## Docker (infraestrutura local)
 
@@ -308,23 +342,30 @@ autenticação real não existe, não uma decisão definitiva de produto (ver
 [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)). Qualquer cliente
 que conheça um `tenantId` pode informá-lo; isso não é autenticação.
 
-Sem `pnpm dev:full` (ou seja, com `pnpm dev` sozinho), `POST/GET /api/v1/properties` contra um
-tenant provisionado pelo worker separado falha ao resolver a credencial do tenant — ver a
-seção "Local development runtime" em `ARCHITECTURE.md`.
+Antes do Prompt 039 (`InMemorySecretStore`), `POST/GET /api/v1/properties` contra um tenant
+provisionado por um processo separado (worker rodando sozinho, sem `dev:full`) falhava ao
+resolver a credencial do tenant — ver "Local development runtime" em `ARCHITECTURE.md`. Desde o
+Prompt 039, isso deixou de ser necessariamente verdade: `server.ts`, `provisioning-worker.ts`,
+`media-outbox-dispatcher.ts` e `media-processing-worker.ts`, mesmo rodando como processos
+completamente separados, compartilham o mesmo `LocalFileSecretStore` (ver seção "SecretStore
+local" acima) — desde que todos apontem para o mesmo `DEV_SECRET_STORE_PATH` (o default já
+garante isso). `pnpm dev:full` continua sendo a forma mais simples (um terminal em vez de
+quatro), não a única forma de compartilhar secrets localmente.
 
-**Troubleshooting: `503 { "message": "Tenant infrastructure is not currently available" }`
-para um tenant que funcionava antes.** O `SecretStore` de `pnpm dev:full` é em memória e
-**não sobrevive a um restart do processo** (ver "Local development runtime" em
-`ARCHITECTURE.md`) — ao reiniciar `pnpm dev:full` (nova sessão, crash, `--watch` recarregando
-após uma edição, etc.), a credencial de aplicação de qualquer tenant provisionado por uma
-execução *anterior* deixa de existir nesse processo, mesmo o tenant continuando `READY` no
-Control Plane e seu database continuando a existir de fato. Isso é permanente para aquele
-`tenantId` **nesse novo processo** — não é um erro transitório, não adianta tentar de novo.
-A correção é sempre provisionar um tenant novo (`POST /api/v1/tenants`, aguardar `READY`) sob
-o processo `dev:full` atualmente em execução, e apontar o cliente (Swagger, `curl`,
-`VITE_TENANT_ID` do frontend) para esse novo id — nunca reutilizar um `tenantId` antigo através
-de um restart. Isso é uma limitação conhecida da arquitetura de desenvolvimento atual (nenhum
-`SecretStore` de produção existe ainda — ADR-004), não um bug de uma feature específica.
+**Troubleshooting: `503 { "message": "Tenant infrastructure is not currently available" }`.**
+Antes do Prompt 039, isso acontecia sempre que `pnpm dev:full` reiniciava (nova sessão, crash,
+`--watch` recarregando) — o `SecretStore` em memória não sobrevivia ao restart, e qualquer
+tenant provisionado por uma execução *anterior* ficava permanentemente inutilizável naquele
+processo, mesmo continuando `READY` no Control Plane. **Desde o Prompt 039, isso não acontece
+mais** para tenants provisionados com o `LocalFileSecretStore` — o mesmo `tenantId` continua
+funcionando após um restart, porque a credencial está persistida em
+`DEV_SECRET_STORE_PATH`, não na memória do processo. Se você ainda vir esse erro:
+
+- confirme que `DEV_SECRET_STORE_PATH` é o mesmo em todos os processos envolvidos (o default já
+  garante isso, a menos que tenha sido customizado de forma inconsistente);
+- se o tenant foi provisionado *antes* de adotar este Prompt (secret já perdido pelo
+  `InMemorySecretStore` antigo), ele não é recuperável magicamente — reprovisione-o uma última
+  vez (`POST /api/v1/tenants`, aguardar `READY`) e passe a usar esse novo id.
 
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` e
 `GET /api/v1/tenants/{id}` (tag **Tenants** — ambos `GET` são administrativos, só o Control

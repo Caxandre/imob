@@ -2,17 +2,24 @@
 
 ## Status
 
-Aceito. Implementação: **PLANNED** (nenhum código de produção existe ainda).
+Aceito. Implementação de produção: **PLANNED** (nenhum código de produção existe ainda).
+
+**Atualizado no Prompt 039**: um provider *somente de desenvolvimento*, persistente,
+`LocalFileSecretStore`, foi implementado — ver "Atualização (Prompt 039)" abaixo. Isso não muda
+o status desta ADR: continua **PLANNED** para produção.
 
 ## Contexto
 
 `SecretStore` (`src/modules/provisioning/application/secret-store.ts`, ADR-003) já define a
 porta que todo código de provisionamento e, a partir do Prompt 020, todo runtime de negócio de
 tenant usa para resolver credenciais de database (`secretReference` → `{username, password}`),
-sem nunca persistir a credencial real no Control Plane. A única implementação existente,
-`createInMemorySecretStore`, é explicitamente test/dev support: guarda os secrets em um `Map`
-em memória, sem durabilidade, sem criptografia, sem isolamento entre processos, e recusa-se a
-construir sob `NODE_ENV=production`.
+sem nunca persistir a credencial real no Control Plane. Até o Prompt 039, a única implementação
+existente, `createInMemorySecretStore`, era explicitamente test/dev support: guarda os secrets
+em um `Map` em memória, sem durabilidade, sem criptografia, sem isolamento entre processos, e
+recusa-se a construir sob `NODE_ENV=production`. O Prompt 039 acrescentou uma segunda
+implementação de desenvolvimento, `LocalFileSecretStore` (persistente, em arquivo JSON local) —
+ver "Atualização (Prompt 039)" abaixo. Nenhuma das duas é, ou pretende ser, um provider de
+produção.
 
 Isso deixa um lacuna deliberadamente não resolvida até agora: nenhuma ADR registrava qual
 provider real de secrets a plataforma pretende usar em produção. `provisioning-worker.ts`
@@ -54,15 +61,41 @@ essa é uma decisão de arquitetura, não a implementação em si.
 - `SecretStore` (a porta) permanece inalterada — ela já foi desenhada em ADR-003
   especificamente para não assumir nenhuma tipagem que um provider real não possa garantir
   (`put`/`get`/`delete` sobre `unknown`, validação Zod no ponto de uso). Uma implementação real
-  de AWS Secrets Manager é só mais um adapter atrás dessa mesma porta.
+  de AWS Secrets Manager é só mais um adapter atrás dessa mesma porta — o mesmo vale para
+  `LocalFileSecretStore` (Prompt 039), que já é só mais um adapter dev-only atrás dela.
 - Nenhuma dependência da AWS é adicionada até que a implementação real seja de fato construída.
-- `createInMemorySecretStore` continua sendo a única implementação disponível, e continua
-  recusando-se a construir sob `NODE_ENV=production` — essa proteção não é enfraquecida por
-  esta ADR.
-- Todo entrypoint de produção que depende de `SecretStore` (o worker de provisionamento hoje;
-  o runtime tenant database connection manager a partir do Prompt 020, quando algum consumidor
-  HTTP existir) continua recusando-se a iniciar/operar em `NODE_ENV=production` até que esta
-  ADR seja implementada.
+- Nenhuma das implementações de desenvolvimento (`InMemorySecretStore`,
+  `LocalFileSecretStore`) pode ser selecionada sob `NODE_ENV=production` — cada uma recusa-se a
+  construir sozinha, e `createRuntimeSecretStore()` (Prompt 039,
+  `src/modules/provisioning/infrastructure/runtime-secret-store.ts`) centraliza essa decisão
+  para todo entrypoint, lançando explicitamente em produção em vez de selecionar qualquer uma
+  das duas. Essa proteção não é enfraquecida por esta ADR.
+- Todo entrypoint de produção que depende de `SecretStore` (os workers/dispatchers hoje; a API
+  HTTP a partir do Prompt 020) continua recusando-se a iniciar/operar em `NODE_ENV=production`
+  até que esta ADR seja implementada.
+
+## Atualização (Prompt 039): `LocalFileSecretStore`, dev-only
+
+Um segundo provider de **desenvolvimento** foi implementado —
+`src/modules/provisioning/infrastructure/local-file-secret-store.ts`. Não é uma resposta a esta
+ADR (produção continua **PLANNED**, sem nenhum código real): resolve especificamente a
+limitação prática de `InMemorySecretStore` não sobreviver a um restart de processo nem ser
+compartilhável entre processos locais, que atrapalhava o fluxo de desenvolvimento descrito em
+ARCHITECTURE.md ("Local development runtime").
+
+- Persiste secrets como JSON em `env.DEV_SECRET_STORE_PATH` (default
+  `.local/secrets.json`, gitignored), com escrita atômica (arquivo temporário + rename) e um
+  lock de arquivo simples para serializar `put`/`delete` concorrentes entre processos.
+- Nunca selecionado em produção: `createRuntimeSecretStore()` lança
+  `ProductionSecretStoreNotConfiguredError` sob `NODE_ENV=production`, independente de
+  `DEV_SECRET_STORE_PATH` estar configurado ou não.
+- Plaintext, deliberadamente sem criptografia local — é um arquivo de desenvolvimento na
+  própria máquina do desenvolvedor; guardar uma chave de criptografia ao lado do arquivo
+  criptografado não adicionaria segurança real, apenas complexidade.
+- Não muda nenhuma das razões que levaram a esta ADR (rotação, IAM granular, auditabilidade via
+  CloudTrail) — nenhuma delas é resolvida, nem seria, por um arquivo local. `LocalFileSecretStore`
+  é estritamente uma conveniência de desenvolvimento, nunca um candidato a substituir a decisão
+  desta ADR.
 
 ## Alternativas consideradas
 
