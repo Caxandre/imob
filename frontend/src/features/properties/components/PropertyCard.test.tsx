@@ -1,8 +1,17 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import type { Property } from "../schemas/property.schema";
 import { PropertyCard } from "./PropertyCard";
+
+function renderCard(property: Property) {
+  return render(
+    <MemoryRouter>
+      <PropertyCard property={property} />
+    </MemoryRouter>,
+  );
+}
 
 function property(overrides: Partial<Property> = {}): Property {
   return {
@@ -32,8 +41,14 @@ function property(overrides: Partial<Property> = {}): Property {
 }
 
 describe("PropertyCard", () => {
+  it("links to the property's detail page", () => {
+    renderCard(property({ id: "abc-123" }));
+
+    expect(screen.getByRole("link")).toHaveAttribute("href", "/properties/abc-123");
+  });
+
   it("renders title, location, formatted price and available attributes", () => {
-    render(<PropertyCard property={property()} />);
+    renderCard(property());
 
     expect(screen.getByText("Casa na praia")).toBeInTheDocument();
     expect(screen.getByText("Florianópolis / SC")).toBeInTheDocument();
@@ -45,47 +60,43 @@ describe("PropertyCard", () => {
   });
 
   it("omits bedrooms/bathrooms/parking/area when they are null instead of showing 0", () => {
-    render(
-      <PropertyCard
-        property={property({
-          bedrooms: null,
-          bathrooms: null,
-          parking_spaces: null,
-          area_m2: null,
-        })}
-      />,
+    renderCard(
+      property({
+        bedrooms: null,
+        bathrooms: null,
+        parking_spaces: null,
+        area_m2: null,
+      }),
     );
 
     expect(screen.queryByText("0")).not.toBeInTheDocument();
   });
 
   it("renders the card image using getPropertyCardImage's priority", () => {
-    render(
-      <PropertyCard
-        property={property({
-          cover: {
-            id: "c1",
-            public_url: "https://example.com/original.jpg",
-            processing_status: "READY",
-            variants: {
-              thumbnail: {
-                url: "https://example.com/thumb.webp",
-                mime_type: "image/webp",
-                width: 320,
-                height: 213,
-                size_bytes: 1,
-              },
-              card: {
-                url: "https://example.com/card.webp",
-                mime_type: "image/webp",
-                width: 640,
-                height: 426,
-                size_bytes: 1,
-              },
+    renderCard(
+      property({
+        cover: {
+          id: "c1",
+          public_url: "https://example.com/original.jpg",
+          processing_status: "READY",
+          variants: {
+            thumbnail: {
+              url: "https://example.com/thumb.webp",
+              mime_type: "image/webp",
+              width: 320,
+              height: 213,
+              size_bytes: 1,
+            },
+            card: {
+              url: "https://example.com/card.webp",
+              mime_type: "image/webp",
+              width: 640,
+              height: 426,
+              size_bytes: 1,
             },
           },
-        })}
-      />,
+        },
+      }),
     );
 
     const img = screen.getByRole("img", { name: "Casa na praia" });
@@ -94,7 +105,7 @@ describe("PropertyCard", () => {
   });
 
   it("shows a placeholder when there is no cover", () => {
-    render(<PropertyCard property={property({ cover: null })} />);
+    renderCard(property({ cover: null }));
 
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });

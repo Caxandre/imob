@@ -43,7 +43,12 @@ export const propertyCoverSchema = z.object({
 });
 export type PropertyCover = z.infer<typeof propertyCoverSchema>;
 
-export const propertySchema = z.object({
+// Shared with both response shapes below (Prompt 038, section 15): `GET /api/v1/properties/:id`
+// (`toPropertyResponse`) never carries `cover` at all, while `GET /api/v1/properties` items
+// (`toPropertyListItemResponse`) add it on top of these exact same fields — verified directly
+// against `backend/src/modules/properties/http/property-routes.ts`. Defined once so the two
+// response schemas below never duplicate this field list.
+const propertyFieldsSchema = z.object({
   id: z.string(),
   title: z.string(),
   description: z.string().nullable(),
@@ -67,9 +72,18 @@ export const propertySchema = z.object({
   postal_code: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
+});
+
+export const propertySchema = propertyFieldsSchema.extend({
   cover: propertyCoverSchema.nullable(),
 });
 export type Property = z.infer<typeof propertySchema>;
+
+// `GET /api/v1/properties/:id` response (Prompt 038, section 3/15) — `toPropertyResponse`'s
+// fields only, never `cover` (that projection exists solely on the list endpoint, section 23/24
+// of Prompt 037B).
+export const propertyDetailSchema = propertyFieldsSchema;
+export type PropertyDetail = z.infer<typeof propertyDetailSchema>;
 
 export const propertyListResponseSchema = z.object({
   data: z.array(propertySchema),

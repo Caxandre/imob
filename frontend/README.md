@@ -81,7 +81,8 @@ src/
 ├── lib/
 │   ├── env.ts           único ponto de leitura de import.meta.env
 │   └── http/             apiFetch() + ApiError — fetch nativo, sem Axios
-├── pages/               composição de features/rotas — HomePage, NotFoundPage
+├── pages/               composição de features/rotas — HomePage, PropertiesPage,
+│                        PropertyDetailsPage, NotFoundPage
 ├── styles/              CSS global (Tailwind + tokens shadcn)
 ├── test/                setup do Vitest + renderWithProviders()
 └── main.tsx
@@ -92,8 +93,9 @@ navegável/compartilhável → URL; estado de UI local → `useState`/`useReduce
 deliberadamente **não instalado** — só entra quando surgir uma necessidade real de estado
 cliente global cruzando features.
 
-**Rotas hoje**: `/` (home mínima, com um link "Ver imóveis") , `/properties` (catálogo de
-imóveis) e `*` (404). Sem dashboard, sem tenants, sem login, sem detalhe/CRUD de imóvel ainda.
+**Rotas hoje**: `/` (home mínima, com um link "Ver imóveis"), `/properties` (catálogo de
+imóveis), `/properties/:id` (detalhe do imóvel) e `*` (404). Sem dashboard, sem tenants, sem
+login, sem edição/CRUD de imóvel ainda.
 
 **UI**: Tailwind CSS v4 + shadcn/ui (`components.json`, alias `@/*` → `src/*` consistente em
 TypeScript/Vite/Vitest/shadcn). Componentes instalados: `button`, `card`, `input`, `label`,
@@ -116,11 +118,51 @@ variables) não impede um tema escuro futuro, mas nenhum toggle existe ainda.
   `VITE_TENANT_ID` (ver "Env" acima); sem ele, `/properties` mostra um estado dedicado e não
   faz nenhuma requisição.
 - **Filtros, ordenação e paginação vivem na URL** (`?q=&status=&property_type=&
-  transaction_type=&city=&state=&price_min=&price_max=&bedrooms_min=&bathrooms_min=&
-  parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que o backend
+transaction_type=&city=&state=&price_min=&price_max=&bedrooms_min=&bathrooms_min=&
+parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que o backend
   aceita) — um link copiado reproduz o mesmo resultado. Só um subconjunto (busca, tipo,
   transação, cidade, estado, preço mín/máx, quartos mín) tem controle visual; o restante
   continua aceito via URL. Valores inválidos (`page=-1`, `price_min=abc`, `status=banana`) são
   ignorados silenciosamente em vez de quebrar a página.
 - Server state via TanStack Query (`useProperties`, `src/features/properties/hooks/`) — a
   query key inclui o tenant id, então o cache nunca mistura dados de tenants diferentes.
+- Cada `PropertyCard` navega para `/properties/:id` via `Link` do React Router (nunca
+  `window.location`).
+
+### Detalhe do imóvel (`/properties/:id`)
+
+- Consome exatamente duas chamadas HTTP por carregamento lógico da página, disparadas em
+  paralelo por `PropertyDetailsPage` (`src/pages/PropertyDetailsPage.tsx`) — nunca uma
+  sequência property-então-media:
+  - `GET /api/v1/properties/:id` via `getPropertyById()`
+    (`src/features/properties/api/get-property.ts`, hook `useProperty`) — a resposta nunca
+    carrega `cover` (esse campo só existe na listagem); schema próprio (`propertyDetailSchema`)
+    reaproveitando os mesmos campos base da listagem.
+  - `GET /api/v1/properties/:id/media` via `listPropertyMedia()`
+    (`src/features/properties/api/list-property-media.ts`, hook `usePropertyMedia`) — **nunca**
+    uma chamada adicional por item de mídia (sem N+1); cada item já traz
+    `variants.thumbnail`/`variants.card`/`variants.detail`, cada um independentemente `null`
+    até aquela variante existir.
+- **Galeria** (`PropertyGallery`, `src/features/properties/components/PropertyGallery.tsx`) é
+  puramente apresentacional — nunca faz sua própria chamada HTTP. Seleção da miniatura ativa é
+  `useState` local (nunca URL/TanStack Query/Zustand): a mídia padrão (capa, senão a primeira
+  por `position`) é recalculada a cada render sempre que a seleção atual não existir mais na
+  lista, em vez de sincronizada via `useEffect` — nunca sobrescreve uma seleção do usuário ainda
+  válida.
+  - Imagem principal: `variants.detail` → `variants.card` → `variants.thumbnail` → `public_url`
+    original → placeholder ("Imóvel sem fotos", só quando não há mídia alguma).
+  - Miniaturas: `variants.thumbnail` → `variants.card` → `public_url` original — **nunca**
+    `detail` (miniatura não precisa da maior variante).
+  - `public_url` é campo obrigatório em toda mídia, então essa cadeia de fallback nunca falha
+    para um item real — mídia `PROCESSING`/`FAILED`/"READY legado" (sem variantes, migrada
+    antes do worker de processamento existir) sempre mostra a melhor URL disponível, nunca
+    esconde a foto. `PROCESSING` mostra um badge discreto "Processando" sobre a imagem original.
+- Estados de loading/erro são independentes entre property e media (`PropertyDetailsSkeleton`
+  vs. `PropertyGallerySkeleton`/`PropertyGalleryErrorState`) — uma falha ao carregar as fotos
+  nunca esconde os dados do imóvel que já carregaram. Um 404 de `GET /properties/:id`
+  (`ApiError.status === 404`) mostra "Imóvel não encontrado." em vez do erro genérico.
+- O `:id` da rota é validado como UUID (`isValidPropertyId`) antes de qualquer requisição — um
+  id obviamente inválido (`/properties/abc`) mostra o mesmo estado de não encontrado sem nunca
+  chamar a API.
+- Mesmo contrato de tenant do catálogo: `X-Tenant-Id` escopado à feature Properties, tenant
+  ausente mostra o mesmo estado dedicado sem nenhuma requisição.
