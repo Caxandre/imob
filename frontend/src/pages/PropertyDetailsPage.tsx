@@ -62,9 +62,14 @@ function PropertyDetailsPageContent({ tenantId, propertyId }: PropertyDetailsPag
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
-      <Button asChild variant="ghost" className="w-fit">
-        <Link to="/properties">Voltar para imóveis</Link>
-      </Button>
+      <div className="flex items-center justify-between gap-4">
+        <Button asChild variant="ghost" className="w-fit">
+          <Link to="/properties">Voltar para imóveis</Link>
+        </Button>
+        <Button asChild variant="outline">
+          <Link to={`/properties/${propertyId}/edit`}>Editar</Link>
+        </Button>
+      </div>
 
       <div className="grid gap-8 lg:grid-cols-2">
         <div>
