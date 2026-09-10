@@ -94,14 +94,15 @@ deliberadamente **não instalado** — só entra quando surgir uma necessidade r
 cliente global cruzando features.
 
 **Rotas hoje**: `/` (home mínima, com um link "Ver imóveis"), `/properties` (catálogo),
-`/properties/:id` (detalhe), `/properties/new` (criação), `/properties/:id/edit` (edição) e
-`*` (404). Sem dashboard, sem tenants, sem login, sem gestão de mídia (upload/reorder/cover/
-delete) e sem exclusão/arquivamento de imóvel pela UI ainda.
+`/properties/:id` (detalhe), `/properties/new` (criação), `/properties/:id/edit` (edição —
+inclui a gestão de fotos, ver abaixo) e `*` (404). Sem dashboard, sem tenants, sem login, sem
+exclusão/arquivamento de imóvel pela UI ainda.
 
 **UI**: Tailwind CSS v4 + shadcn/ui (`components.json`, alias `@/*` → `src/*` consistente em
 TypeScript/Vite/Vitest/shadcn). Componentes instalados: `button`, `card`, `input`, `label`,
-`badge`, `separator`, `select`, `skeleton`, `sonner`, `textarea`. Tema claro; a arquitetura de
-tokens (CSS variables) não impede um tema escuro futuro, mas nenhum toggle existe ainda.
+`badge`, `separator`, `select`, `skeleton`, `sonner`, `textarea`, `alert-dialog`. Tema claro; a
+arquitetura de tokens (CSS variables) não impede um tema escuro futuro, mas nenhum toggle
+existe ainda.
 
 **Autenticação**: não implementada.
 
@@ -178,8 +179,8 @@ parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que
   Zod (`zodResolver`), organizado em três blocos (Informações principais, Características,
   Localização).
 - **Schema do formulário** (`src/features/properties/schemas/property-form.schema.ts`) é
-  deliberadamente distinto do schema de resposta da API (`propertyDetailSchema`): seu *input*
-  (`PropertyFormValues`) é o que os campos HTML realmente produzem (strings), e seu *output*
+  deliberadamente distinto do schema de resposta da API (`propertyDetailSchema`): seu _input_
+  (`PropertyFormValues`) é o que os campos HTML realmente produzem (strings), e seu _output_
   (`PropertyFormOutput`, obtido depois que `zodResolver` valida+transforma no submit) já é o
   payload no formato esperado pelo backend — decimal strings, `null` para campo opcional
   vazio, `number` para os campos inteiros pequenos. Enums (`property_type`/`transaction_type`/
@@ -209,7 +210,69 @@ parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que
 - Erro de mutation (create ou edit) mostra uma mensagem fixa e segura no próprio formulário
   ("Não foi possível salvar o imóvel.") — nunca o corpo bruto do erro; sucesso também mostra um
   toast (`sonner`, já montado globalmente em `AppProviders`).
-- **Fora de escopo nesta tarefa**: upload de mídia, reorder, cover management, delete de mídia,
-  delete/archive de imóvel pela UI, autenticação, tenant switcher, auto-save, optimistic
-  update, persistência local de rascunho (`localStorage`/`IndexedDB`), bloqueio de navegação
-  por alterações não salvas.
+- **Fora de escopo**: delete/archive de imóvel pela UI, autenticação, tenant switcher,
+  auto-save, optimistic update, persistência local de rascunho
+  (`localStorage`/`IndexedDB`), bloqueio de navegação por alterações não salvas. Gestão de
+  fotos (upload/reorder/cover/delete) existe — ver a seção seguinte.
+
+### Gestão de fotos do imóvel (dentro de `/properties/:id/edit`)
+
+**Decisão de UX**: a gestão de mídia **não** ganhou uma rota dedicada
+(`/properties/:id/media`) — ela vive como uma seção separada, "Fotos do imóvel"
+(`PropertyMediaManager`), renderizada **abaixo** de `PropertyForm` em
+`/properties/:id/edit`, mas deliberadamente como um *sibling* do `<form>` textual, nunca
+aninhada dentro dele — um clique em qualquer ação de mídia nunca aciona o submit do
+formulário de dados (todo botão de mídia é `type="button"`). Isso evita uma segunda página só
+para reaproveitar `tenantId`/`propertyId`/validação de rota já resolvidos por
+`EditPropertyPage`.
+
+- **Contratos do backend** usados (verificados diretamente em
+  `backend/src/modules/properties/http/property-routes.ts`): `POST /properties/:id/media`
+  (multipart, campo `file`, até 10MB, `image/jpeg|png|webp`, sempre 1 arquivo por request),
+  `GET /properties/:id/media` (já existente), `PUT /properties/:id/media/order` (substitui a
+  galeria inteira — `media_ids` deve conter exatamente todos os ids atuais, na nova ordem),
+  `PATCH /properties/:id/media/:mediaId/cover` (sem body), `DELETE /properties/:id/media/:mediaId`
+  (`204`). Upload é rejeitado (`409`) para imóvel `INACTIVE`; reorder/cover/delete continuam
+  permitidos mesmo arquivado.
+- **Upload**: `<input type="file" multiple>` — cada arquivo vira uma requisição `POST`
+  independente (o backend só aceita um arquivo por vez), com no máximo 3 uploads simultâneos
+  (`runWithConcurrency()`, sem biblioteca de fila). Cada arquivo tem status próprio
+  (`pending`/`uploading`/`success`/`error`) — um lote de 5 com 1 falha nunca é reportado como
+  "tudo certo" ou "tudo falhou". Validação client-side (MIME/tamanho,
+  `validatePropertyMediaFile()`) é só UX — o backend continua a autoridade real (magic bytes +
+  limite do parser multipart).
+- **`apiFetch`** (`src/lib/http/api-fetch.ts`) foi generalizado para aceitar `FormData`: quando
+  o `body` é uma instância de `FormData`, ele é passado direto ao `fetch` sem
+  `JSON.stringify` e sem um `Content-Type` manual — o browser gera o boundary do
+  multipart sozinho.
+- **Processamento assíncrono**: conclusão do upload HTTP (`processing_status: PROCESSING`)
+  é diferente de conclusão do processamento de imagem (`READY`, com `variants` reais). A
+  grade sempre mostra a melhor URL disponível (thumbnail → card → original — nunca a variante
+  `detail`, desnecessária nesta tela administrativa) com um badge "Processando" ou "Falha no
+  processamento" conforme o status; a imagem nunca é escondida.
+- **Polling** (`usePropertyMedia`, reaproveitado do detalhe): usa `refetchInterval` do próprio
+  TanStack Query (nunca `setInterval` manual) — só ativo enquanto a lista em cache tiver algum
+  item `PROCESSING`, a cada 3000ms, parando sozinho assim que nenhum item mais estiver. Quando
+  essa transição acontece (havia `PROCESSING` → não há mais), o cache do catálogo
+  (`["properties", tenantId]`) é invalidado uma única vez — a capa que acabou de processar pode
+  ter variantes novas que a listagem em cache ainda não conhece.
+- **Capa**: "Definir como capa" fica desabilitado no item que já é a capa atual
+  (`useSetPropertyMediaCover`). Sucesso invalida a mídia e o catálogo — sem optimistic update;
+  o backend continua sendo a única autoridade sobre qual mídia é a capa.
+- **Reorder**: botões "mover para a esquerda/direita" (sem drag-and-drop — nenhuma dependência
+  como `dnd-kit`/`react-beautiful-dnd`/`sortablejs` foi instalada; totalmente utilizável via
+  teclado). O primeiro item não pode mover para a esquerda, o último não pode mover para a
+  direita. Ao clicar, a nova ordem é montada localmente só para virar o payload
+  `media_ids` — a grade não é re-renderizada otimisticamente antes da confirmação do backend
+  (`useReorderPropertyMedia`, invalida só a mídia; reorder nunca muda a capa).
+- **Delete**: confirmação via shadcn `AlertDialog` (novo componente, instalado nesta tarefa) —
+  "Excluir esta foto? Essa ação remove a foto da galeria." Sucesso invalida mídia e catálogo;
+  se a foto excluída era a capa, o backend promove outra automaticamente — o frontend nunca
+  escolhe uma substituta, só reflete o que o próximo `GET` retornar.
+- **Imóvel arquivado (`INACTIVE`)**: a área de upload é escondida e substituída por uma
+  mensagem ("Envio de fotos desabilitado — o imóvel está arquivado.") — nunca depende só do
+  `409` do backend. A galeria existente continua visível e reorder/cover/delete continuam
+  funcionando (o backend permite).
+- **R2/object storage**: o frontend nunca acessa Cloudflare R2 diretamente, nunca gera
+  object keys, nunca instala um SDK de storage (`@aws-sdk/client-s3` etc.) — toda URL exibida
+  já vem pronta na resposta da API de mídia.

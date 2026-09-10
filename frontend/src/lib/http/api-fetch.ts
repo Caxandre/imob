@@ -3,7 +3,13 @@ import { env } from "@/lib/env";
 import { ApiError } from "./api-error";
 
 export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
-  /** Serialized as JSON automatically — never pass an already-stringified body. */
+  /**
+   * A plain value is serialized as JSON automatically — never pass an already-stringified
+   * body. A `FormData` instance (multipart uploads, Prompt 041 sections 6/7) is passed straight
+   * through instead: never JSON-stringified, and never given a manual `Content-Type` — the
+   * browser sets `multipart/form-data` with its own boundary, which a hardcoded header would
+   * break.
+   */
   body?: unknown;
 }
 
@@ -26,15 +32,16 @@ function hasStringMessage(value: unknown): value is { message: string } {
  */
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const { body, headers, ...rest } = options;
+  const isFormData = body instanceof FormData;
 
   const response = await fetch(`${env.apiUrl}${path}`, {
     ...rest,
     headers: {
       Accept: "application/json",
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(body !== undefined && !isFormData ? { "Content-Type": "application/json" } : {}),
       ...headers,
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
   });
 
   // 204 No Content — and any other body-less success — never attempts to parse JSON (section 35).

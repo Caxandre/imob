@@ -38,7 +38,9 @@ function renderPage() {
 }
 
 function fillMinimalValidForm() {
-  fireEvent.change(screen.getByLabelText("Título *"), { target: { value: "Apartamento no Centro" } });
+  fireEvent.change(screen.getByLabelText("Título *"), {
+    target: { value: "Apartamento no Centro" },
+  });
   fireEvent.change(screen.getByLabelText("Preço *"), { target: { value: "450000,00" } });
 }
 
@@ -101,7 +103,9 @@ describe("NewPropertyPage", () => {
     });
 
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/properties/3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+      expect(router.state.location.pathname).toBe(
+        "/properties/3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      ),
     );
   });
 
