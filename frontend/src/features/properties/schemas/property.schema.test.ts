@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { propertyListResponseSchema, propertySchema } from "./property.schema";
+import {
+  propertyDetailSchema,
+  propertyListResponseSchema,
+  propertySchema,
+} from "./property.schema";
 
 function validProperty() {
   return {
@@ -90,6 +94,36 @@ describe("propertySchema", () => {
       ...validProperty(),
       cover: { id: "x", public_url: "https://example.com/x.jpg", processing_status: "READY" },
     });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("propertyDetailSchema", () => {
+  function validPropertyDetail() {
+    const detail: Record<string, unknown> = { ...validProperty() };
+    delete detail.cover;
+    return detail;
+  }
+
+  it("accepts the GET /api/v1/properties/:id response shape, which never has a cover", () => {
+    const result = propertyDetailSchema.safeParse(validPropertyDetail());
+
+    expect(result.success).toBe(true);
+  });
+
+  it("strips an unexpected cover field rather than rejecting the response", () => {
+    const result = propertyDetailSchema.safeParse(validProperty());
+
+    expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty("cover");
+  });
+
+  it("rejects a response missing a required field", () => {
+    const rest = validPropertyDetail();
+    delete rest.title;
+
+    const result = propertyDetailSchema.safeParse(rest);
 
     expect(result.success).toBe(false);
   });

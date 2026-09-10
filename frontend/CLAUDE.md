@@ -22,7 +22,10 @@ específicas do frontend.
   a compartilhar um link) pertence à **URL** (query string/params via React Router) — nunca só
   em memória se o usuário esperaria que um link copiado reproduzisse o mesmo estado.
 - **Estado de UI local** (aberto/fechado, hover, um passo de wizard) permanece local
-  (`useState`/`useReducer`) — não promova para algo global sem necessidade real.
+  (`useState`/`useReducer`) — não promova para algo global sem necessidade real. A seleção
+  ativa de uma galeria de mídia (ex.: `PropertyGallery`) é exatamente esse caso: `useState`
+  local, nunca promovida para URL/TanStack Query/Zustand. Ver
+  `src/features/properties/components/PropertyGallery.tsx` (Prompt 038) como exemplo aplicado.
 - **Não introduza Zustand** (ou qualquer store global) sem um caso real de estado cliente que
   cruze features e não se encaixe em nenhuma das categorias acima. Não é necessidade
   hipotética — é um requisito concreto já observado no código.
@@ -63,6 +66,12 @@ específicas do frontend.
   `src/features/properties/schemas/property-filters.schema.ts` (Prompt 037B) como exemplo
   aplicado: parsing tolerante (valor inválido é ignorado, nunca quebra a página) e serialização
   que omite parâmetros vazios/default.
+- Uma página de detalhe de imóvel (ex.: `/properties/:id`) pode carregar o imóvel e sua galeria
+  de mídia em paralelo, mas nunca deve fazer requisições adicionais de storage ou por item de
+  mídia — toda URL de exibição (thumbnail/card/detail/original) já vem embutida na resposta da
+  API de mídia da propriedade. Ver `PropertyDetailsPage`/`usePropertyMedia` (Prompt 038) como
+  exemplo aplicado: exatamente uma chamada `GET /properties/:id` e uma
+  `GET /properties/:id/media` por carregamento, nunca uma por item de mídia.
 
 ## Componentes shadcn
 

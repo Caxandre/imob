@@ -41,3 +41,33 @@ export const PROPERTY_STATUS_LABELS: Record<string, string> = {
   ACTIVE: "Ativo",
   INACTIVE: "Inativo",
 };
+
+interface PropertyAddressFields {
+  street: string | null;
+  number: string | null;
+  complement: string | null;
+  neighborhood: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+}
+
+/**
+ * Composes a display address defensively (Prompt 038, section 32) from whichever parts exist —
+ * never "undefined, undefined". Returns `null` when nothing is present at all, so callers render
+ * no address block rather than an empty one.
+ */
+export function formatPropertyAddress(property: PropertyAddressFields): string | null {
+  const streetLine = [property.street, property.number].filter(Boolean).join(", ");
+  const complementedStreetLine = [streetLine, property.complement].filter(Boolean).join(" - ");
+  const cityState = [property.city, property.state].filter(Boolean).join(" - ");
+
+  const parts = [
+    complementedStreetLine,
+    property.neighborhood,
+    cityState,
+    property.postal_code,
+  ].filter((part): part is string => Boolean(part));
+
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
