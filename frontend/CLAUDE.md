@@ -17,7 +17,11 @@ específicas do frontend.
 - **Server state** (dados vindos da API) pertence ao **TanStack Query** — nunca `useState` +
   `useEffect` manual para buscar/cachear dados remotos.
 - **Form state** pertence ao **React Hook Form + Zod** — nunca estado de formulário controlado
-  manualmente campo a campo para formulários reais.
+  manualmente campo a campo para formulários reais. Formulários de criação/edição de imóvel
+  devem usar React Hook Form + Zod; o payload da requisição deve ser derivado dos valores
+  validados do formulário (o *output* do schema Zod via `zodResolver`), nunca parsing ad hoc
+  local no componente. Ver `PropertyForm`/`property-form.schema.ts` (Prompt 040) como exemplo
+  aplicado.
 - **Estado navegável/compartilhável** (filtros, paginação, o que devia sobreviver a um reload ou
   a compartilhar um link) pertence à **URL** (query string/params via React Router) — nunca só
   em memória se o usuário esperaria que um link copiado reproduzisse o mesmo estado.
@@ -72,6 +76,12 @@ específicas do frontend.
   API de mídia da propriedade. Ver `PropertyDetailsPage`/`usePropertyMedia` (Prompt 038) como
   exemplo aplicado: exatamente uma chamada `GET /properties/:id` e uma
   `GET /properties/:id/media` por carregamento, nunca uma por item de mídia.
+- Mutations de PATCH em imóvel devem preservar a semântica de atualização parcial do backend e
+  nunca sobrescrever campos nullable que não foram tocados: envie somente os campos que
+  `formState.dirtyFields` marcou como alterados (nunca o objeto inteiro do formulário), omita
+  por completo um campo não tocado, e envie `null` explícito para um campo nullable que o
+  usuário realmente limpou. Ver `pickDirtyFormFields()`/`useUpdateProperty` (Prompt 040) como
+  exemplo aplicado.
 
 ## Componentes shadcn
 

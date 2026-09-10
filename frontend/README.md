@@ -82,7 +82,7 @@ src/
 │   ├── env.ts           único ponto de leitura de import.meta.env
 │   └── http/             apiFetch() + ApiError — fetch nativo, sem Axios
 ├── pages/               composição de features/rotas — HomePage, PropertiesPage,
-│                        PropertyDetailsPage, NotFoundPage
+│                        PropertyDetailsPage, NewPropertyPage, EditPropertyPage, NotFoundPage
 ├── styles/              CSS global (Tailwind + tokens shadcn)
 ├── test/                setup do Vitest + renderWithProviders()
 └── main.tsx
@@ -93,14 +93,15 @@ navegável/compartilhável → URL; estado de UI local → `useState`/`useReduce
 deliberadamente **não instalado** — só entra quando surgir uma necessidade real de estado
 cliente global cruzando features.
 
-**Rotas hoje**: `/` (home mínima, com um link "Ver imóveis"), `/properties` (catálogo de
-imóveis), `/properties/:id` (detalhe do imóvel) e `*` (404). Sem dashboard, sem tenants, sem
-login, sem edição/CRUD de imóvel ainda.
+**Rotas hoje**: `/` (home mínima, com um link "Ver imóveis"), `/properties` (catálogo),
+`/properties/:id` (detalhe), `/properties/new` (criação), `/properties/:id/edit` (edição) e
+`*` (404). Sem dashboard, sem tenants, sem login, sem gestão de mídia (upload/reorder/cover/
+delete) e sem exclusão/arquivamento de imóvel pela UI ainda.
 
 **UI**: Tailwind CSS v4 + shadcn/ui (`components.json`, alias `@/*` → `src/*` consistente em
 TypeScript/Vite/Vitest/shadcn). Componentes instalados: `button`, `card`, `input`, `label`,
-`badge`, `separator`, `select`, `skeleton`, `sonner`. Tema claro; a arquitetura de tokens (CSS
-variables) não impede um tema escuro futuro, mas nenhum toggle existe ainda.
+`badge`, `separator`, `select`, `skeleton`, `sonner`, `textarea`. Tema claro; a arquitetura de
+tokens (CSS variables) não impede um tema escuro futuro, mas nenhum toggle existe ainda.
 
 **Autenticação**: não implementada.
 
@@ -166,3 +167,49 @@ parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que
   chamar a API.
 - Mesmo contrato de tenant do catálogo: `X-Tenant-Id` escopado à feature Properties, tenant
   ausente mostra o mesmo estado dedicado sem nenhuma requisição.
+- Botão "Editar" navega para `/properties/:id/edit`. A galeria/mídia não são alteradas por esta
+  página.
+
+### Criação e edição de imóveis (`/properties/new`, `/properties/:id/edit`)
+
+- Um único componente `PropertyForm`
+  (`src/features/properties/components/PropertyForm.tsx`, `mode="create" | "edit"`) é
+  reaproveitado pelas duas páginas — nunca dois formulários distintos. React Hook Form +
+  Zod (`zodResolver`), organizado em três blocos (Informações principais, Características,
+  Localização).
+- **Schema do formulário** (`src/features/properties/schemas/property-form.schema.ts`) é
+  deliberadamente distinto do schema de resposta da API (`propertyDetailSchema`): seu *input*
+  (`PropertyFormValues`) é o que os campos HTML realmente produzem (strings), e seu *output*
+  (`PropertyFormOutput`, obtido depois que `zodResolver` valida+transforma no submit) já é o
+  payload no formato esperado pelo backend — decimal strings, `null` para campo opcional
+  vazio, `number` para os campos inteiros pequenos. Enums (`property_type`/`transaction_type`/
+  `status`) reaproveitam os mesmos schemas Zod da listagem/detalhe — nunca uma segunda lista de
+  valores.
+- **Dinheiro** (`price`/`area_m2`): o input aceita formatos pt-BR ("1000", "1000,50",
+  "1.000,50"); `normalizePtBrDecimalString()`
+  (`src/features/properties/lib/normalize-decimal-input.ts`) converte para a string decimal
+  canônica que o backend espera (nunca um `number` JS na lógica financeira). Ao hidratar o
+  formulário de edição, `formatDecimalForPtBrInput()` faz o caminho inverso, só para exibição.
+- **Create**: `POST /api/v1/properties` via `createProperty()`
+  (`src/features/properties/api/create-property.ts`, hook `useCreateProperty`). Sucesso invalida
+  o cache do catálogo (`["properties", tenantId]`) e navega para `/properties/:id` do imóvel
+  criado.
+- **Edit**: `GET /api/v1/properties/:id` hidrata o formulário **uma única vez**
+  (`defaultValues`, nunca a prop controlada `values` do React Hook Form) — um refetch em
+  background nunca sobrescreve uma edição em andamento. `PATCH /api/v1/properties/:id` via
+  `updateProperty()` (`src/features/properties/api/update-property.ts`, hook
+  `useUpdateProperty`) envia **apenas os campos que `formState.dirtyFields` marcou como
+  alterados** (`pickDirtyFormFields()`) — nunca o objeto inteiro. Um campo não tocado é omitido
+  do payload (o backend interpreta ausência como "não mudar"); um campo nullable que o usuário
+  limpou é enviado como `null` explícito (nunca omitido por acidente); um campo numérico
+  alterado para `0` envia `0` (nunca confundido com "vazio"/`null`). Salvar sem nenhuma
+  alteração nunca chama `PATCH` — o botão fica desabilitado enquanto `!isDirty`. Sucesso
+  atualiza o cache do detalhe (`setQueryData`) e invalida o do catálogo, depois navega para
+  `/properties/:id`.
+- Erro de mutation (create ou edit) mostra uma mensagem fixa e segura no próprio formulário
+  ("Não foi possível salvar o imóvel.") — nunca o corpo bruto do erro; sucesso também mostra um
+  toast (`sonner`, já montado globalmente em `AppProviders`).
+- **Fora de escopo nesta tarefa**: upload de mídia, reorder, cover management, delete de mídia,
+  delete/archive de imóvel pela UI, autenticação, tenant switcher, auto-save, optimistic
+  update, persistência local de rascunho (`localStorage`/`IndexedDB`), bloqueio de navegação
+  por alterações não salvas.

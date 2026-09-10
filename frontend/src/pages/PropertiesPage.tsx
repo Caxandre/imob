@@ -1,6 +1,7 @@
 import { useMemo } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 
+import { Button } from "@/components/ui/button";
 import { env } from "@/lib/env";
 
 import { PropertiesEmptyState } from "@/features/properties/components/PropertiesEmptyState";
@@ -91,7 +92,12 @@ function PropertiesPageContent({
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
-      <h1 className="text-2xl font-semibold">Imóveis</h1>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-2xl font-semibold">Imóveis</h1>
+        <Button asChild>
+          <Link to="/properties/new">Novo imóvel</Link>
+        </Button>
+      </div>
 
       <div className="flex flex-col gap-4 rounded-xl border p-4">
         <PropertyFilterForm filters={filters} onApply={onApplyFilters} onClear={onClearFilters} />
