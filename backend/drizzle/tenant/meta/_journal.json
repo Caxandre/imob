@@ -50,6 +50,13 @@
       "when": 1787964287636,
       "tag": "0006_add_outbox_dispatch_metadata",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789231760989,
+      "tag": "0007_thankful_kinsey_walden",
+      "breakpoints": true
     }
   ]
 }

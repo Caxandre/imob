@@ -367,9 +367,45 @@ funcionando após um restart, porque a credencial está persistida em
   `InMemorySecretStore` antigo), ele não é recuperável magicamente — reprovisione-o uma última
   vez (`POST /api/v1/tenants`, aguardar `READY`) e passe a usar esse novo id.
 
+### Testando Leads (requer `pnpm dev:full` e um tenant READY)
+
+```text
+Swagger UI (com pnpm dev:full em execução, ou apenas pnpm dev — Leads não depende de fila)
+  → Leads → POST /api/v1/leads → Try it out
+    → preencher X-Tenant-Id com o id de um tenant READY → preencher o payload de exemplo
+      (name + email e/ou phone; property_id opcional) → Execute
+    → conferir 201, sempre com "status": "NEW" (o campo não pode ser enviado no create) e
+      "source": "MANUAL" por padrão
+    → remover email e phone do payload e tentar novamente → conferir 400 (nenhum canal de
+      contato)
+  → Leads → GET /api/v1/leads → Try it out
+    → preencher X-Tenant-Id → Execute → conferir a listagem paginada
+    → cada item traz "property": um resumo {id, title, status} do imóvel associado, ou null
+      quando o lead não tem property_id — carregado com um único JOIN, nunca uma consulta por
+      lead
+    → opcional: testar filtros, ex. status=NEW&source=WEBSITE&q=maria&
+      created_from=2026-01-01T00:00:00Z&created_to=2026-12-31T23:59:59Z&sort=name&order=asc
+      (parâmetro desconhecido retorna 400)
+  → Leads → GET /api/v1/leads/{id} → Try it out
+    → preencher X-Tenant-Id e o id retornado pelo POST → Execute → conferir 200, com o mesmo
+      resumo "property" do item de listagem
+  → Leads → PATCH /api/v1/leads/{id} → Try it out
+    → preencher X-Tenant-Id e o id → body {"status": "CONTACTED"} → Execute → conferir 200,
+      só o campo enviado mudou
+    → se o lead só tem email (sem phone), tentar body {"email": null} → conferir 400 (o
+      resultado ficaria sem nenhum canal de contato) e o lead permanece intacto
+    → body com property_id de um imóvel inexistente neste tenant → conferir 404
+```
+
+`X-Tenant-Id` é o mesmo mecanismo temporário de desenvolvimento já usado por Properties — ver
+o aviso na seção anterior. Leads é um módulo inteiramente síncrono: nenhuma escrita passa por
+Redis/BullMQ/outbox, então `pnpm dev` sozinho já é suficiente para testá-lo manualmente
+(`pnpm dev:full` só é necessário se você também quiser exercitar o provisioning de um tenant
+novo no mesmo terminal).
+
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` e
 `GET /api/v1/tenants/{id}` (tag **Tenants** — ambos `GET` são administrativos, só o Control
-Plane, sem autenticação ainda; ver `ARCHITECTURE.md`), e `POST/GET /api/v1/properties`,
+Plane, sem autenticação ainda; ver `ARCHITECTURE.md`), `POST/GET /api/v1/properties`,
 `GET/PATCH/DELETE /api/v1/properties/{id}`,
 `POST/GET /api/v1/properties/{id}/media`, `PUT /api/v1/properties/{id}/media/order`,
 `PATCH /api/v1/properties/{id}/media/{mediaId}/cover`,
@@ -378,8 +414,12 @@ arquiva (`status = INACTIVE`), nunca exclui fisicamente; `DELETE .../media/{medi
 fisicamente um único item da galeria (metadata primeiro, objeto no R2 depois, best-effort — ver
 [ADR-007](docs/architecture/adr/ADR-007-property-media-consistency.md)). As três rotas de
 galeria (reorder/capa/exclusão) continuam permitidas mesmo com a propriedade arquivada — só o
-upload de mídia nova é bloqueado por arquivamento. Nenhuma rota interna de worker/dispatcher/
-provisioning é exposta aqui — o Swagger descreve apenas a interface HTTP pública.
+upload de mídia nova é bloqueado por arquivamento. E `POST/GET /api/v1/leads`,
+`GET/PATCH /api/v1/leads/{id}` (tag **Leads**) — sem `DELETE`, sem fila, `status` sempre `NEW`
+no create e livre para qualquer valor via `PATCH` (sem máquina de estado); um lead precisa de
+pelo menos `email` ou `phone`, sempre validado contra o estado resultante, nunca só o payload
+parcial enviado. Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o
+Swagger descreve apenas a interface HTTP pública.
 
 ## Cloudflare R2 (object storage)
 
@@ -495,6 +535,6 @@ Resumo:
   `provisioning_jobs`. Planos e billing ainda não possuem tabelas.
 - **Tenant Data Plane**: cada tenant possui seu próprio database PostgreSQL exclusivo,
   provisionado sob demanda de forma real e assíncrona (`tenants` → `provisioning_jobs` →
-  dispatcher → BullMQ → worker). Primeiro módulo de domínio (`properties`) já implementado
-  sobre esse schema.
+  dispatcher → BullMQ → worker). Módulos de domínio já implementados sobre esse schema:
+  `properties` e `leads` (fundação síncrona, sem fila, com associação opcional a uma property).
 - O código de domínio nunca assume que todos os tenants compartilham o mesmo database.

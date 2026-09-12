@@ -1,6 +1,9 @@
 /** PostgreSQL SQLSTATE for a unique constraint violation. */
 const UNIQUE_VIOLATION = "23505";
 
+/** PostgreSQL SQLSTATE for a CHECK constraint violation. */
+const CHECK_VIOLATION = "23514";
+
 interface PostgresError {
   code: string;
   constraint?: string;
@@ -32,4 +35,11 @@ export function isUniqueViolation(error: unknown, constraintName: string): boole
   const postgresError = findPostgresError(error);
 
   return postgresError?.code === UNIQUE_VIOLATION && postgresError.constraint === constraintName;
+}
+
+/** True when `error` is a CHECK violation raised by the given constraint. */
+export function isCheckViolation(error: unknown, constraintName: string): boolean {
+  const postgresError = findPostgresError(error);
+
+  return postgresError?.code === CHECK_VIOLATION && postgresError.constraint === constraintName;
 }
