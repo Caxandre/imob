@@ -109,6 +109,15 @@ describe("EditPropertyPage", () => {
     expect(screen.getByLabelText("Rua")).toHaveValue("Rua Exemplo");
   });
 
+  it("does not expose a status field — lifecycle actions on the detail page own status transitions (Prompt 042, section 29)", async () => {
+    mockedGetPropertyById.mockResolvedValue(buildProperty());
+
+    renderPage();
+
+    await screen.findByLabelText("Título *");
+    expect(screen.queryByLabelText("Status *")).not.toBeInTheDocument();
+  });
+
   it("shows a not-found state on a 404, without rendering the form", async () => {
     mockedGetPropertyById.mockRejectedValue(new ApiError(404, "Property not found"));
 

@@ -9,6 +9,7 @@ import { PropertyDetailsSkeleton } from "@/features/properties/components/Proper
 import { PropertyGallery } from "@/features/properties/components/PropertyGallery";
 import { PropertyGalleryErrorState } from "@/features/properties/components/PropertyGalleryErrorState";
 import { PropertyGallerySkeleton } from "@/features/properties/components/PropertyGallerySkeleton";
+import { PropertyLifecycleActions } from "@/features/properties/components/PropertyLifecycleActions";
 import { PropertyMainInfo } from "@/features/properties/components/PropertyMainInfo";
 import { PropertyNotFoundState } from "@/features/properties/components/PropertyNotFoundState";
 import { TenantNotConfiguredState } from "@/features/properties/components/TenantNotConfiguredState";
@@ -62,13 +63,20 @@ function PropertyDetailsPageContent({ tenantId, propertyId }: PropertyDetailsPag
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <Button asChild variant="ghost" className="w-fit">
           <Link to="/properties">Voltar para imóveis</Link>
         </Button>
-        <Button asChild variant="outline">
-          <Link to={`/properties/${propertyId}/edit`}>Editar</Link>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <PropertyLifecycleActions
+            tenantId={tenantId}
+            propertyId={propertyId}
+            status={property.status}
+          />
+          <Button asChild variant="outline">
+            <Link to={`/properties/${propertyId}/edit`}>Editar</Link>
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-8 lg:grid-cols-2">

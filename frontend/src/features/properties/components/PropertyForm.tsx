@@ -115,7 +115,7 @@ export function PropertyForm({
             <FieldError id="property-description-error" message={errors.description?.message} />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className={`grid gap-4 ${mode === "create" ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="property-type">Tipo *</Label>
               <Controller
@@ -160,27 +160,35 @@ export function PropertyForm({
               />
             </div>
 
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="property-status">Status *</Label>
-              <Controller
-                control={control}
-                name="status"
-                render={({ field }) => (
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <SelectTrigger id="property-status" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {propertyStatusSchema.options.map((value) => (
-                        <SelectItem key={value} value={value}>
-                          {PROPERTY_STATUS_LABELS[value]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-              />
-            </div>
+            {/* Status is only choosable at creation (Prompt 042, sections 28-31): once a
+                property exists, `PropertyLifecycleActions` on the detail page owns every status
+                transition (Ativar/Arquivar/Reativar) as explicit domain actions — never a raw
+                status dropdown next to them. The field stays in `propertyFormSchema` and in the
+                edit form's hydrated values either way (required, unedited), so it's simply never
+                marked dirty in edit mode and never reaches the PATCH payload. */}
+            {mode === "create" && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="property-status">Status *</Label>
+                <Controller
+                  control={control}
+                  name="status"
+                  render={({ field }) => (
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger id="property-status" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {propertyStatusSchema.options.map((value) => (
+                          <SelectItem key={value} value={value}>
+                            {PROPERTY_STATUS_LABELS[value]}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                />
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5 sm:w-56">

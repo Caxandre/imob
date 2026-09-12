@@ -57,6 +57,12 @@ describe("NewPropertyPage", () => {
     expect(screen.getByLabelText("Preço *")).toHaveValue("");
   });
 
+  it("keeps status configurable at creation (Prompt 042, section 30/31)", () => {
+    renderPage();
+
+    expect(screen.getByLabelText("Status *")).toBeInTheDocument();
+  });
+
   it("shows a validation error and never calls the API when title is missing", async () => {
     renderPage();
 

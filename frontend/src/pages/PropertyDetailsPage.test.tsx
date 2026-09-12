@@ -6,8 +6,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { routes } from "@/app/router/router";
 import { ApiError } from "@/lib/http/api-error";
 
+import { archiveProperty } from "@/features/properties/api/archive-property";
 import { getPropertyById } from "@/features/properties/api/get-property";
 import { listPropertyMedia } from "@/features/properties/api/list-property-media";
+import { updateProperty } from "@/features/properties/api/update-property";
 import type { PropertyDetail } from "@/features/properties/schemas/property.schema";
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
@@ -26,8 +28,23 @@ vi.mock("@/features/properties/api/list-property-media", () => ({
   listPropertyMedia: vi.fn(),
 }));
 
+// Rendered by `PropertyLifecycleActions`, mounted in the header of this page (Prompt 042) —
+// mocked here purely so these page-focused tests never make a real network call; lifecycle
+// behavior itself is covered by `PropertyLifecycleActions.test.tsx`.
+vi.mock("@/features/properties/api/update-property", () => ({
+  updateProperty: vi.fn(),
+}));
+vi.mock("@/features/properties/api/archive-property", () => ({
+  archiveProperty: vi.fn(),
+}));
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
+
 const mockedGetPropertyById = vi.mocked(getPropertyById);
 const mockedListPropertyMedia = vi.mocked(listPropertyMedia);
+const mockedUpdateProperty = vi.mocked(updateProperty);
+const mockedArchiveProperty = vi.mocked(archiveProperty);
 
 function buildProperty(overrides: Partial<PropertyDetail> = {}): PropertyDetail {
   return {
@@ -69,6 +86,8 @@ function renderPage(path = `/properties/${PROPERTY_ID}`) {
 beforeEach(() => {
   mockedGetPropertyById.mockReset();
   mockedListPropertyMedia.mockReset();
+  mockedUpdateProperty.mockReset();
+  mockedArchiveProperty.mockReset();
 });
 
 describe("PropertyDetailsPage", () => {
@@ -173,5 +192,16 @@ describe("PropertyDetailsPage", () => {
       "href",
       "/properties",
     );
+  });
+
+  it("renders the lifecycle action matching the property's current status", async () => {
+    mockedGetPropertyById.mockResolvedValue(buildProperty({ status: "ACTIVE" }));
+    mockedListPropertyMedia.mockResolvedValue({ data: [] });
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "Arquivar imóvel" })).toBeInTheDocument();
+    expect(mockedUpdateProperty).not.toHaveBeenCalled();
+    expect(mockedArchiveProperty).not.toHaveBeenCalled();
   });
 });

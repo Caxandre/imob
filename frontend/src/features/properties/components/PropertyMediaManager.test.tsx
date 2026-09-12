@@ -48,7 +48,11 @@ function renderManager(propertyStatus: "DRAFT" | "ACTIVE" | "INACTIVE" = "ACTIVE
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <PropertyMediaManager tenantId={TENANT_ID} propertyId={PROPERTY_ID} propertyStatus={propertyStatus} />
+      <PropertyMediaManager
+        tenantId={TENANT_ID}
+        propertyId={PROPERTY_ID}
+        propertyStatus={propertyStatus}
+      />
     </QueryClientProvider>,
   );
 }
@@ -159,7 +163,9 @@ describe("PropertyMediaManager", () => {
 
     renderManager();
 
-    expect(await screen.findByRole("button", { name: "Mover foto 1 para a esquerda" })).toBeDisabled();
+    expect(
+      await screen.findByRole("button", { name: "Mover foto 1 para a esquerda" }),
+    ).toBeDisabled();
     expect(screen.getByRole("button", { name: "Mover foto 1 para a direita" })).not.toBeDisabled();
     expect(screen.getByRole("button", { name: "Mover foto 2 para a esquerda" })).not.toBeDisabled();
     expect(screen.getByRole("button", { name: "Mover foto 2 para a direita" })).toBeDisabled();
@@ -181,7 +187,11 @@ describe("PropertyMediaManager", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mover foto 1 para a direita" }));
 
     await waitFor(() => {
-      expect(mockedReorderPropertyMedia).toHaveBeenCalledWith(TENANT_ID, PROPERTY_ID, ["b", "a", "c"]);
+      expect(mockedReorderPropertyMedia).toHaveBeenCalledWith(TENANT_ID, PROPERTY_ID, [
+        "b",
+        "a",
+        "c",
+      ]);
     });
   });
 
