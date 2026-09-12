@@ -100,6 +100,20 @@ específicas do frontend.
   drag-and-drop (`dnd-kit`, `react-beautiful-dnd`, `sortablejs`, ...) sem uma decisão
   arquitetural explícita — a UX atual usa botões mover-para-esquerda/direita, acessíveis via
   teclado. Ver `PropertyMediaManager` (Prompt 041) como exemplo aplicado.
+- Exclusão de imóvel no frontend deve preservar a semântica de arquivamento (soft-archive) do
+  backend. `DELETE /properties/:id` significa arquivar (`status = INACTIVE`), nunca exclusão
+  permanente — a UI nunca deve implementar/sugerir "excluir definitivamente"/purge/hard delete.
+  Ver `archiveProperty()`/`PropertyLifecycleActions` (Prompt 042) como exemplo aplicado.
+- Transições de ciclo de vida de um recurso de domínio (ex.: status do imóvel) devem ser
+  representadas como ações explícitas ("Ativar imóvel", "Arquivar imóvel", "Reativar imóvel"),
+  nunca inferidas de uma mutação genérica de status no cliente (ex.: um `<select>` de status
+  cru) — cada ação mapeia para exatamente uma chamada HTTP com semântica clara. Ver
+  `PropertyLifecycleActions` (Prompt 042) como exemplo aplicado.
+- O backend continua sendo a fonte de verdade sobre quais transições de ciclo de vida são
+  permitidas — o frontend nunca reimplementa regra de transição própria nem assume que uma
+  transição é bloqueada sem o backend ter confirmado isso (ex.: nenhuma mensagem de erro
+  específica para "transição inválida" foi inventada onde o backend não distingue esse caso).
+  Ver `PropertyLifecycleActions` (Prompt 042) como exemplo aplicado.
 
 ## Componentes shadcn
 

@@ -170,6 +170,59 @@ parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que
   ausente mostra o mesmo estado dedicado sem nenhuma requisição.
 - Botão "Editar" navega para `/properties/:id/edit`. A galeria/mídia não são alteradas por esta
   página.
+- **Ações de ciclo de vida** (`PropertyLifecycleActions`) ficam no cabeçalho, ao lado do botão
+  "Editar" — ver a seção seguinte.
+
+### Ciclo de vida do imóvel (ações em `/properties/:id`)
+
+`PropertyLifecycleActions` (`src/features/properties/components/PropertyLifecycleActions.tsx`)
+expõe o ciclo de vida como ações de domínio explícitas — nunca um `<select>` de status cru.
+Exatamente uma ação aparece por vez, conforme o `status` atual:
+
+| Status atual | Ação exibida | Requisição |
+| --- | --- | --- |
+| `DRAFT` | "Ativar imóvel" (sem confirmação) | `PATCH /properties/:id` `{ status: "ACTIVE" }` |
+| `ACTIVE` | "Arquivar imóvel" (confirmação via `AlertDialog`) | `DELETE /properties/:id` |
+| `INACTIVE` | "Reativar imóvel" (sem confirmação) | `PATCH /properties/:id` `{ status: "ACTIVE" }` |
+
+- **Contrato verificado diretamente no backend** antes de implementar
+  (`backend/src/modules/properties/http/property-routes.ts`,
+  `application/update-property.ts`, `application/archive-property.ts`,
+  `infrastructure/drizzle-property-repository.ts`): nem `updateProperty` nem `archiveProperty`
+  têm qualquer regra de domínio sobre transição de status — `PATCH { status }` aceita
+  `DRAFT`/`ACTIVE`/`INACTIVE` a partir de **qualquer** status atual, e `DELETE` (arquivar) é
+  idempotente por convergência (sempre executa o mesmo `UPDATE ... SET status = 'INACTIVE'`,
+  nunca um "já está INACTIVE, não faz nada"). O único `409` possível nessas duas rotas é
+  "tenant não está READY" — não existe um "conflito de transição de status" real no backend
+  hoje, então nenhuma mensagem de erro especial foi inventada para esse caso.
+- **Arquivar nunca usa `PATCH { status: "INACTIVE" }`** — `DELETE /properties/:id` já é a
+  semântica oficial do backend para arquivamento (nunca reinventada no cliente). Ver
+  `archiveProperty()` (`src/features/properties/api/archive-property.ts`).
+- **Ativar/Reativar reaproveitam `useUpdateProperty`** (o mesmo hook usado pela edição de
+  dados textuais, Prompt 040) — mesma forma de requisição, mesmo comportamento de cache; uma
+  segunda mutation só para status seria uma duplicação sem propósito.
+- **Cache**: ativar/reativar semeiam o cache do detalhe diretamente com a resposta do `PATCH`
+  (`setQueryData`, já existente em `useUpdateProperty`) e invalidam a listagem. Arquivar (sem
+  corpo de resposta no `204`) invalida o cache do detalhe em vez de semeá-lo — isso também é o
+  que faz `PropertyMediaManager` (na página de edição, se estiver aberta) refletir
+  imediatamente o bloqueio de upload de um imóvel recém-arquivado, já que ambos leem a mesma
+  query key (`["property", tenantId, propertyId]`).
+- **Sem optimistic update**: o badge de status (`PropertyMainInfo`, labels já existentes —
+  Rascunho/Ativo/Inativo) só muda quando o backend confirma a transição.
+- **Confirmação**: só "Arquivar imóvel" exige confirmação (`AlertDialog` já usado pela gestão
+  de mídia) — "O imóvel ficará inativo e poderá ser reativado posteriormente." (texto neutro:
+  não há nenhuma regra de negócio adicional documentada além de `status = INACTIVE`).
+  Ativar/Reativar são diretos, sem diálogo.
+- **`DELETE` continua sendo arquivamento semântico** — nunca exclusão permanente. Não existe
+  "excluir definitivamente"/purge/hard delete na UI.
+- **Decisão sobre `status` no formulário** (Prompt 042, sections 28-31): `PropertyForm` deixou
+  de expor o campo Status **apenas no modo `edit`** — com as ações de ciclo de vida explícitas
+  agora existindo, um `<select>` de status ao lado delas seria redundante e confuso. Em
+  `create`, o campo continua configurável (o produto permite escolher `DRAFT`/`ACTIVE` já na
+  criação, e dividir o schema por modo aumentaria a divergência entre os dois fluxos sem
+  necessidade real). O campo `status` permanece no schema/valores hidratados do formulário de
+  edição — só não é renderizado — então nunca é marcado como alterado e nunca entra no payload
+  do `PATCH` de edição.
 
 ### Criação e edição de imóveis (`/properties/new`, `/properties/:id/edit`)
 
@@ -220,7 +273,7 @@ parking_spaces_min=&area_min=&area_max=&sort=&order=&page=`, os mesmos nomes que
 **Decisão de UX**: a gestão de mídia **não** ganhou uma rota dedicada
 (`/properties/:id/media`) — ela vive como uma seção separada, "Fotos do imóvel"
 (`PropertyMediaManager`), renderizada **abaixo** de `PropertyForm` em
-`/properties/:id/edit`, mas deliberadamente como um *sibling* do `<form>` textual, nunca
+`/properties/:id/edit`, mas deliberadamente como um _sibling_ do `<form>` textual, nunca
 aninhada dentro dele — um clique em qualquer ação de mídia nunca aciona o submit do
 formulário de dados (todo botão de mídia é `type="button"`). Isso evita uma segunda página só
 para reaproveitar `tenantId`/`propertyId`/validação de rota já resolvidos por
