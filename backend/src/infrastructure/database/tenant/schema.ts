@@ -338,3 +338,77 @@ export const propertyMediaVariants = pgTable(
     check("property_media_variants_size_bytes_positive", sql`${t.sizeBytes} > 0`),
   ],
 );
+
+// Prompt 043 — deliberately small: NEW/CONTACTED/QUALIFIED/WON/LOST covers a simple workflow
+// classification, not a formal sales-funnel state machine. No VISIT_SCHEDULED/NEGOTIATION/
+// PROPOSAL yet (section 5) — those would need richer modeling (who scheduled it, when, outcome)
+// that is not part of this foundation. PATCH can set any value from any current value; nothing
+// in this codebase enforces a transition graph (see `update-lead.ts`).
+export const leadStatus = pgEnum("lead_status", ["NEW", "CONTACTED", "QUALIFIED", "WON", "LOST"]);
+
+// Prompt 043 — preserves where a lead came from without coupling the schema to integrations
+// that don't exist yet (no specific portal names). WEBSITE/WHATSAPP/PORTAL are reachable values
+// today only via manual/API creation with an explicit `source` — nothing in this codebase
+// creates a lead from an actual website form, WhatsApp message, or portal webhook yet.
+export const leadSource = pgEnum("lead_source", ["MANUAL", "WEBSITE", "WHATSAPP", "PORTAL", "OTHER"]);
+
+/**
+ * Prompt 043 — first table of the future commercial/CRM domain, same Tenant Data Plane
+ * conventions as every table above (no `tenant_id`, isolation is the database boundary itself).
+ * `propertyId` is nullable and `ON DELETE SET NULL` (not `RESTRICT` like `property_media`):
+ * a lead has standalone value as a commercial record independent of the property it referenced,
+ * so losing that reference must never block/cascade — it should simply become a generic lead.
+ * `properties` rows are never physically deleted in the normal flow (archiving sets `status =
+ * 'INACTIVE'`, never `DELETE FROM properties`), so `SET NULL` firing today is not a real trigger
+ * — it is chosen for robustness against a future hard-delete path, not a current necessity.
+ * A lead may legitimately reference an `INACTIVE` property (it may have been created while the
+ * property was active, or a commercial contact can exist independently of current availability)
+ * — no status-based restriction is encoded here or in application code (this task, section 28).
+ *
+ * `email`/`phone` are both nullable, but the CHECK below enforces that at least one is always
+ * present — a lead with no contact channel at all is not a usable commercial record. This is
+ * the one invariant this table cannot express through column-level constraints alone, so it is
+ * an explicit named CHECK (`leads_contact_channel_required`), mirrored at the HTTP boundary
+ * (`lead-request.schema.ts`) and re-validated by the application layer on partial update
+ * (`update-lead.ts`) against the *resulting* persisted state, not just the PATCH payload alone
+ * — the CHECK itself remains the last-resort barrier against a race between two concurrent
+ * updates each clearing a different channel (this task, section 49).
+ *
+ * `notes` is a single free-text field, not a `lead_notes` table with authorship/timestamps per
+ * entry — a real notes timeline needs an authenticated user concept (who wrote it) that does not
+ * exist yet (only the temporary `X-Tenant-Id` mechanism). Documented here rather than guessed at
+ * now (this task, section 18).
+ *
+ * PII: `name`/`email`/`phone`/`message`/`notes` are personal data. No anonymization/LGPD erasure
+ * mechanism exists yet — this is a known gap for a future task, not an oversight (section 53).
+ */
+export const leads = pgTable(
+  "leads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    propertyId: uuid("property_id").references(() => properties.id, {
+      onDelete: "set null",
+      onUpdate: "restrict",
+    }),
+    name: text("name").notNull(),
+    email: text("email"),
+    phone: text("phone"),
+    status: leadStatus("status").notNull().default("NEW"),
+    source: leadSource("source").notNull().default("MANUAL"),
+    // The lead's original interest/message — set once at creation, never a mutable attendance
+    // history (section 17). Distinct from `notes` (internal observation, editable over time).
+    message: text("message"),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Serves the default listing order (created_at DESC, id DESC) directly from the index, same
+    // shape as `properties_created_at_id_idx`.
+    index("leads_created_at_id_idx").on(t.createdAt.desc(), t.id.desc()),
+    index("leads_status_idx").on(t.status),
+    index("leads_source_idx").on(t.source),
+    index("leads_property_id_idx").on(t.propertyId),
+    check("leads_contact_channel_required", sql`${t.email} IS NOT NULL OR ${t.phone} IS NOT NULL`),
+  ],
+);
