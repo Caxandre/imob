@@ -50,6 +50,33 @@ describe("apiFetch", () => {
     expect((error as InstanceType<typeof ApiError>).message).toBe("Thing not found");
   });
 
+  it("serializes a plain object body as JSON with a Content-Type header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await apiFetch("/things", { method: "POST", body: { title: "x" } });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(JSON.stringify({ title: "x" }));
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+  });
+
+  it("passes a FormData body through untouched, without a manual Content-Type", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const formData = new FormData();
+    formData.append("file", new File(["x"], "photo.jpg", { type: "image/jpeg" }));
+
+    await apiFetch("/things/1/media", { method: "POST", body: formData });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(formData);
+    // The browser (not this code) sets `multipart/form-data; boundary=...` — a manual
+    // `Content-Type` here would break the boundary the browser generates.
+    expect(init.headers).not.toHaveProperty("Content-Type");
+  });
+
   it("never makes a real network call — fetch is always stubbed", async () => {
     const fetchMock = vi
       .fn()

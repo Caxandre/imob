@@ -7,6 +7,7 @@ import { routes } from "@/app/router/router";
 import { ApiError } from "@/lib/http/api-error";
 
 import { getPropertyById } from "@/features/properties/api/get-property";
+import { listPropertyMedia } from "@/features/properties/api/list-property-media";
 import { updateProperty } from "@/features/properties/api/update-property";
 import type { PropertyDetail } from "@/features/properties/schemas/property.schema";
 
@@ -26,12 +27,20 @@ vi.mock("@/features/properties/api/update-property", () => ({
   updateProperty: vi.fn(),
 }));
 
+// Rendered by `PropertyMediaManager`, mounted below `PropertyForm` on this page (Prompt 041) —
+// mocked here purely so these form-focused tests never make a real network call; its own
+// behavior is covered by `PropertyMediaManager.test.tsx`.
+vi.mock("@/features/properties/api/list-property-media", () => ({
+  listPropertyMedia: vi.fn(),
+}));
+
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
 const mockedGetPropertyById = vi.mocked(getPropertyById);
 const mockedUpdateProperty = vi.mocked(updateProperty);
+const mockedListPropertyMedia = vi.mocked(listPropertyMedia);
 
 function buildProperty(overrides: Partial<PropertyDetail> = {}): PropertyDetail {
   return {
@@ -76,6 +85,8 @@ function renderPage(path = `/properties/${PROPERTY_ID}/edit`) {
 beforeEach(() => {
   mockedGetPropertyById.mockReset();
   mockedUpdateProperty.mockReset();
+  mockedListPropertyMedia.mockReset();
+  mockedListPropertyMedia.mockResolvedValue({ data: [] });
 });
 
 describe("EditPropertyPage", () => {
@@ -149,7 +160,9 @@ describe("EditPropertyPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Salvar" }));
 
     await waitFor(() => {
-      expect(mockedUpdateProperty).toHaveBeenCalledWith(TENANT_ID, PROPERTY_ID, { title: "Novo título" });
+      expect(mockedUpdateProperty).toHaveBeenCalledWith(TENANT_ID, PROPERTY_ID, {
+        title: "Novo título",
+      });
     });
     await waitFor(() => expect(router.state.location.pathname).toBe(`/properties/${PROPERTY_ID}`));
   });
@@ -165,7 +178,9 @@ describe("EditPropertyPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Salvar" }));
 
     await waitFor(() => {
-      expect(mockedUpdateProperty).toHaveBeenCalledWith(TENANT_ID, PROPERTY_ID, { description: null });
+      expect(mockedUpdateProperty).toHaveBeenCalledWith(TENANT_ID, PROPERTY_ID, {
+        description: null,
+      });
     });
   });
 

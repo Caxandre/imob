@@ -19,7 +19,7 @@ específicas do frontend.
 - **Form state** pertence ao **React Hook Form + Zod** — nunca estado de formulário controlado
   manualmente campo a campo para formulários reais. Formulários de criação/edição de imóvel
   devem usar React Hook Form + Zod; o payload da requisição deve ser derivado dos valores
-  validados do formulário (o *output* do schema Zod via `zodResolver`), nunca parsing ad hoc
+  validados do formulário (o _output_ do schema Zod via `zodResolver`), nunca parsing ad hoc
   local no componente. Ver `PropertyForm`/`property-form.schema.ts` (Prompt 040) como exemplo
   aplicado.
 - **Estado navegável/compartilhável** (filtros, paginação, o que devia sobreviver a um reload ou
@@ -82,6 +82,24 @@ específicas do frontend.
   por completo um campo não tocado, e envie `null` explícito para um campo nullable que o
   usuário realmente limpou. Ver `pickDirtyFormFields()`/`useUpdateProperty` (Prompt 040) como
   exemplo aplicado.
+- Mutations de mídia de imóvel devem usar exclusivamente a API de mídia do backend — o frontend
+  nunca faz upload direto ao R2 (ou a qualquer object storage), nunca instala um SDK de storage,
+  e nunca deriva/constrói uma object key. Toda URL de exibição já vem pronta na resposta da API.
+  Ver `uploadPropertyMedia()`/`PropertyMediaManager` (Prompt 041) como exemplo aplicado.
+- Conclusão do upload HTTP de uma mídia e conclusão do processamento assíncrono dessa mídia são
+  estados diferentes — a UI deve representar `PROCESSING`/`READY`/`FAILED` explicitamente (nunca
+  tratar "upload terminou" como "variantes prontas", nunca marcar `PROCESSING` como falho por
+  timeout no frontend — o backend é a autoridade do status). Ver `PropertyMediaManagerItem`
+  (Prompt 041) como exemplo aplicado.
+- Polling de mídia em processamento só é permitido enquanto a galeria do imóvel atual
+  efetivamente contiver algum item `PROCESSING`, e deve parar sozinho assim que o processamento
+  se estabilizar — via `refetchInterval` do TanStack Query, nunca um `setInterval` manual. Ver
+  `usePropertyMedia` (Prompt 041) como exemplo aplicado.
+- Reorder de galeria deve preservar a semântica de conjunto exato do backend (`media_ids` precisa
+  conter todos os ids atuais, nunca um subconjunto) e não deve introduzir dependência de
+  drag-and-drop (`dnd-kit`, `react-beautiful-dnd`, `sortablejs`, ...) sem uma decisão
+  arquitetural explícita — a UX atual usa botões mover-para-esquerda/direita, acessíveis via
+  teclado. Ver `PropertyMediaManager` (Prompt 041) como exemplo aplicado.
 
 ## Componentes shadcn
 

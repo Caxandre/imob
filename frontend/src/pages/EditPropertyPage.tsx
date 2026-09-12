@@ -8,6 +8,7 @@ import { ApiError } from "@/lib/http/api-error";
 import { PropertyDetailsErrorState } from "@/features/properties/components/PropertyDetailsErrorState";
 import { PropertyForm } from "@/features/properties/components/PropertyForm";
 import { PropertyFormSkeleton } from "@/features/properties/components/PropertyFormSkeleton";
+import { PropertyMediaManager } from "@/features/properties/components/PropertyMediaManager";
 import { PropertyNotFoundState } from "@/features/properties/components/PropertyNotFoundState";
 import { TenantNotConfiguredState } from "@/features/properties/components/TenantNotConfiguredState";
 import { useProperty } from "@/features/properties/hooks/use-property";
@@ -110,6 +111,15 @@ function EditPropertyPageContent({
         onCancel={() => navigate(`/properties/${propertyId}`)}
         isSubmitting={mutation.isPending}
         submitError={submitError}
+      />
+
+      {/* Deliberately a sibling of `PropertyForm`, never nested inside its `<form>` (Prompt 041,
+          section 3/4/82) — a click on any media action must never trigger the textual form's
+          submit. */}
+      <PropertyMediaManager
+        tenantId={tenantId}
+        propertyId={propertyId}
+        propertyStatus={property.status}
       />
     </main>
   );
