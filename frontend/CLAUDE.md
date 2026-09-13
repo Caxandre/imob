@@ -114,6 +114,40 @@ específicas do frontend.
   transição é bloqueada sem o backend ter confirmado isso (ex.: nenhuma mensagem de erro
   específica para "transição inválida" foi inventada onde o backend não distingue esse caso).
   Ver `PropertyLifecycleActions` (Prompt 042) como exemplo aplicado.
+- Lead server state must use TanStack Query and remain isolated by tenant-aware query keys.
+  Ver `leadKeys` (`src/features/leads/hooks/use-leads.ts`, Prompt 044) como exemplo aplicado —
+  toda chave inclui `tenantId`, nunca compartilhada entre tenants; o cache de opções de imóvel
+  do formulário de lead (`lead-property-options`) é deliberadamente uma chave própria, separada
+  do prefixo `leads`, para que uma mutação de lead nunca o invalide por engano.
+- Lead forms must preserve the backend invariant that at least one of email or phone is
+  present. Ver `leadFormSchema` (Prompt 044) como exemplo aplicado: a checagem roda sobre o
+  estado **resultante** completo do formulário (React Hook Form já mantém o objeto inteiro,
+  existente + editado), nunca só os campos alterados isoladamente — mesma regra em create e em
+  edit, sem lógica de merge separada. O backend continua sendo a autoridade final.
+- Lead PATCH requests must preserve partial-update semantics and explicit null clearing. Ver
+  `pickDirtyLeadFormFields()`/`useUpdateLead` (Prompt 044) como exemplo aplicado — mesma
+  disciplina de `pickDirtyFormFields()`/`useUpdateProperty`, mas com uma diferença deliberada:
+  a resposta do `PATCH` de lead (`Lead`, sem `property`) nunca é gravada diretamente no cache do
+  detalhe via `setQueryData` — fazer isso apagaria o resumo de imóvel até um refetch não
+  relacionado. Sucesso invalida o cache do detalhe (forçando um `GET` real) em vez de semeá-lo.
+- Property summaries returned by the Leads API must be used directly; the frontend must not
+  issue per-lead Property requests. Ver `LeadDetailsPage`/`LeadTable` (Prompt 044) como exemplo
+  aplicado — `property: {id, title, status} | null` já vem embutido tanto na listagem quanto no
+  detalhe de um lead (um único `LEFT JOIN` no backend); a única chamada adicional de Properties
+  que este módulo faz é a busca **limitada** (`limit=100`) que alimenta o `<select>` de
+  associação nos formulários de create/edit — nunca uma consulta por lead exibido.
+- Lead PII must not be logged or persisted in local browser storage. Ver
+  `src/features/leads/` (Prompt 044) como exemplo aplicado — nenhum `console.log` do lead
+  inteiro, query keys do TanStack Query carregam só `tenantId`/`id`/filtros estruturados (nunca
+  nome/email/telefone), e nada da feature usa `localStorage`/`sessionStorage`/`IndexedDB`.
+- **Exceção documentada à regra de "nunca um `<select>` de status cru"** (ver
+  `PropertyLifecycleActions` acima): para Leads, o backend não implementa nenhuma máquina de
+  estado (`PATCH` aceita qualquer `status` a partir de qualquer `status` atual) — diferente de
+  Properties, não há aqui uma transição a ser modelada como ação de domínio. Um `<select>` de
+  status é, portanto, a representação honesta do contrato real, não um atalho. Ver `LeadForm`
+  (Prompt 044) como exemplo aplicado. Se o backend algum dia introduzir uma máquina de estado
+  para Leads, esta exceção deixa de valer e a UI deve passar a expor ações explícitas, como em
+  Properties.
 
 ## Componentes shadcn
 

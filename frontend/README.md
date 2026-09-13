@@ -56,10 +56,13 @@ na inicialização se algo estiver ausente/inválido) — nenhum outro módulo l
 `import.meta.env` diretamente (regra reforçada por ESLint, ver `CLAUDE.md`).
 
 `VITE_TENANT_ID` é **opcional** no boot da aplicação — a Home continua funcionando sem ele.
-Só é exigido pela página `/properties` (feature Properties, Tenant Data Plane), que mostra um
-estado dedicado ("Tenant de desenvolvimento não configurado.") e não faz nenhuma requisição
-quando ele está ausente ou inválido. Deve ser o UUID de um tenant `READY` provisionado
-localmente (ver `backend/README.md`, seção "Testando Properties").
+Só é exigido pelas páginas `/properties` e `/leads` (features Tenant Data Plane), que mostram
+um estado dedicado ("Tenant de desenvolvimento não configurado.") e não fazem nenhuma
+requisição quando ele está ausente ou inválido. Deve ser o UUID de um tenant `READY`
+provisionado localmente (ver `backend/README.md`, seções "Testando Properties"/"Testando
+Leads") — e, para `/leads`, um tenant provisionado a partir do Prompt 043 do backend em diante
+(`schemaVersion` 8+, com a tabela `leads`); um tenant mais antigo é `READY` mas não tem essa
+tabela.
 
 ## Architecture summary
 
@@ -76,13 +79,16 @@ src/
 │   ├── ui/             gerado/adaptado do shadcn — nunca lógica de negócio
 │   └── common/          componentes genéricos da aplicação
 ├── features/
-│   └── properties/     catálogo de imóveis (api/components/schemas/hooks/lib) — primeira
-│                        feature real; demais features (Tenants/Auth) ainda não começaram
+│   ├── properties/     catálogo de imóveis (api/components/schemas/hooks/lib) — primeira
+│   │                    feature real
+│   └── leads/           leads comerciais (api/components/schemas/hooks/lib) — segunda feature;
+│                        Tenants/Auth ainda não começaram
 ├── lib/
 │   ├── env.ts           único ponto de leitura de import.meta.env
 │   └── http/             apiFetch() + ApiError — fetch nativo, sem Axios
 ├── pages/               composição de features/rotas — HomePage, PropertiesPage,
-│                        PropertyDetailsPage, NewPropertyPage, EditPropertyPage, NotFoundPage
+│                        PropertyDetailsPage, NewPropertyPage, EditPropertyPage, LeadsPage,
+│                        LeadDetailsPage, NewLeadPage, EditLeadPage, NotFoundPage
 ├── styles/              CSS global (Tailwind + tokens shadcn)
 ├── test/                setup do Vitest + renderWithProviders()
 └── main.tsx
@@ -93,10 +99,11 @@ navegável/compartilhável → URL; estado de UI local → `useState`/`useReduce
 deliberadamente **não instalado** — só entra quando surgir uma necessidade real de estado
 cliente global cruzando features.
 
-**Rotas hoje**: `/` (home mínima, com um link "Ver imóveis"), `/properties` (catálogo),
-`/properties/:id` (detalhe), `/properties/new` (criação), `/properties/:id/edit` (edição —
-inclui a gestão de fotos, ver abaixo) e `*` (404). Sem dashboard, sem tenants, sem login, sem
-exclusão/arquivamento de imóvel pela UI ainda.
+**Rotas hoje**: `/` (home mínima, com links "Ver imóveis"/"Ver leads"), `/properties`
+(catálogo), `/properties/:id` (detalhe), `/properties/new` (criação), `/properties/:id/edit`
+(edição — inclui a gestão de fotos, ver abaixo), `/leads` (listagem), `/leads/:id` (detalhe),
+`/leads/new` (criação), `/leads/:id/edit` (edição) e `*` (404). Sem dashboard, sem tenants, sem
+login, sem exclusão/arquivamento de imóvel ou de lead pela UI ainda.
 
 **UI**: Tailwind CSS v4 + shadcn/ui (`components.json`, alias `@/*` → `src/*` consistente em
 TypeScript/Vite/Vitest/shadcn). Componentes instalados: `button`, `card`, `input`, `label`,
@@ -329,3 +336,80 @@ para reaproveitar `tenantId`/`propertyId`/validação de rota já resolvidos por
 - **R2/object storage**: o frontend nunca acessa Cloudflare R2 diretamente, nunca gera
   object keys, nunca instala um SDK de storage (`@aws-sdk/client-s3` etc.) — toda URL exibida
   já vem pronta na resposta da API de mídia.
+
+### Leads (`/leads`, `/leads/new`, `/leads/:id`, `/leads/:id/edit`)
+
+Fundação frontend sobre a API de Leads já existente no backend
+(`backend/src/modules/leads/http/lead-routes.ts`, sem alterações nesta tarefa) — ciclo
+listagem/filtros/detalhe/criação/edição parcial, **sem exclusão**. Feature isolada em
+`src/features/leads/` (api/components/hooks/schemas/lib), nunca misturada com `properties/`.
+
+- **Contratos verificados diretamente no backend** antes de implementar (rotas, schemas Zod de
+  request/response, `lead-openapi.schema.ts`) — nunca assumidos só a partir de um prompt.
+  `snake_case` em todo o payload; `POST`/`PATCH` respondem com o `Lead` "raso" (sem `property`);
+  `GET` (lista e detalhe) respondem com `LeadWithProperty` (`property: {id, title, status} |
+  null`, carregado por um único `LEFT JOIN` no backend).
+- **Status**: `NEW`/`CONTACTED`/`QUALIFIED`/`WON`/`LOST` (labels: Novo/Contatado/Qualificado/
+  Convertido/Perdido, centralizados em `LEAD_STATUS_LABELS`). Diferente de Properties: o
+  backend não tem máquina de estado para Leads (`PATCH` aceita qualquer status a partir de
+  qualquer status), então o formulário de edição expõe um `<select>` de status cru mesmo — não
+  é a mesma decisão de `PropertyLifecycleActions`, e o motivo (ausência de regra de transição no
+  backend) está documentado no próprio código (`LeadForm.tsx`).
+- **Source**: `MANUAL`/`WEBSITE`/`WHATSAPP`/`PORTAL`/`OTHER` (labels: Manual/Site/WhatsApp/
+  Portal/Outro, `LEAD_SOURCE_LABELS`) — escolhível já no create, ao contrário de `status`.
+- **Invariante de contato**: um lead precisa de pelo menos `email` ou `phone`. O formulário
+  (`leadFormSchema`) valida essa regra sobre o estado **resultante** completo (React Hook Form
+  já mantém o objeto inteiro, existente + editado) — a mesma regra vale em create e em edit, sem
+  lógica de merge separada. O backend continua sendo a autoridade final; o cliente só evita uma
+  chamada que já sabe que falharia.
+- **Listagem** (`useLeads`, `listLeads()`): filtros na URL (`?q=&status=&source=&created_from=&
+  created_to=&property_id=&page=`) — mesma convenção de Properties (link copiado reproduz o
+  resultado). `q` busca por nome/email/telefone (substring, não full-text). `created_from`/
+  `created_to` são datas simples (`<input type="date">`) na URL; a conversão para o
+  ISO-8601-com-offset que a API espera (início/fim do dia em **UTC**, nunca fuso local — ver
+  `lib/lead-date-range.ts`) acontece só dentro de `listLeads()`. `sort`/`order` não têm controle
+  visual nesta primeira versão — a ordenação default do backend (`created_at desc`) é sempre
+  usada. `property_id` também não tem controle visual (ver "Associação com imóvel" abaixo), mas
+  continua parseável da URL. Parâmetro desconhecido é descartado silenciosamente, nunca quebra a
+  página. Cada linha mostra nome/status/origem/email/phone/imóvel (se houver)/data de criação —
+  nunca `message`/`notes` completos.
+- **Detalhe** (`useLead`, `getLeadById()`): exatamente uma chamada `GET /leads/:id` por
+  carregamento — o resumo de `property` já vem embutido na resposta, **nunca** uma chamada
+  adicional a `GET /properties/:id` (isso é distinto do resumo `cover` de Properties, que só
+  existe na listagem; para Leads, tanto a listagem quanto o detalhe trazem `property`). O título
+  do imóvel associado é um `Link` para `/properties/:id`. `mailto:`/`tel:` só renderizam quando o
+  respectivo campo existe.
+- **Criação** (`/leads/new`, `useCreateLead`): `status` nunca aparece no formulário de criação
+  nem é enviado no payload (`toCreateLeadInput()` remove o campo antes do `POST` — o backend
+  rejeitaria a chave com 400 mesmo que fosse enviada, já que sempre cria como `NEW`). Sucesso
+  invalida `["leads", tenantId]` e navega para `/leads/:id` do lead criado.
+- **Edição** (`/leads/:id/edit`, `useUpdateLead`): mesma estratégia de hidratação única de
+  `PropertyForm` (`defaultValues`, nunca `values` controlado — um refetch em background nunca
+  sobrescreve uma edição em andamento). `PATCH` envia só os campos que `formState.dirtyFields`
+  marcou (`pickDirtyLeadFormFields()`) — campo não tocado fica de fora; campo nullable limpo vai
+  como `null` explícito. Salvar sem nenhuma alteração nunca chama a API (botão desabilitado
+  enquanto `!isDirty`). **A resposta do `PATCH` nunca é usada para atualizar o cache do detalhe
+  diretamente** (diferente de `useUpdateProperty`) — como essa resposta é o `Lead` "raso" (sem
+  `property`), gravá-la no cache apagaria o resumo do imóvel até o próximo refetch não
+  relacionado; em vez disso, sucesso **invalida** o cache do detalhe (forçando um `GET` real, o
+  único lugar onde o resumo é computado) e o da listagem.
+- **Associação com imóvel** (campo opcional do formulário): o frontend ainda não tem um
+  endpoint de busca de propriedades dedicado, então o campo é um `<select>` alimentado por uma
+  única chamada `GET /api/v1/properties?limit=100` (`listPropertyOptions()`,
+  `usePropertyOptions`) — o maior `limit` que o backend aceita, nunca todas as páginas. Se o
+  tenant tiver mais de 100 propriedades, um aviso ("Mostrando os N imóveis mais recentes")
+  aparece no formulário em vez de fingir que a lista é completa. O imóvel já associado a um lead
+  em edição sempre aparece como opção, mesmo que tenha ficado fora dessa página ou que a busca
+  falhe (o resumo já vem do próprio `GET /leads/:id`, nunca uma segunda requisição). Esse cache
+  (`["lead-property-options", tenantId]`) é deliberadamente separado do cache de leads — uma
+  mutação de lead nunca o invalida.
+- Erro de mutation (create ou edit) mostra uma mensagem fixa e segura no próprio formulário
+  ("Não foi possível criar/salvar o lead.") — nunca o corpo bruto do erro; sucesso também mostra
+  um toast.
+- **PII**: nomes/e-mails/telefones/mensagens/observações aparecem na tela (é a tela
+  administrativa do lead), mas nunca em `console.log`, nunca em query key do TanStack Query
+  (só `tenantId`/`id`/filtros estruturados) e nunca em `localStorage`/`sessionStorage`.
+- **Fora de escopo**: exclusão de lead, kanban/funil, atividades/tarefas/lembretes/agenda,
+  automações, integração real com WhatsApp/e-mail/portais (o `source` é só uma origem
+  classificatória), importação, lead scoring/IA, propostas, visitas, autenticação, corretor/
+  atribuição responsável.
