@@ -915,6 +915,89 @@ que o recurso existe em outro database) e o registro em A permanece intacto — 
 lendo o estado real de A após a tentativa de B, e confirmando que A ainda consegue
 atualizar/arquivar seu próprio recurso normalmente em seguida.
 
+## Leads (Prompt 043)
+
+**IMPLEMENTED** — segundo módulo de domínio no Tenant Data Plane (`src/modules/leads/`),
+fundação síncrona (sem Redis/BullMQ/outbox) para o futuro fluxo comercial. Ciclo
+create/read/list/update — **sem exclusão** (nem física, nem por status; a decisão de
+soft-delete/arquivamento/anonimização de um lead fica para uma tarefa futura, LGPD incluída).
+
+```text
+POST   /api/v1/leads
+GET    /api/v1/leads
+GET    /api/v1/leads/:id
+PATCH  /api/v1/leads/:id
+```
+
+Mesmo pipeline fixo de Properties: `resolveTenantContext` → `TenantDatabaseResolver` →
+`TenantDatabaseConnectionManager.withTenantDatabase` → repositórios tipados só com o schema do
+Tenant Data Plane → use case (sem SQL na camada de aplicação).
+
+**Schema** (`src/infrastructure/database/tenant/schema.ts`) — tabela `leads`, **sem coluna
+`tenant_id`** (mesmo boundary de isolamento físico do database, ADR-001). Campos: `name`
+(obrigatório), `email`/`phone` (nullable — ver invariante de contato abaixo), `property_id`
+(nullable, FK para `properties.id`, `ON DELETE SET NULL` — um lead tem valor comercial
+independente do imóvel que o originou; a exclusão/arquivamento de uma propriedade nunca deve
+apagar o histórico do lead), `status` (`lead_status`: `NEW`/`CONTACTED`/`QUALIFIED`/`WON`/
+`LOST`, `NOT NULL DEFAULT 'NEW'`, deliberadamente sem estados de funil mais ricos ainda — sem
+máquina de estado: qualquer status pode mudar para qualquer outro via PATCH), `source`
+(`lead_source`: `MANUAL`/`WEBSITE`/`WHATSAPP`/`PORTAL`/`OTHER`, `NOT NULL DEFAULT 'MANUAL'`,
+escolhível pelo cliente no create — ao contrário de `status`), `message`/`notes` (texto livre,
+nullable), timestamps `TIMESTAMPTZ`. Índices: `(created_at DESC, id DESC)`, `status`, `source`,
+`property_id` — sem índice para `q` (ILIKE, não full-text search, seção 33 do prompt).
+
+**Invariante de contato**: um lead precisa ter pelo menos um de `email`/`phone`. Aplicada em
+duas camadas independentes (seção 48/49 do Prompt 043): (1) a camada de aplicação
+(`update-lead.ts`) carrega o lead existente e calcula o estado **resultante** — payload parcial
+mesclado ao valor persistido — antes de validar, nunca validando só os campos enviados
+isoladamente; (2) uma `CHECK` constraint no banco (`leads_contact_channel_required`) como
+barreira de último recurso, cuja violação (`23514`) é capturada por
+`isCheckViolation()` (`postgres-errors.ts`) e remapeada para `LeadContactChannelRequiredError`
+— nunca um 500 bruto. Um create que já nasceria sem os dois campos é rejeitado antes disso pelo
+próprio Zod (`createLeadBodySchema`).
+
+**Associação opcional com Property**: `property_id`, quando informado (create ou update), é
+validado contra o `PropertyRepository` do **mesmo** database do tenant já resolvido —
+`LeadPropertyNotFoundError` (404) se não existir. Sem restrição de status: um lead pode
+referenciar uma propriedade `INACTIVE` normalmente (arquivar uma propriedade não invalida leads
+já vinculados a ela). `GET /api/v1/leads` e `GET /api/v1/leads/:id` incluem um resumo
+`property: {id, title, status} | null` carregado via um único `LEFT JOIN` — nunca uma consulta
+por lead (nunca N+1), nunca a Property completa, nunca mídia. As respostas de create/update
+nunca incluem `property` (mesma assimetria que `cover` já estabeleceu para Properties, mas
+invertida: aqui é a listagem/detalhe que ganha o enriquecimento, não a listagem sozinha).
+
+**Filtros** (`GET /api/v1/leads`, combinados com AND): `status`, `source`, `property_id`
+(iguais), `created_from`/`created_to` (intervalo ISO-8601 inclusivo, validado
+`created_from <= created_to`), `q` (substring case-insensitive via `ILIKE` sobre
+`name`/`email`/`phone` — nunca full-text search). Paginação `page`/`limit` (mesma convenção de
+Properties/Tenants). Ordenação: `sort` (`created_at`/`updated_at`/`name`/`status`, default
+`created_at`) + `order` (`asc`/`desc`, default `desc`), sempre com `id` como desempate.
+Parâmetro de query desconhecido é rejeitado com 400 (`.strict()` no schema Zod). Listagem
+sempre exatamente 1 query de dados (com o `LEFT JOIN`) + 1 query de `count` — nunca N+1.
+
+**PII**: leads carregam dados pessoais (`name`/`email`/`phone`/`message`/`notes`). Os handlers
+HTTP (`lead-routes.ts`) nunca logam esses campos em log de rotina — apenas `operation`,
+`tenantId`, `leadId` e classificadores não sensíveis (`source`/`status`). LGPD/anonimização/
+retenção de PII é uma lacuna conhecida e documentada, **não implementada nesta tarefa** — ver
+`CLAUDE.md`.
+
+**Migration**: `drizzle/tenant/0007_thankful_kinsey_walden.sql` (tipos `lead_status`/
+`lead_source`, tabela `leads`), puramente aditiva. `schemaVersion` passa a 8 em qualquer tenant
+database migrado a partir desta tarefa.
+
+**IMPLEMENTED** — isolamento A/B provado em nível HTTP e em nível de repositório
+(`src/modules/leads/http/lead-routes.test.ts`,
+`src/modules/leads/infrastructure/drizzle-lead-repository.test.ts`): um lead criado no tenant A
+é invisível via `GET`/listagem/`PATCH` do tenant B (404, nunca um vazamento); um `property_id`
+de uma propriedade do tenant A nunca pode ser associado a um lead do tenant B (também 404 — a
+consulta de existência da propriedade roda inteiramente dentro do database do tenant B, nunca
+cruza para o de A).
+
+**Fora do escopo desta tarefa** (deliberado — ver Prompt 043): frontend, autenticação/RBAC,
+atribuição de corretor, kanban/funil, atividades/tarefas/lembretes/agenda, automações,
+integrações (WhatsApp/e-mail/portais), importação, lead scoring/IA, análise financeira,
+propostas, visitas, outbox de integração, exclusão física de lead.
+
 ## Redis / BullMQ
 
 Redis está disponível localmente (Docker Compose) e no CI. **IMPLEMENTED**: a fila

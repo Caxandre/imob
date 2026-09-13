@@ -125,6 +125,22 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   documentation examples, or PR descriptions. Ver `.gitignore` (`.local/`) e
   `local-file-secret-store.ts` (Prompt 039) — mensagens de erro nunca incluem o conteúdo do
   arquivo nem valores de secret, apenas o caminho e uma razão fixa e não sensível.
+- Leads são entidades do Tenant Data Plane, sem coluna `tenant_id` — mesmo boundary de
+  isolamento físico do database que toda outra tabela de domínio (`properties` incluída). Ver
+  `leads` (`src/infrastructure/database/tenant/schema.ts`, Prompt 043).
+- A invariante "lead precisa ter pelo menos um de email/telefone" deve ser validada contra o
+  estado **resultante** de uma atualização parcial (PATCH) — o lead existente mesclado ao
+  payload enviado — nunca só os campos presentes no payload isoladamente. Ver `update-lead.ts`
+  (Prompt 043) como exemplo aplicado.
+- Dados pessoais de um lead (`name`/`email`/`phone`/`message`/`notes`) nunca devem aparecer em
+  log de rotina. Ver `lead-routes.ts` (Prompt 043) como exemplo aplicado: logs de
+  create/update de lead carregam apenas identificadores e classificadores não sensíveis
+  (`leadId`/`tenantId`/`source`/`status`).
+- A associação opcional de um lead com uma Property deve ser resolvida exclusivamente dentro
+  do database do tenant atual, já resolvido pelo `TenantDatabaseResolver`/
+  `TenantDatabaseConnectionManager` — nunca contra outro tenant, e nunca aceitando um
+  `property_id` sem essa verificação de existência. Ver `create-lead.ts`/`update-lead.ts`
+  (Prompt 043) como exemplo aplicado.
 
 ## Multi-tenancy — regra crítica
 

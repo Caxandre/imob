@@ -6,6 +6,14 @@ import fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { controlPlaneDb } from "../infrastructure/database/control-plane/client.js";
 import { createLoggerOptions } from "../infrastructure/logger/logger.js";
 import type { ObjectStorage } from "../infrastructure/object-storage/object-storage.js";
+import { leadRoutes } from "../modules/leads/http/lead-routes.js";
+import {
+  createLeadRequestSchema,
+  leadListSchema,
+  leadSchema,
+  leadWithPropertySchema,
+  updateLeadRequestSchema,
+} from "../modules/leads/http/lead-openapi.schema.js";
 import { propertyRoutes } from "../modules/properties/http/property-routes.js";
 import {
   createPropertyRequestSchema,
@@ -139,6 +147,13 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
             "description on each operation; this is development/integration scaffolding, " +
             "not authentication.",
         },
+        {
+          name: "Leads",
+          description:
+            "Commercial leads, scoped to a single tenant's own database (Tenant Data Plane). " +
+            "Every route requires the temporary X-Tenant-Id header, same as Properties. A " +
+            "lead may optionally reference a property in this same tenant's database.",
+        },
       ],
     },
   });
@@ -165,6 +180,11 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(propertyMediaListSchema);
   app.addSchema(uploadPropertyMediaRequestSchema);
   app.addSchema(reorderPropertyMediaRequestSchema);
+  app.addSchema(createLeadRequestSchema);
+  app.addSchema(updateLeadRequestSchema);
+  app.addSchema(leadSchema);
+  app.addSchema(leadWithPropertySchema);
+  app.addSchema(leadListSchema);
 
   void app.register(healthRoute);
 
@@ -178,6 +198,10 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
       tenantDatabaseConnectionManager: deps.tenantDatabaseConnectionManager,
       objectStorage: deps.objectStorage,
     }),
+    { prefix: "/api/v1" },
+  );
+  void app.register(
+    leadRoutes({ tenantDatabaseResolver, tenantDatabaseConnectionManager: deps.tenantDatabaseConnectionManager }),
     { prefix: "/api/v1" },
   );
 

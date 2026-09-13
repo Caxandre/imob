@@ -200,9 +200,10 @@ describe("Tenant Data Plane — migrations and permissions", () => {
 
     const result = await runTenantMigrations(target);
 
-    expect(result.schemaVersion).toBe(7);
+    expect(result.schemaVersion).toBe(8);
     await expect(listPublicTables(databaseName)).resolves.toEqual([
       "audit_logs",
+      "leads",
       "outbox_events",
       "properties",
       "property_media",
@@ -234,6 +235,7 @@ describe("Tenant Data Plane — migrations and permissions", () => {
     expect(results[0]).toEqual(results[1]);
     await expect(listPublicTables(databaseName)).resolves.toEqual([
       "audit_logs",
+      "leads",
       "outbox_events",
       "properties",
       "property_media",
