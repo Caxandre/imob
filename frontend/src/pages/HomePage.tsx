@@ -8,8 +8,10 @@ import { Separator } from "@/components/ui/separator";
 /**
  * Temporary landing page (this task, section 21) — proves the toolchain (React, Tailwind,
  * shadcn/ui) works end to end. Still no property/tenant data or API call of its own (section
- * 73) — the "Ver imóveis" link (Prompt 037B, section 7) is the only addition, and `/properties`
- * keeps working without a configured tenant on its own (it renders a dedicated state instead).
+ * 73) — the "Ver imóveis" link (Prompt 037B, section 7) and the "Ver leads" link (Prompt 044,
+ * section 6 — no dedicated app shell/nav exists yet, so a simple link is added here rather than
+ * redesigning one) are the only additions, and both `/properties` and `/leads` keep working
+ * without a configured tenant on their own (each renders its own dedicated state instead).
  */
 export function HomePage() {
   return (
@@ -25,9 +27,12 @@ export function HomePage() {
           <Badge variant="secondary">ready</Badge>
         </CardContent>
         <Separator />
-        <CardContent>
+        <CardContent className="flex flex-col gap-2">
           <Link to="/properties" className="text-sm text-primary underline underline-offset-4">
             Ver imóveis
+          </Link>
+          <Link to="/leads" className="text-sm text-primary underline underline-offset-4">
+            Ver leads
           </Link>
         </CardContent>
       </Card>
