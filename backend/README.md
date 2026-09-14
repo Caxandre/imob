@@ -403,6 +403,49 @@ Redis/BullMQ/outbox, então `pnpm dev` sozinho já é suficiente para testá-lo 
 (`pnpm dev:full` só é necessário se você também quiser exercitar o provisioning de um tenant
 novo no mesmo terminal).
 
+### Testando a captura pública de lead (requer `pnpm dev:full` e um tenant READY)
+
+Endpoint distinto do administrativo acima — **`POST /api/v1/leads` é criação administrativa/
+manual; `POST /api/v1/public/properties/{propertyId}/leads` é a captura de interesse do site**,
+sem autenticação de usuário/corretor. `X-Tenant-Id` continua sendo o mesmo mecanismo temporário
+de roteamento de tenant — "público" aqui significa apenas "sem login", nunca uma resolução de
+tenant pronta para produção (descoberta por hostname/subdomínio/slug é `PLANNED`, ver
+`ARCHITECTURE.md`).
+
+```text
+Swagger UI (com pnpm dev:full em execução)
+  → Properties → POST /api/v1/properties → criar um imóvel com "status": "ACTIVE"
+  → Public Leads → POST /api/v1/public/properties/{propertyId}/leads → Try it out
+    → preencher X-Tenant-Id → propertyId do imóvel ACTIVE criado acima
+    → body: {"name": "...", "email" e/ou "phone": "...", "message": "..."} → Execute
+    → conferir 201 com resposta mínima: apenas {"id": "..."} — nunca status/source/notes/
+      property/PII ecoada
+    → tentar enviar "status"/"source"/"notes"/"property_id" no body → conferir 400 (campo
+      desconhecido, contrato próprio e restrito)
+    → remover email e phone do body → conferir 400 (mesma invariante de contato do Lead
+      administrativo)
+  → Leads → GET /api/v1/leads → Try it out (mesmo tenant) → conferir o lead criado com
+    "status": "NEW", "source": "WEBSITE", "property_id" apontando para o imóvel usado, e
+    "notes": null
+  → repetir a captura com um imóvel "status": "DRAFT" ou já arquivado ("INACTIVE") →
+    conferir 404 em ambos os casos, idêntico ao de um propertyId inexistente (nunca revela que
+    o imóvel existe mas não está publicado)
+  → repetir a mesma chamada 6 vezes em menos de um minuto → a partir da 6ª, conferir 429
+    (rate limit de 5 requisições/minuto por IP, só nesta rota — ver "Rate limiting" abaixo)
+```
+
+**Rate limiting**: implementado com [`@fastify/rate-limit`](https://github.com/fastify/fastify-rate-limit)
+(compatível com Fastify 5 a partir da major 10), registrado com `global: false` em
+`build-app.ts` — nenhuma outra rota é afetada, só esta (`config: { rateLimit: { max: 5,
+timeWindow: "1 minute" } }`). Store em memória por processo (nenhuma opção `redis` passada): uma
+primeira barreira real em desenvolvimento/instância única, **não** uma garantia distribuída
+entre múltiplos processos do servidor — o Redis que este projeto já usa para BullMQ não foi
+acoplado ao rate limit sem antes revisar a topologia compartilhada, uma decisão deliberada desta
+tarefa, documentada também em `ARCHITECTURE.md`/`CLAUDE.md`. A chave é o IP do cliente
+(`request.ip`, default do plugin) — confiável apenas porque este servidor nunca habilita a opção
+`trustProxy` do Fastify; um deploy real atrás de um proxy reverso exigirá essa decisão consciente
+antes desta rota poder ser considerada pronta para produção.
+
 Rotas documentadas hoje: `GET /health` (tag **System**), `POST/GET /api/v1/tenants` e
 `GET /api/v1/tenants/{id}` (tag **Tenants** — ambos `GET` são administrativos, só o Control
 Plane, sem autenticação ainda; ver `ARCHITECTURE.md`), `POST/GET /api/v1/properties`,
@@ -414,12 +457,16 @@ arquiva (`status = INACTIVE`), nunca exclui fisicamente; `DELETE .../media/{medi
 fisicamente um único item da galeria (metadata primeiro, objeto no R2 depois, best-effort — ver
 [ADR-007](docs/architecture/adr/ADR-007-property-media-consistency.md)). As três rotas de
 galeria (reorder/capa/exclusão) continuam permitidas mesmo com a propriedade arquivada — só o
-upload de mídia nova é bloqueado por arquivamento. E `POST/GET /api/v1/leads`,
+upload de mídia nova é bloqueado por arquivamento. `POST/GET /api/v1/leads`,
 `GET/PATCH /api/v1/leads/{id}` (tag **Leads**) — sem `DELETE`, sem fila, `status` sempre `NEW`
 no create e livre para qualquer valor via `PATCH` (sem máquina de estado); um lead precisa de
 pelo menos `email` ou `phone`, sempre validado contra o estado resultante, nunca só o payload
-parcial enviado. Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui — o
-Swagger descreve apenas a interface HTTP pública.
+parcial enviado. E `POST /api/v1/public/properties/{propertyId}/leads` (tag **Public Leads**) —
+sem autenticação, contrato próprio e restrito (`name`/`email`/`phone`/`message` apenas), sempre
+cria `status: NEW`/`source: WEBSITE` vinculado ao imóvel da URL, só aceita imóvel `ACTIVE`
+(`DRAFT`/`INACTIVE` respondem 404, igual a um imóvel inexistente), resposta mínima (`{id}`), e
+rate-limited (5/min/IP). Nenhuma rota interna de worker/dispatcher/provisioning é exposta aqui —
+o Swagger descreve apenas a interface HTTP pública.
 
 ## Cloudflare R2 (object storage)
 

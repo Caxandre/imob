@@ -63,6 +63,25 @@ export class LeadPropertyNotFoundError extends Error {
 }
 
 /**
+ * Raised by the public property lead-capture flow (Prompt 045, sections 13-16) when the
+ * requested property either does not exist in the current tenant's database, or exists but is
+ * not `ACTIVE` (`DRAFT`/`INACTIVE`). Both cases are deliberately unified into this single error
+ * — a public, unauthenticated visitor must never be able to distinguish "this property doesn't
+ * exist" from "this property exists but isn't published yet/anymore" (section 16): revealing
+ * the latter would leak the existence of unpublished inventory. Maps to 404
+ * (`lead-error-mapper.ts`), identically to a genuinely missing property.
+ */
+export class PublicPropertyNotFoundError extends Error {
+  readonly propertyId: string;
+
+  constructor(propertyId: string) {
+    super(`Property "${propertyId}" was not found`);
+    this.name = "PublicPropertyNotFoundError";
+    this.propertyId = propertyId;
+  }
+}
+
+/**
  * Raised when an update would leave a lead with neither `email` nor `phone` (Prompt 043,
  * sections 14/48/49) — the invariant every lead must retain at least one contact channel.
  * Thrown by `update-lead.ts` after computing the *resulting* state (existing values merged with

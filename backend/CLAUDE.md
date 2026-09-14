@@ -141,6 +141,24 @@ imobiliária). Leia isto antes de implementar qualquer coisa.
   `TenantDatabaseConnectionManager` — nunca contra outro tenant, e nunca aceitando um
   `property_id` sem essa verificação de existência. Ver `create-lead.ts`/`update-lead.ts`
   (Prompt 043) como exemplo aplicado.
+- Public lead capture must use a dedicated restricted contract. Public clients must never be
+  allowed to choose lead status, source, notes, or arbitrary property_id values. Ver
+  `capturePropertyLeadBodySchema`/`capture-property-lead.ts` (Prompt 045) como exemplo
+  aplicado — schema `.strict()` próprio, nunca o schema administrativo relaxado.
+- Property lead capture always creates NEW leads with source WEBSITE and binds the lead to the
+  property identified by the route. Ver `capturePropertyLead()` (Prompt 045) como exemplo
+  aplicado — `property_id` nunca vem do body, sempre do parâmetro de rota.
+- Public property lead capture must not reveal the existence of DRAFT or INACTIVE properties;
+  unavailable properties return the same not-found semantics as missing properties. Ver
+  `PublicPropertyNotFoundError` (Prompt 045, domain/lead.ts) como exemplo aplicado — unifica
+  "não existe" e "existe mas não está ACTIVE" no mesmo 404.
+- Public lead request bodies contain PII and must never be emitted in routine logs. Ver
+  `public-lead-capture-routes.ts` (Prompt 045) como exemplo aplicado — logs de captura carregam
+  apenas `operation`/`tenantId`/`leadId`/`propertyId`, nunca `name`/`email`/`phone`/`message`.
+- X-Tenant-Id remains temporary routing context and must not be treated as authentication or
+  the final public tenant-discovery solution — verdadeiro tanto para rotas administrativas
+  quanto para rotas públicas (Prompt 045). Descoberta pública de tenant por hostname/subdomínio/
+  slug é PLANNED, não implementada.
 
 ## Multi-tenancy — regra crítica
 

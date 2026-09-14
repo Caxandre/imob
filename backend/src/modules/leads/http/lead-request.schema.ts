@@ -1,11 +1,27 @@
 import { z } from "zod";
 
 import { UUID_PATTERN } from "../../properties/http/property-request.schema.js";
+import {
+  CONTACT_CHANNEL_REQUIRED_MESSAGE,
+  MESSAGE_MAX_LENGTH,
+  NAME_MAX_LENGTH,
+  emailSchema,
+  optionalEmail,
+  optionalPhone,
+  optionalText,
+  phoneSchema,
+  requireContactChannel,
+} from "./lead-contact.schema.js";
 
-export const NAME_MAX_LENGTH = 120;
-export const EMAIL_MAX_LENGTH = 254;
-export const PHONE_MAX_LENGTH = 30;
-export const MESSAGE_MAX_LENGTH = 2000;
+// Re-exported so existing importers (`lead-openapi.schema.ts`) keep working unchanged after
+// these moved to the shared `lead-contact.schema.ts` (Prompt 045, section 8).
+export {
+  EMAIL_MAX_LENGTH,
+  MESSAGE_MAX_LENGTH,
+  NAME_MAX_LENGTH,
+  PHONE_MAX_LENGTH,
+} from "./lead-contact.schema.js";
+
 export const NOTES_MAX_LENGTH = 2000;
 export const DEFAULT_PAGE_LIMIT = 20;
 export const MAX_PAGE_LIMIT = 100;
@@ -21,48 +37,11 @@ export const LEAD_SOURCES = ["MANUAL", "WEBSITE", "WHATSAPP", "PORTAL", "OTHER"]
 export const LEAD_SORT_FIELDS = ["created_at", "updated_at", "name", "status"] as const;
 export const SORT_ORDERS = ["asc", "desc"] as const;
 
-// Conservative, shallow validation (Prompt 043, section 13) — digits and standard phone
-// punctuation only, never an attempt to parse/normalize DDI/DDD or install an international
-// phone number library for this foundation.
-const PHONE_PATTERN = /^[0-9+()\-.\s]+$/;
-
-const emailSchema = z
-  .string()
-  .trim()
-  .toLowerCase()
-  .max(EMAIL_MAX_LENGTH, `email must be at most ${EMAIL_MAX_LENGTH} characters`)
-  .pipe(z.email("email must be a valid email address"));
-
-const phoneSchema = z
-  .string()
-  .trim()
-  .min(1, "phone must not be empty")
-  .max(PHONE_MAX_LENGTH, `phone must be at most ${PHONE_MAX_LENGTH} characters`)
-  .regex(PHONE_PATTERN, "phone must contain only digits and standard phone punctuation");
-
-function optionalEmail() {
-  return emailSchema.nullish().transform((value) => value ?? null);
-}
-
-function optionalPhone() {
-  return phoneSchema.nullish().transform((value) => value ?? null);
-}
-
 function optionalUuid(fieldName: string) {
   return z
     .string()
     .trim()
     .regex(UUID_PATTERN, `${fieldName} must be a valid UUID`)
-    .nullish()
-    .transform((value) => value ?? null);
-}
-
-function optionalText(maxLength: number) {
-  return z
-    .string()
-    .trim()
-    .min(1)
-    .max(maxLength)
     .nullish()
     .transform((value) => value ?? null);
 }
@@ -109,10 +88,7 @@ export const createLeadBodySchema = z
     notes: optionalText(NOTES_MAX_LENGTH),
   })
   .strict()
-  .refine((body) => body.email !== null || body.phone !== null, {
-    message: "at least one contact channel (email or phone) is required",
-    path: ["email"],
-  });
+  .refine(requireContactChannel, { message: CONTACT_CHANNEL_REQUIRED_MESSAGE, path: ["email"] });
 
 export type CreateLeadBody = z.infer<typeof createLeadBodySchema>;
 
