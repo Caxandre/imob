@@ -6,7 +6,12 @@ import {
   TenantDatabaseRuntimeConfigurationError,
   TenantNotReadyError,
 } from "../../tenant-runtime/application/tenant-database-resolver.js";
-import { LeadContactChannelRequiredError, LeadNotFoundError, LeadPropertyNotFoundError } from "../domain/lead.js";
+import {
+  LeadContactChannelRequiredError,
+  LeadNotFoundError,
+  LeadPropertyNotFoundError,
+  PublicPropertyNotFoundError,
+} from "../domain/lead.js";
 
 export interface MappedHttpError {
   statusCode: number;
@@ -32,6 +37,13 @@ export function mapLeadRouteError(error: unknown): MappedHttpError | undefined {
   // `property_id` does not resolve to a property in this tenant's own database — the
   // association is the thing not found, not the lead itself (Prompt 043, section 27/64).
   if (error instanceof LeadPropertyNotFoundError) {
+    return { statusCode: 404, error: "Not Found", message: error.message };
+  }
+
+  // Public property lead capture: the property is missing OR not ACTIVE (Prompt 045, section
+  // 16) — both map to the exact same 404, deliberately never distinguishing the two so a
+  // visitor can never learn that a DRAFT/INACTIVE property exists.
+  if (error instanceof PublicPropertyNotFoundError) {
     return { statusCode: 404, error: "Not Found", message: error.message };
   }
 

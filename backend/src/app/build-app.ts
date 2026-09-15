@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import fastify, { type FastifyError, type FastifyInstance } from "fastify";
@@ -14,6 +15,11 @@ import {
   leadWithPropertySchema,
   updateLeadRequestSchema,
 } from "../modules/leads/http/lead-openapi.schema.js";
+import { publicLeadCaptureRoutes } from "../modules/leads/http/public-lead-capture-routes.js";
+import {
+  capturePropertyLeadRequestSchema,
+  capturePropertyLeadResponseSchema,
+} from "../modules/leads/http/public-lead-capture-openapi.schema.js";
 import { propertyRoutes } from "../modules/properties/http/property-routes.js";
 import {
   createPropertyRequestSchema,
@@ -121,6 +127,21 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
 
+  // Rate limiting (Prompt 045, sections 29-34) — registered with `global: false` so it applies
+  // to NO route by default; only routes that opt in via `config: { rateLimit: {...} }` (today,
+  // only the public property lead-capture route) are limited. No `redis` option is passed: this
+  // plugin's default in-memory store is a per-Fastify-instance counter — a real first barrier
+  // in development/single-instance deployments, but explicitly NOT a distributed guarantee
+  // across multiple server processes (this app runs as a single process today; a future
+  // horizontally-scaled deployment would need to revisit this, e.g. wiring the plugin's `redis`
+  // option to the Redis instance this project already runs for BullMQ — deliberately not done
+  // here per section 33/34, since that requires reviewing shared-topology concerns this task
+  // does not take on). Keyed by the plugin's default `request.ip`, which only reflects the real
+  // client because `fastify({...})` above never sets `trustProxy` — a real reverse-proxy
+  // deployment would need a conscious `trustProxy` decision this task deliberately does not
+  // make (section 32).
+  void app.register(rateLimit, { global: false });
+
   void app.register(swagger, {
     // Without this, every named schema below (registered via app.addSchema) would show up
     // in the spec's components.schemas as an opaque "def-0", "def-1", ... — the plugin's own
@@ -154,6 +175,15 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
             "Every route requires the temporary X-Tenant-Id header, same as Properties. A " +
             "lead may optionally reference a property in this same tenant's database.",
         },
+        {
+          name: "Public Leads",
+          description:
+            "Unauthenticated, visitor-facing lead capture. X-Tenant-Id is temporary tenant " +
+            "routing context here too — not authentication, and not the final public " +
+            "tenant-discovery mechanism (hostname/subdomain/slug resolution is PLANNED, not " +
+            "implemented). Distinct, restricted request contract from the administrative " +
+            "Leads API: no status/source/notes/property_id may be chosen by the client.",
+        },
       ],
     },
   });
@@ -185,6 +215,8 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   app.addSchema(leadSchema);
   app.addSchema(leadWithPropertySchema);
   app.addSchema(leadListSchema);
+  app.addSchema(capturePropertyLeadRequestSchema);
+  app.addSchema(capturePropertyLeadResponseSchema);
 
   void app.register(healthRoute);
 
@@ -202,6 +234,13 @@ export function buildApp(deps: BuildAppDependencies): FastifyInstance {
   );
   void app.register(
     leadRoutes({ tenantDatabaseResolver, tenantDatabaseConnectionManager: deps.tenantDatabaseConnectionManager }),
+    { prefix: "/api/v1" },
+  );
+  void app.register(
+    publicLeadCaptureRoutes({
+      tenantDatabaseResolver,
+      tenantDatabaseConnectionManager: deps.tenantDatabaseConnectionManager,
+    }),
     { prefix: "/api/v1" },
   );
 

@@ -998,6 +998,91 @@ atribuição de corretor, kanban/funil, atividades/tarefas/lembretes/agenda, aut
 integrações (WhatsApp/e-mail/portais), importação, lead scoring/IA, análise financeira,
 propostas, visitas, outbox de integração, exclusão física de lead.
 
+### Captura pública de interesse em imóvel (Prompt 045)
+
+**IMPLEMENTED** — contraparte pública, sem autenticação, de `POST /api/v1/leads`:
+
+```text
+Visitante visualiza um imóvel publicado
+    ↓
+POST /api/v1/public/properties/:propertyId/leads
+    ↓
+resolveTenantContext(request)         — X-Tenant-Id, mecanismo temporário (mesmo de sempre)
+    ↓
+TenantDatabaseResolver.resolve(tenantId) → TenantDatabaseConnectionManager.withTenantDatabase(...)
+    ↓
+capturePropertyLead()                 — application layer, src/modules/leads/application/
+    ↓
+PropertyRepository.findById(propertyId) — deve existir E status = ACTIVE, senão 404 uniforme
+    ↓
+LeadRepository.create({ propertyId, name, email, phone, message, source: "WEBSITE", notes: null })
+    ↓
+tabela leads (mesma do fluxo administrativo) — status NEW por default de coluna
+    ↓
+201 { id }                            — nunca o Lead administrativo completo
+```
+
+`capturePropertyLead()` (`src/modules/leads/application/capture-property-lead.ts`) é um caso de
+uso **próprio**, não construído em cima de `createLead()` — as regras de propriedade diferem
+genuinamente (opcional/qualquer status no fluxo administrativo; obrigatória/somente `ACTIVE`
+aqui), e um handler HTTP nunca chama outro handler HTTP internamente. Reaproveita exatamente os
+mesmos `LeadRepository`/`PropertyRepository` do fluxo administrativo — nenhum segundo
+repositório, nenhum SQL ad hoc no handler.
+
+**Contrato de request restrito e próprio** (`public-lead-capture-request.schema.ts`): apenas
+`name`/`email`/`phone`/`message`. `.strict()` rejeita qualquer campo administrativo
+(`status`/`source`/`notes`/`property_id`/`id`/`created_at`/`updated_at`) com 400 — nunca ignora
+silenciosamente. `property_id` nunca é aceito no body: o imóvel vem exclusivamente do parâmetro
+de rota (`:propertyId`), o que impede um client de enviar uma propriedade na URL e outra no
+body. A invariante de contato (email OU phone) e os campos `name`/`email`/`phone`/`message`
+reaproveitam os mesmos schemas Zod do fluxo administrativo
+(`lead-contact.schema.ts`, extraído nesta tarefa) — nunca uma segunda definição que poderia
+divergir.
+
+**Regra de disponibilidade da Property**: a captura pública só aceita um imóvel `ACTIVE`.
+`DRAFT`/`INACTIVE` respondem exatamente o mesmo 404 que um `propertyId` inexistente
+(`PublicPropertyNotFoundError`, `domain/lead.ts`) — uma decisão de segurança deliberada (nunca
+revelar a um visitante anônimo que um imóvel não publicado existe). O lookup da propriedade e o
+insert do lead são duas instruções separadas, **sem transação** e sem `SELECT ... FOR UPDATE`:
+uma janela de corrida onde o imóvel é arquivado entre as duas ainda produz um lead
+comercialmente válido (o visitante viu um imóvel disponível e agiu), então a consistência
+read-then-create é aceita conscientemente, não uma omissão.
+
+**Rate limiting** (`@fastify/rate-limit`, Prompt 045) — primeira rota com limite de taxa neste
+projeto. Registrado em `build-app.ts` com `global: false` (nenhuma outra rota é afetada);
+aplicado apenas nesta rota via `config: { rateLimit: { max: 5, timeWindow: "1 minute" } }`.
+Store em memória por instância do Fastify (nenhuma opção `redis` passada) — uma primeira
+barreira real em desenvolvimento/deploy de instância única, **não** uma garantia distribuída
+entre múltiplos processos; o Redis que este projeto já usa para BullMQ não foi acoplado ao
+rate limit sem antes revisar a topologia compartilhada (deliberado, não uma omissão — ver
+CLAUDE.md/README para o registro completo da decisão). Chave por `request.ip` (default do
+plugin), confiável apenas porque `trustProxy` nunca foi habilitado em `fastify({...})` — um
+deploy real atrás de um proxy reverso exigirá essa decisão consciente antes desta rota poder
+ser considerada pronta para produção.
+
+**Resposta minimizada**: `201 { id }` apenas — nunca o `Lead` administrativo completo (sem
+`status`/`source`/`notes`/`property_id`/timestamps), e nunca um eco do PII enviado
+(`name`/`email`/`phone`/`message`).
+
+**PII**: os mesmos campos pessoais do fluxo administrativo, mesma disciplina de log — a rota
+pública loga apenas `operation`/`tenantId`/`leadId`/`propertyId`, nunca o corpo da requisição.
+
+**Descoberta pública de tenant: PLANNED.** `X-Tenant-Id` continua sendo o mesmo mecanismo
+temporário já documentado para as rotas administrativas — "public" neste prompt significa
+apenas "sem autenticação de usuário/corretor", nunca "resolução de tenant pronta para produção".
+Soluções futuras possíveis (não escolhidas ainda): hostname customizado por tenant, subdomínio,
+ou slug público explícito na URL.
+
+**Isolamento A/B provado em nível HTTP**
+(`src/modules/leads/http/public-lead-capture-routes.test.ts`): uma propriedade `ACTIVE` do
+tenant A usada por uma requisição com o `X-Tenant-Id` do tenant B retorna 404 (a consulta de
+existência roda inteiramente dentro do database de B) e nenhum lead é criado em B.
+
+**Fora do escopo desta tarefa** (deliberado — ver Prompt 045): CAPTCHA, honeypot, deduplicação/
+idempotency key, notificação ao corretor (e-mail/Slack/WhatsApp), resposta automática ao
+visitante, outbox de integração (`LEAD_CREATED`), criação de `User`, autenticação, descoberta
+de tenant por hostname/slug, qualquer alteração no frontend.
+
 ## Redis / BullMQ
 
 Redis está disponível localmente (Docker Compose) e no CI. **IMPLEMENTED**: a fila
