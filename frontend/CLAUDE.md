@@ -140,6 +140,28 @@ específicas do frontend.
   `src/features/leads/` (Prompt 044) como exemplo aplicado — nenhum `console.log` do lead
   inteiro, query keys do TanStack Query carregam só `tenantId`/`id`/filtros estruturados (nunca
   nome/email/telefone), e nada da feature usa `localStorage`/`sessionStorage`/`IndexedDB`.
+- Public property interest forms must use only the restricted public lead-capture endpoint
+  (`POST /api/v1/public/properties/:propertyId/leads`). They must never call the administrative
+  `POST /leads` endpoint. Ver `capturePropertyLead()`/`PropertyInterestForm` (Prompt 046) como
+  exemplo aplicado — feature própria (`src/features/property-leads/`), nunca uma extensão da
+  feature administrativa `leads/`.
+- Public clients must never send lead `status`, `source`, `notes`, or `property_id`. Those
+  values are controlled entirely by the backend — `property_id` comes only from the URL, the
+  backend always forces `status: NEW`/`source: WEBSITE`/`notes: null`. Ver
+  `propertyInterestFormSchema`/`capturePropertyLead()` (Prompt 046): the request body type only
+  ever has `name`/`email`/`phone`/`message`, enforced by the schema's shape, not by manually
+  stripping keys.
+- Public lead capture contains PII and must not persist form values in browser storage or emit
+  them to logs. Ver `PropertyInterestForm` (Prompt 046) — no `console.log`, no
+  `localStorage`/`sessionStorage`, same discipline as the administrative Leads feature.
+- The public interest form is available only for `ACTIVE` properties, but the backend remains
+  the authority — a `404` from a stale/racy submission (property deleted or no longer `ACTIVE`
+  between page load and submit) must be handled as a normal contextual form error, never
+  converted into a full-page 404. Ver `PropertyInterestForm`/`mapPublicLeadCaptureError()`
+  (Prompt 046).
+- Public lead capture mutations must not invalidate administrative Lead caches (`leadKeys`) or
+  any Properties cache — the public surface and the administrative surface stay fully decoupled.
+  Ver `useCapturePropertyLead()` (Prompt 046): no `onSuccess` cache invalidation at all.
 - **Exceção documentada à regra de "nunca um `<select>` de status cru"** (ver
   `PropertyLifecycleActions` acima): para Leads, o backend não implementa nenhuma máquina de
   estado (`PATCH` aceita qualquer `status` a partir de qualquer `status` atual) — diferente de

@@ -16,6 +16,7 @@ import { TenantNotConfiguredState } from "@/features/properties/components/Tenan
 import { useProperty } from "@/features/properties/hooks/use-property";
 import { usePropertyMedia } from "@/features/properties/hooks/use-property-media";
 import { isValidPropertyId } from "@/features/properties/lib/is-valid-property-id";
+import { PropertyInterestForm } from "@/features/property-leads/components/PropertyInterestForm";
 
 /**
  * `/properties/:id` (Prompt 038, section 6): route param → hooks → composition. Never fetches
@@ -91,6 +92,14 @@ function PropertyDetailsPageContent({ tenantId, propertyId }: PropertyDetailsPag
         </div>
 
         <PropertyMainInfo property={property} />
+      </div>
+
+      <div className="max-w-xl">
+        <PropertyInterestForm
+          tenantId={tenantId}
+          propertyId={propertyId}
+          status={property.status}
+        />
       </div>
     </main>
   );
