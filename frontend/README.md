@@ -81,8 +81,11 @@ src/
 ├── features/
 │   ├── properties/     catálogo de imóveis (api/components/schemas/hooks/lib) — primeira
 │   │                    feature real
-│   └── leads/           leads comerciais (api/components/schemas/hooks/lib) — segunda feature;
-│                        Tenants/Auth ainda não começaram
+│   ├── leads/           leads comerciais (api/components/schemas/hooks/lib) — segunda feature
+│   └── property-leads/  formulário público "Tenho interesse" (api/components/schemas/hooks/
+│                        lib) — terceira feature; consome o endpoint público restrito de leads,
+│                        isolada da feature administrativa `leads/`; Tenants/Auth ainda não
+│                        começaram
 ├── lib/
 │   ├── env.ts           único ponto de leitura de import.meta.env
 │   └── http/             apiFetch() + ApiError — fetch nativo, sem Axios
@@ -230,6 +233,71 @@ Exatamente uma ação aparece por vez, conforme o `status` atual:
   necessidade real). O campo `status` permanece no schema/valores hidratados do formulário de
   edição — só não é renderizado — então nunca é marcado como alterado e nunca entra no payload
   do `PATCH` de edição.
+
+### Formulário público de interesse (dentro de `/properties/:id`)
+
+`PropertyInterestForm` (`src/features/property-leads/components/PropertyInterestForm.tsx`),
+seção separada do conteúdo administrativo em `PropertyDetailsPage` — um visitante sem login
+registra interesse no imóvel. Feature isolada em `src/features/property-leads/` (nunca
+reaproveita a feature administrativa `leads/`).
+
+- **Contrato verificado diretamente no backend** antes de implementar
+  (`backend/src/modules/leads/http/public-lead-capture-routes.ts`,
+  `public-lead-capture-request.schema.ts`, `capture-property-lead.ts`,
+  `lead-error-mapper.ts`) — nunca assumido só a partir de um prompt.
+  `POST /api/v1/public/properties/:propertyId/leads` via `capturePropertyLead()`
+  (`src/features/property-leads/api/capture-property-lead.ts`). Corpo enviado: **apenas**
+  `name`/`email`/`phone`/`message` — nunca `status`/`source`/`notes`/`property_id` (o backend
+  rejeita qualquer chave desconhecida com `400`, `property_id` vem só da URL). Resposta mínima
+  validada com Zod: `{ id: string }` (`201`) — nunca ecoa PII de volta.
+- **Schema de formulário dedicado**
+  (`src/features/property-leads/schemas/property-interest-form.schema.ts`, React Hook Form +
+  Zod) — deliberadamente **não** reaproveita `leadFormSchema` (schema administrativo): campos e
+  limites (nome até 120, e-mail até 254, telefone até 30 com o mesmo padrão conservador
+  `[0-9+()\-.\s]+`, mensagem até 2000) espelham o schema Zod real do backend
+  (`lead-contact.schema.ts`), verificado diretamente. Mesma invariante de contato dos Leads
+  administrativos — pelo menos `email` ou `phone` — validada sobre o estado completo do
+  formulário, mensagem "Informe pelo menos um e-mail ou telefone.".
+- **Normalização**: strings são aparadas (`trim`); um campo opcional vazio vira `null` antes do
+  envio — nunca string vazia desnecessária.
+- **Disponível só para imóvel `ACTIVE`**: `DRAFT`/`INACTIVE` mostram um texto discreto ("Este
+  imóvel não está disponível para novos contatos.") em vez dos campos — nunca escondem a seção
+  inteira. O backend continua sendo a autoridade final: se o status ficar desatualizado no
+  cliente e o envio for tentado mesmo assim, o `404` do backend (property inexistente **ou** não
+  `ACTIVE` — resposta deliberadamente idêntica nos dois casos) é tratado normalmente pelo
+  formulário, nunca convertido num 404 de página inteira.
+- **Sucesso**: sem navegação. O card é substituído por uma mensagem de confirmação
+  (`aria-live="polite"`) e um toast (`sonner`) — o formulário não reaparece nesta mesma
+  visualização (sem botão "Enviar outra mensagem" nesta primeira versão).
+- **Double-submit**: botão desabilitado durante o envio (`useMutation().isPending`) e o handler
+  de submit ignora uma segunda chamada enquanto uma mutation já está em voo — nunca duas
+  requisições. Sem retry automático (mutations do TanStack Query aqui não têm `retry`
+  configurado — nunca reenvia sozinho um `400`/`404`/`429`).
+- **Erros mapeados** por `mapPublicLeadCaptureError()`
+  (`src/features/property-leads/lib/map-public-lead-capture-error.ts`), central e único lugar
+  com `instanceof ApiError`/`.status` para esta feature:
+  - `400` → "Verifique os dados informados." (a validação local já cobre o caso comum).
+  - `404` → "Este imóvel não está disponível para receber novos contatos."
+  - `429` (rate limit, 5 requisições/minuto/IP no backend) → "Muitas tentativas em pouco tempo.
+    Aguarde um momento e tente novamente." — sem contagem regressiva inventada (o backend não
+    garante uma duração).
+  - `409`/`503` (tenant não pronto/infraestrutura indisponível) → mesma mensagem segura, sem
+    expor infraestrutura: "Não foi possível enviar seu interesse agora. Tente novamente mais
+    tarde."
+  - Qualquer outro caso → "Não foi possível enviar seu interesse."
+- **Tenant**: mesmo header temporário `X-Tenant-Id` das demais features Tenant Data Plane —
+  **não** é autenticação. Como `PropertyDetailsPage` já bloqueia a renderização inteira da
+  página quando `VITE_TENANT_ID` está ausente (mostrando o estado dedicado existente), o
+  formulário nunca chega a montar, e portanto nunca tenta enviar uma requisição, sem tenant.
+- **Cache**: a mutation **não invalida nada** — nem o catálogo/detalhe de Properties, nem
+  `leadKeys` (cache administrativo de Leads). O visitante público não precisa, e não deve,
+  influenciar o cache do painel administrativo.
+- **PII**: nome/e-mail/telefone/mensagem nunca são logados (`console.log`) nem persistidos em
+  `localStorage`/`sessionStorage`. Campos usam `autocomplete="name"/"email"/"tel"` para
+  preenchimento automático do navegador (isso não é persistência da aplicação).
+- **Fora de escopo nesta tarefa**: autenticação, link/botão de WhatsApp, CAPTCHA, honeypot,
+  analytics/tracking, e-mail de resposta automática, descoberta pública de tenant (o header
+  `X-Tenant-Id` continua temporário).
 
 ### Criação e edição de imóveis (`/properties/new`, `/properties/:id/edit`)
 
